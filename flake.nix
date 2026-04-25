@@ -26,7 +26,7 @@
 
           meta = with pkgs.lib; {
             description = "Cross-platform disk cleanup daemon with graduated thresholds";
-            homepage = "https://gitlab.com/tinyland/projects/tinyland-cleanup";
+            homepage = "https://github.com/Jesssullivan/tinyland-cleanup";
             license = licenses.mit;
             platforms = platforms.unix;
             mainProgram = "tinyland-cleanup";
@@ -35,7 +35,15 @@
 
         devShells.default = pkgs.mkShell {
           inputsFrom = [ self'.packages.default ];
-          packages = with pkgs; [ go_1_23 gopls golangci-lint ];
+          packages = with pkgs; [
+            bazelisk
+            buildifier
+            go_1_23
+            gopls
+            golangci-lint
+            just
+            ripgrep
+          ];
         };
       };
 

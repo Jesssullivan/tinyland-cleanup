@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 // RKE2Plugin handles RKE2/k3s containerd image and cache cleanup.

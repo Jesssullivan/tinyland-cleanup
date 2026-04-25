@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"runtime"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 // CleanupLevel represents the cleanup severity level.

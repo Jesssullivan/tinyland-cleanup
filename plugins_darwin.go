@@ -2,7 +2,7 @@
 
 package main
 
-import "gitlab.com/tinyland/lab/tinyland-cleanup/plugins"
+import "github.com/Jesssullivan/tinyland-cleanup/plugins"
 
 func registerLinuxPlugins(registry *plugins.Registry) {
 	// Linux-specific plugins are not available on Darwin

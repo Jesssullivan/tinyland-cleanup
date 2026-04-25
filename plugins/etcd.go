@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 // EtcdPlugin handles etcd snapshot and WAL cleanup for Kubernetes clusters.
@@ -95,10 +95,10 @@ func (p *EtcdPlugin) isEtcdPresent(cfg *config.Config) bool {
 
 // Default etcd configuration when cfg.Etcd is not yet implemented
 const (
-	defaultEtcdDataDir          = "/var/lib/rancher/rke2/server/db/etcd"
-	defaultEtcdWALRetentionDays = 7
+	defaultEtcdDataDir           = "/var/lib/rancher/rke2/server/db/etcd"
+	defaultEtcdWALRetentionDays  = 7
 	defaultEtcdSnapshotRetention = 5
-	defaultEtcdDefragThreshold  = 80
+	defaultEtcdDefragThreshold   = 80
 )
 
 func (p *EtcdPlugin) cleanOldWAL(ctx context.Context, cfg *config.Config, logger *slog.Logger) CleanupResult {

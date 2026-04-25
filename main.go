@@ -31,9 +31,9 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
-	"gitlab.com/tinyland/lab/tinyland-cleanup/monitor"
-	"gitlab.com/tinyland/lab/tinyland-cleanup/plugins"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/monitor"
+	"github.com/Jesssullivan/tinyland-cleanup/plugins"
 )
 
 var (

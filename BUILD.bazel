@@ -1,23 +1,16 @@
-# =============================================================================
-# BUILD.bazel - tinyland-cleanup Go application
-# =============================================================================
-# Cross-platform disk cleanup daemon with graduated thresholds.
-#
-# Usage:
-#   bazel build //cmd/tinyland-cleanup:tinyland-cleanup
-#   bazel run //cmd/tinyland-cleanup:tinyland-cleanup -- --help
-#   bazel test //cmd/tinyland-cleanup/...
-#
-# Platform-specific builds:
-#   bazel build --config=linux //cmd/tinyland-cleanup:tinyland-cleanup
-#   bazel build --config=macos //cmd/tinyland-cleanup:tinyland-cleanup
-# =============================================================================
-
+load("@gazelle//:def.bzl", "gazelle")
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
-# =============================================================================
-# Main Binary
-# =============================================================================
+# Root Bazel targets for tinyland-cleanup.
+#
+# Preferred commands:
+#   bazel build //...
+#   bazel test //...
+#   bazel run //:tinyland-cleanup -- --dry-run --config ./config/default.yaml
+#
+# gazelle:prefix github.com/Jesssullivan/tinyland-cleanup
+
+gazelle(name = "gazelle")
 
 go_binary(
     name = "tinyland-cleanup",
@@ -27,9 +20,9 @@ go_binary(
     }),
     visibility = ["//visibility:public"],
     x_defs = {
-        "main.version": "{STABLE_VERSION}",
         "main.commit": "{STABLE_GIT_COMMIT}",
         "main.date": "{BUILD_TIMESTAMP}",
+        "main.version": "0.2.0",
     },
     deps = [
         ":config",
@@ -38,84 +31,30 @@ go_binary(
     ],
 )
 
-# =============================================================================
-# Libraries
-# =============================================================================
-
 go_library(
     name = "config",
     srcs = ["config/config.go"],
-    importpath = "gitlab.com/tinyland/lab/tinyland-cleanup/config",
+    importpath = "github.com/Jesssullivan/tinyland-cleanup/config",
     visibility = ["//visibility:public"],
-    deps = [
-        "@in_gopkg_yaml_v3//:yaml_v3",
-    ],
+    deps = ["@in_gopkg_yaml_v3//:yaml_v3"],
 )
 
-go_library(
-    name = "plugins",
+go_test(
+    name = "config_test",
     srcs = [
-        "plugins/cache.go",
-        "plugins/docker.go",
-        "plugins/etcd.go",
-        "plugins/gitlab_runner.go",
-        "plugins/nix.go",
-        "plugins/plugin.go",
-        "plugins/podman.go",
-        "plugins/rke2.go",
-    ] + select({
-        "@platforms//os:macos": [
-            "plugins/darwin.go",
-            "plugins/lima.go",
-        ],
-        "//conditions:default": [],
-    }),
-    importpath = "gitlab.com/tinyland/lab/tinyland-cleanup/plugins",
-    visibility = ["//visibility:public"],
-    deps = [
-        ":config",
+        "config/config_pbt_test.go",
+        "config/config_test.go",
     ],
+    embed = [":config"],
+    deps = ["@net_pgregory_rapid//:rapid"],
 )
 
 go_library(
     name = "monitor",
     srcs = ["monitor/disk.go"],
-    importpath = "gitlab.com/tinyland/lab/tinyland-cleanup/monitor",
+    importpath = "github.com/Jesssullivan/tinyland-cleanup/monitor",
     visibility = ["//visibility:public"],
-    deps = [
-        "@com_github_shirou_gopsutil_v3//disk",
-    ],
-)
-
-# =============================================================================
-# Tests
-# =============================================================================
-
-go_test(
-    name = "config_test",
-    srcs = [
-        "config/config_test.go",
-        "config/config_pbt_test.go",
-    ],
-    embed = [":config"],
-    deps = [
-        "@net_pgregory_rapid//:rapid",
-    ],
-    timeout = "short",
-)
-
-go_test(
-    name = "plugins_test",
-    srcs = [
-        "plugins/plugin_test.go",
-        "plugins/plugin_pbt_test.go",
-    ],
-    embed = [":plugins"],
-    deps = [
-        ":config",
-        "@net_pgregory_rapid//:rapid",
-    ],
-    timeout = "short",
+    deps = ["@com_github_shirou_gopsutil_v3//disk"],
 )
 
 go_test(
@@ -125,49 +64,61 @@ go_test(
         "monitor/monitor_pbt_test.go",
     ],
     embed = [":monitor"],
+    deps = ["@net_pgregory_rapid//:rapid"],
+)
+
+go_library(
+    name = "plugins",
+    srcs = [
+        "plugins/cache.go",
+        "plugins/devartifacts.go",
+        "plugins/docker.go",
+        "plugins/etcd.go",
+        "plugins/fs.go",
+        "plugins/gitlab_runner.go",
+        "plugins/nix.go",
+        "plugins/plugin.go",
+        "plugins/podman.go",
+        "plugins/rke2.go",
+        "plugins/sudo.go",
+    ] + select({
+        "@platforms//os:macos": [
+            "plugins/apfs_darwin.go",
+            "plugins/darwin.go",
+            "plugins/lima.go",
+        ],
+        "//conditions:default": [
+            "plugins/github_runner.go",
+            "plugins/yum.go",
+        ],
+    }),
+    importpath = "github.com/Jesssullivan/tinyland-cleanup/plugins",
+    visibility = ["//visibility:public"],
     deps = [
+        ":config",
+    ],
+)
+
+go_test(
+    name = "plugins_test",
+    srcs = [
+        "plugins/devartifacts_test.go",
+        "plugins/plugin_pbt_test.go",
+        "plugins/plugin_test.go",
+        "plugins/sudo_test.go",
+    ] + select({
+        "@platforms//os:macos": ["plugins/apfs_darwin_test.go"],
+        "//conditions:default": [],
+    }),
+    embed = [":plugins"],
+    deps = [
+        ":config",
         "@net_pgregory_rapid//:rapid",
     ],
-    timeout = "short",
 )
 
-# =============================================================================
-# Test Suites
-# =============================================================================
-
-# All platform-agnostic tests (safe to run on any CI runner)
 test_suite(
     name = "all_tests",
-    tests = [
-        ":config_test",
-        ":monitor_test",
-        ":plugins_test",
-    ],
-)
-
-# Linux-specific test suite
-test_suite(
-    name = "linux_tests",
-    tests = [
-        ":config_test",
-        ":monitor_test",
-        ":plugins_test",
-    ],
-)
-
-# Darwin test suite (includes Darwin-specific tests when available)
-test_suite(
-    name = "darwin_tests",
-    tests = [
-        ":config_test",
-        ":monitor_test",
-        ":plugins_test",
-    ],
-)
-
-# Property-based test suite (uses rapid library)
-test_suite(
-    name = "pbt_tests",
     tests = [
         ":config_test",
         ":monitor_test",

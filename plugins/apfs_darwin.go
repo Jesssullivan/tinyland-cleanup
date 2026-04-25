@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 // APFSPlugin handles APFS snapshot thinning and Time Machine cleanup.

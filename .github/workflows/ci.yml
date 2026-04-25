@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+        env:
+          GOFLAGS: -mod=vendor
+      - name: Test
+        run: go test ./...
+        env:
+          GOFLAGS: -mod=vendor
+      - name: Vet
+        run: go vet ./...
+        env:
+          GOFLAGS: -mod=vendor
+
+  bazel:
+    name: Bazel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Test
+        run: nix shell nixpkgs#bazelisk --command bazelisk --output_user_root=/tmp/tinyland-cleanup-bazel test //...

@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 // LimaPlugin handles Lima VM cleanup and disk resize operations.

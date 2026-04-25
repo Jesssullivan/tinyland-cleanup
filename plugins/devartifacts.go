@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 // DevArtifactsPlugin handles stale development artifact cleanup.
@@ -61,9 +61,9 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		p.reportArtifacts(ctx, daCfg, home, logger)
 		return result
 	case LevelModerate:
-		nodeAge = 30 * 24 * time.Hour  // 30 days
-		venvAge = 60 * 24 * time.Hour  // 60 days
-		rustAge = 30 * 24 * time.Hour  // 30 days
+		nodeAge = 30 * 24 * time.Hour // 30 days
+		venvAge = 60 * 24 * time.Hour // 60 days
+		rustAge = 30 * 24 * time.Hour // 30 days
 	case LevelAggressive:
 		nodeAge = 7 * 24 * time.Hour  // 7 days
 		venvAge = 14 * 24 * time.Hour // 14 days
@@ -547,4 +547,3 @@ func expandHome(path string, home string) string {
 	}
 	return path
 }
-

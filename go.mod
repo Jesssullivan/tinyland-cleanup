@@ -1,4 +1,4 @@
-module gitlab.com/tinyland/lab/tinyland-cleanup
+module github.com/Jesssullivan/tinyland-cleanup
 
 // Minimum Go version for tinyland-cleanup
 go 1.23

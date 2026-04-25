@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"os/exec"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 // YumPlugin handles YUM/DNF cache cleanup operations.

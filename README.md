@@ -1,0 +1,70 @@
+# tinyland-cleanup
+
+`tinyland-cleanup` is a conservative disk-pressure cleanup daemon for developer
+machines and CI hosts. It focuses on build-system and developer-tool caches
+where unmanaged disk pressure can break local work, remote runners, or
+hermetic build flows.
+
+The current production target is Darwin developer machines plus Linux/Rocky
+builder and runner machines.
+
+## Safety Model
+
+- Dry-run behavior must stay useful enough for operator review.
+- Cleanup policy should explain what it plans to remove and why.
+- Host free-space accounting should be measured before and after cleanup.
+- Privileged actions, offline compaction, and service disruption must remain
+  explicit policy choices.
+
+## Build And Test
+
+Fast local validation:
+
+```sh
+env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go test ./...
+env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go vet ./...
+env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go build ./...
+```
+
+Nix package build:
+
+```sh
+nix build .#default --no-link --print-build-logs
+```
+
+Bazel build/test graph:
+
+```sh
+nix shell nixpkgs#bazelisk --command bazelisk --output_user_root=/tmp/tinyland-cleanup-bazel test //...
+```
+
+Shared-cache Bazel runners can use:
+
+```sh
+BAZEL_REMOTE_CACHE=grpc://bazel-cache.nix-cache.svc.cluster.local:9092 \
+  scripts/bazel-cache-backed.sh test //...
+```
+
+## Distribution Status
+
+Current package authority is the Nix flake package `.#tinyland-cleanup`.
+Release archives are produced from GitHub tags. RPM and broader Linux package
+publication are planned but should be added only after service/user contracts
+and upgrade semantics are explicit.
+
+## Roadmap
+
+Open productionization work is tracked in GitHub issues:
+
+- `#2`: durable disk-pressure policy overhaul
+- `#3`: Bazel cache tiering, budgets, and active-use detection
+- `#4`: Nix cleanup policy for generations, roots, and daemon contention
+- `#5`: Darwin IDE and developer-tool cache budgets
+- `#6`: Podman offline compaction for Darwin `applehv`
+- `#7`: dry-run, telemetry, and host free-space accounting
+
+See [docs/productionization-plan-2026-04-25.md](docs/productionization-plan-2026-04-25.md)
+for the current productionization plan.
+
+Current validation notes are tracked in
+[docs/validation-status-2026-04-25.md](docs/validation-status-2026-04-25.md).

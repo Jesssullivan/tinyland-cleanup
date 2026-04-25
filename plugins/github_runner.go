@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 // GitHubRunnerPlugin handles GitHub Actions runner cleanup operations.

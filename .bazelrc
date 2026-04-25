@@ -1,0 +1,14 @@
+common --enable_bzlmod
+
+build --announce_rc
+build --spawn_strategy=sandboxed
+
+test --test_output=errors
+test --test_summary=detailed
+
+# Shared-cache CI configuration. Pass --remote_cache from a wrapper because
+# Bazel does not expand environment variables in .bazelrc values.
+build:ci-cached --remote_upload_local_results=true
+build:ci-cached --remote_timeout=60
+test:ci-cached --remote_upload_local_results=true
+test:ci-cached --remote_timeout=60

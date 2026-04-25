@@ -1,0 +1,30 @@
+name: GloriousFlywheel Proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      bazel_remote_cache:
+        description: Bazel remote cache URL
+        required: true
+        default: grpc://bazel-cache.nix-cache.svc.cluster.local:9092
+
+jobs:
+  shared-cache-proof:
+    name: Shared cache proof
+    runs-on: tinyland-nix
+    env:
+      BAZEL_REMOTE_CACHE: ${{ inputs.bazel_remote_cache }}
+      GF_BAZEL_SUBSTRATE_MODE: shared-cache-backed
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Go validation
+        run: |
+          go test ./...
+          go vet ./...
+          go build ./...
+        env:
+          GOFLAGS: -mod=vendor
+      - name: Nix package
+        run: nix build .#default --no-link --print-build-logs
+      - name: Bazel shared-cache test
+        run: nix shell nixpkgs#bazelisk --command bash scripts/bazel-cache-backed.sh test //...

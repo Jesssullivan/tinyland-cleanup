@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"gitlab.com/tinyland/lab/tinyland-cleanup/config"
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 func TestCleanupLevelString(t *testing.T) {
