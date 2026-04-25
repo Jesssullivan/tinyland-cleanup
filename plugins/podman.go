@@ -191,8 +191,17 @@ func (p *PodmanPlugin) cleanAggressive(ctx context.Context, cfg *config.Config, 
 		result.ItemsCleaned++
 	}
 
-	// On Darwin, run fstrim inside VM to reclaim sparse disk space
+	// On Darwin, run fstrim inside VM to reclaim sparse disk space when the
+	// provider reflects guest discard operations back to the host disk image.
 	if runtime.GOOS == "darwin" && p.environment.VMRunning && cfg.Podman.TrimVMDisk {
+		if !p.fstrimReclaimsHostSpace() {
+			logger.Warn("skipping Podman VM fstrim accounting; provider does not shrink host disk images from guest fstrim",
+				"machine", p.environment.MachineName,
+				"provider", p.environment.VMProvider,
+				"suggestion", "use offline compaction for actual host-side reclamation")
+			return result
+		}
+
 		logger.Debug("running fstrim in Podman VM", "machine", p.environment.MachineName)
 		if trimmed, err := p.trimVMDisk(ctx, logger); err == nil && trimmed > 0 {
 			result.BytesFreed += trimmed
@@ -241,11 +250,19 @@ func (p *PodmanPlugin) cleanCritical(ctx context.Context, cfg *config.Config, lo
 			result.ItemsCleaned += vmResult.ItemsCleaned
 		}
 
-		// Then fstrim to reclaim space
+		// Then fstrim to reclaim space when the provider reports that discard
+		// as host-side sparse image reclamation.
 		if cfg.Podman.TrimVMDisk {
-			if trimmed, err := p.trimVMDisk(ctx, logger); err == nil && trimmed > 0 {
+			if !p.fstrimReclaimsHostSpace() {
+				logger.Warn("skipping Podman VM fstrim accounting; provider does not shrink host disk images from guest fstrim",
+					"machine", p.environment.MachineName,
+					"provider", p.environment.VMProvider,
+					"suggestion", "use offline compaction for actual host-side reclamation")
+			} else if trimmed, err := p.trimVMDisk(ctx, logger); err == nil && trimmed > 0 {
 				result.BytesFreed += trimmed
 				result.ItemsCleaned++
+			} else if err != nil {
+				logger.Warn("fstrim in Podman VM failed", "error", err)
 			}
 		}
 
@@ -275,6 +292,21 @@ func (p *PodmanPlugin) runPodmanCommand(ctx context.Context, args ...string) (st
 	cmd := exec.CommandContext(ctx, "podman", args...)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+// fstrimReclaimsHostSpace reports whether guest fstrim output can be counted
+// as host bytes freed for the detected Podman machine provider.
+func (p *PodmanPlugin) fstrimReclaimsHostSpace() bool {
+	if runtime.GOOS != "darwin" || p.environment == nil {
+		return true
+	}
+
+	// Podman on macOS with applehv stores the VM in a raw sparse file. Guest
+	// fstrim reports large byte counts from inside the VM, but the raw file's
+	// host allocation does not shrink unless a separate compaction pass punches
+	// holes or rewrites the image. Counting those bytes as freed makes the
+	// daemon report huge false-positive cleanup totals every critical cycle.
+	return p.environment.VMProvider != "applehv"
 }
 
 // parseReclaimedSpace extracts bytes freed from podman output.

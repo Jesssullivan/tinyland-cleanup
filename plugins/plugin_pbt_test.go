@@ -2,6 +2,7 @@
 package plugins
 
 import (
+	"runtime"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -169,5 +170,31 @@ func TestFstrimOutputKnownFormats(t *testing.T) {
 				t.Errorf("expected %d, got %d for output %q", tc.expected, result, tc.output)
 			}
 		})
+	}
+}
+
+func TestPodmanFstrimHostAccounting(t *testing.T) {
+	p := &PodmanPlugin{
+		environment: &PodmanEnvironment{
+			VMProvider: "applehv",
+		},
+	}
+
+	if runtime.GOOS == "darwin" {
+		if p.fstrimReclaimsHostSpace() {
+			t.Fatal("applehv fstrim should not be counted as host-side reclaimed space on Darwin")
+		}
+		return
+	}
+
+	if !p.fstrimReclaimsHostSpace() {
+		t.Fatal("non-Darwin platforms should keep fstrim host accounting enabled")
+	}
+}
+
+func TestPodmanFstrimHostAccountingNilEnvironment(t *testing.T) {
+	p := &PodmanPlugin{}
+	if !p.fstrimReclaimsHostSpace() {
+		t.Fatal("nil Podman environment should default to enabled accounting")
 	}
 }
