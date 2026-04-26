@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,7 +50,7 @@ func (p *BazelPlugin) Name() string {
 
 // Description returns the plugin description.
 func (p *BazelPlugin) Description() string {
-	return "Plans Bazel output base, repository cache, disk cache, and Bazelisk cleanup"
+	return "Cleans stale Bazel output bases and reports repository, disk, and Bazelisk cache policy"
 }
 
 // SupportedPlatforms returns supported platforms (all).
@@ -64,8 +65,11 @@ func (p *BazelPlugin) Enabled(cfg *config.Config) bool {
 
 // PlanCleanup returns a dry-run plan without mutating Bazel state.
 func (p *BazelPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupPlan {
-	_ = logger
+	plan, _ := p.buildCleanupPlan(ctx, level, cfg, logger)
+	return plan
+}
 
+func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) (CleanupPlan, error) {
 	plan := CleanupPlan{
 		Plugin:   p.Name(),
 		Level:    level.String(),
@@ -75,7 +79,7 @@ func (p *BazelPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *
 			"Discover Bazel output bases, repository caches, disk caches, and Bazelisk downloads",
 			"Measure logical and physical bytes without following repo-local bazel-* symlinks",
 			"Protect active output bases, protected workspace output bases, and newest output bases",
-			"Report cleanup candidates with reasons before enabling deletion",
+			"Delete only stale inactive output bases in real cleanup mode at moderate or higher levels",
 		},
 		Metadata: map[string]string{
 			"cleanup_level":                    level.String(),
@@ -106,18 +110,31 @@ func (p *BazelPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *
 	if cfg.Bazel.MaxTotalGB > 0 && totalPhysical > int64(cfg.Bazel.MaxTotalGB)*bazelGiB {
 		plan.Warnings = append(plan.Warnings, "detected Bazel cache footprint exceeds configured review budget")
 	}
-	plan.Warnings = append(plan.Warnings, "Bazel cleanup is planning-only in this slice; deletion and permission normalization remain follow-up work")
+	plan.Warnings = append(plan.Warnings, "Bazel cleanup deletes only stale inactive output bases; repository, disk, and Bazelisk cache budget enforcement remains follow-up work")
 	plan.Warnings = append(plan.Warnings, "Bazel byte counts use bounded top-level allocation estimates so dry-run stays responsive on very large output bases")
 
-	return plan
+	return plan, activeErr
 }
 
-// Cleanup is intentionally planning-only until Bazel deletion policy is proven.
+// Cleanup deletes stale inactive Bazel output bases after active-use inspection.
 func (p *BazelPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
-	_ = ctx
-	_ = cfg
-	logger.Info("Bazel cleanup is planning-only; use --dry-run --output json to review candidates", "level", level.String())
-	return CleanupResult{Plugin: p.Name(), Level: level}
+	result := CleanupResult{Plugin: p.Name(), Level: level}
+	if level == LevelWarning {
+		logger.Info("Bazel cleanup is report-only at warning level", "level", level.String())
+		return result
+	}
+
+	plan, activeErr := p.buildCleanupPlan(ctx, level, cfg, logger)
+	if activeErr != nil {
+		logger.Warn("skipping Bazel cleanup because active process inspection failed", "error", activeErr)
+		return result
+	}
+
+	result = applyBazelCleanupTargets(ctx, p.Name(), level, plan.Targets, logger)
+	if result.ItemsCleaned == 0 {
+		logger.Info("Bazel cleanup found no eligible stale inactive output bases", "level", level.String())
+	}
+	return result
 }
 
 func (p *BazelPlugin) activeBazelProcesses(ctx context.Context) ([]string, error) {
@@ -476,6 +493,75 @@ func bazelEstimatedCandidateBytes(targets []CleanupTarget) int64 {
 		}
 	}
 	return total
+}
+
+func applyBazelCleanupTargets(ctx context.Context, plugin string, level CleanupLevel, targets []CleanupTarget, logger *slog.Logger) CleanupResult {
+	result := CleanupResult{Plugin: plugin, Level: level}
+	for _, target := range targets {
+		if !bazelTargetEligibleForDeletion(target) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			result.Error = err
+			return result
+		}
+		if err := deleteBazelOutputBase(target.Path, logger); err != nil {
+			logger.Warn("failed to delete Bazel output base", "path", target.Path, "error", err)
+			continue
+		}
+		result.BytesFreed += target.Bytes
+		result.EstimatedBytesFreed += target.Bytes
+		result.ItemsCleaned++
+		logger.Info("deleted stale Bazel output base", "path", target.Path, "estimated_bytes", target.Bytes)
+	}
+	return result
+}
+
+func bazelTargetEligibleForDeletion(target CleanupTarget) bool {
+	return target.Type == "output_base" &&
+		target.Action == "delete_output_base" &&
+		target.Path != "" &&
+		!target.Active &&
+		!target.Protected
+}
+
+func deleteBazelOutputBase(path string, logger *slog.Logger) error {
+	if !isBazelOutputBase(path) {
+		return fmt.Errorf("refusing to delete non-Bazel output base: %s", path)
+	}
+	if err := normalizeBazelDeletionPermissions(path, logger); err != nil {
+		return err
+	}
+	return os.RemoveAll(path)
+}
+
+func normalizeBazelDeletionPermissions(root string, logger *slog.Logger) error {
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("chflags"); err == nil {
+			cmd := exec.Command("chflags", "-R", "nouchg", root)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				logger.Warn("failed to clear Darwin file flags before Bazel deletion", "path", root, "error", err, "output", strings.TrimSpace(string(output)))
+			}
+		}
+	}
+
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		if entry.IsDir() {
+			return os.Chmod(path, mode|0700)
+		}
+		return os.Chmod(path, mode|0600)
+	})
 }
 
 func bazelBusyProcessReasons(output string) []string {

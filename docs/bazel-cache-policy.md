@@ -1,9 +1,8 @@
 # Bazel Cache Policy
 
-Bazel cleanup is currently a dry-run planning surface. It reports output bases,
-repository caches, disk caches, and Bazelisk downloads without deleting them.
-Deletion and permission normalization should be enabled only after the dry-run
-evidence is proven on real developer and runner hosts.
+Bazel cleanup reports output bases, repository caches, disk caches, and
+Bazelisk downloads. Real cleanup mode deletes only stale inactive output bases
+after active-process inspection succeeds.
 
 Review with:
 
@@ -50,12 +49,17 @@ Runtime boundary:
 
 - warning reports footprint only;
 - moderate, aggressive, and critical classify stale inactive output bases as
-  `delete_output_base` candidates in dry-run output;
+  `delete_output_base` candidates in dry-run output and delete those output
+  bases in real cleanup mode;
+- real cleanup skips Bazel mutation if active Bazel process inspection fails;
+- deletion normalizes writable permissions first, and on Darwin attempts to
+  clear `uchg` file flags with `chflags -R nouchg`;
 - byte counts use top-level allocation estimates so dry-run remains responsive
   on very large generated trees;
 - repository cache, disk cache, and Bazelisk entries are reported for budget
   review but not deleted yet;
-- real cleanup mode logs that Bazel cleanup is planning-only.
+- repo-local `bazel-*` symlink cleanup remains a follow-up after output-base
+  deletion evidence is proven on real hosts.
 
 Do not disable active-output-base protection on developer machines or shared
 runners unless an operator has already drained the relevant jobs and accepted

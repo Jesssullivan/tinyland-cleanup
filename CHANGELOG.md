@@ -24,6 +24,8 @@ All notable changes to this project will be documented in this file.
   space, and cleanup target count.
 - Target-free report fields and real-cleanup stop behavior once the configured
   target is reached.
+- Bazel real-cleanup deletion for stale inactive output bases, guarded by
+  active-process inspection and permission normalization.
 
 ### Changed
 

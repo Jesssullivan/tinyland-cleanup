@@ -1,6 +1,9 @@
 package plugins
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -128,6 +131,83 @@ func TestBazelBusyProcessReasons(t *testing.T) {
 	for i := range want {
 		if reasons[i] != want[i] {
 			t.Fatalf("got %v, want %v", reasons, want)
+		}
+	}
+}
+
+func TestApplyBazelCleanupTargetsDeletesEligibleOutputBase(t *testing.T) {
+	root := t.TempDir()
+	outputBase := filepath.Join(root, "_bazel_jess", "stale")
+	makeBazelOutputBase(t, outputBase)
+	generated := filepath.Join(outputBase, "execroot", "_main", "bazel-out", "bin", "artifact")
+	if err := os.MkdirAll(filepath.Dir(generated), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(generated, []byte("artifact"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(generated), 0500); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := applyBazelCleanupTargets(context.Background(), "bazel", LevelModerate, []CleanupTarget{
+		{
+			Type:   "output_base",
+			Name:   "stale",
+			Path:   outputBase,
+			Bytes:  123,
+			Action: "delete_output_base",
+		},
+	}, logger)
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("items cleaned = %d, want 1", result.ItemsCleaned)
+	}
+	if result.EstimatedBytesFreed != 123 || result.BytesFreed != 123 {
+		t.Fatalf("unexpected bytes: estimated=%d legacy=%d", result.EstimatedBytesFreed, result.BytesFreed)
+	}
+	if _, err := os.Stat(outputBase); !os.IsNotExist(err) {
+		t.Fatalf("expected output base to be deleted, stat err=%v", err)
+	}
+}
+
+func TestApplyBazelCleanupTargetsSkipsProtectedAndActiveTargets(t *testing.T) {
+	root := t.TempDir()
+	active := filepath.Join(root, "_bazel_jess", "active")
+	protected := filepath.Join(root, "_bazel_jess", "protected")
+	makeBazelOutputBase(t, active)
+	makeBazelOutputBase(t, protected)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := applyBazelCleanupTargets(context.Background(), "bazel", LevelModerate, []CleanupTarget{
+		{
+			Type:   "output_base",
+			Name:   "active",
+			Path:   active,
+			Bytes:  10,
+			Active: true,
+			Action: "delete_output_base",
+		},
+		{
+			Type:      "output_base",
+			Name:      "protected",
+			Path:      protected,
+			Bytes:     20,
+			Protected: true,
+			Action:    "delete_output_base",
+		},
+	}, logger)
+
+	if result.ItemsCleaned != 0 {
+		t.Fatalf("items cleaned = %d, want 0", result.ItemsCleaned)
+	}
+	for _, path := range []string{active, protected} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to remain, err=%v", path, err)
 		}
 	}
 }
