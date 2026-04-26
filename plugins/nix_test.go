@@ -196,6 +196,16 @@ func TestNixGenerationTargetsPreserveCurrentAndMinimum(t *testing.T) {
 	if actions["2"] != "delete_generation" || protected["2"] {
 		t.Fatalf("expected generation 2 to be a deletion candidate, actions=%v protected=%v", actions, protected)
 	}
+	for _, target := range targets {
+		if target.Version == "1" {
+			if target.Tier != CleanupTierWarm || target.Reclaim != CleanupReclaimDeferred {
+				t.Fatalf("generation 1 policy = tier %q reclaim %q, want warm/deferred", target.Tier, target.Reclaim)
+			}
+			if target.HostReclaimsSpace == nil || *target.HostReclaimsSpace {
+				t.Fatalf("generation deletion should not directly reclaim host space: %+v", target)
+			}
+		}
+	}
 	for _, generation := range []string{"3", "4", "5"} {
 		if actions[generation] != "keep_generation" || !protected[generation] {
 			t.Fatalf("expected generation %s to be protected, actions=%v protected=%v", generation, actions, protected)

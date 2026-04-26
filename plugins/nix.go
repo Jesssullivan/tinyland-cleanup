@@ -386,6 +386,7 @@ func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLeve
 				systemTargets[i].Protected = true
 				systemTargets[i].Action = "review_privileged_generation"
 				systemTargets[i].Reason = "outside retention policy, but system generation deletion requires explicit privileged workflow"
+				annotateCleanupTargetPolicy(&systemTargets[i], CleanupTierPrivileged, CleanupReclaimDeferred)
 			}
 		}
 		targets = append(targets, systemTargets...)
@@ -643,7 +644,7 @@ func nixGCRootTargets(roots []nixGCRoot, limit int) []CleanupTarget {
 			reason = "active process root; review the owning process before any Nix GC action"
 		}
 
-		targets = append(targets, CleanupTarget{
+		target := CleanupTarget{
 			Type:      "nix_gc_root",
 			Name:      name,
 			Path:      root.Root,
@@ -651,7 +652,9 @@ func nixGCRootTargets(roots []nixGCRoot, limit int) []CleanupTarget {
 			Protected: true,
 			Action:    "review_gc_root",
 			Reason:    reason,
-		})
+		}
+		annotateCleanupTargetPolicy(&target, CleanupTierSafe, CleanupReclaimNone)
+		targets = append(targets, target)
 	}
 	return targets
 }
@@ -722,7 +725,7 @@ func nixGenerationTargets(generations []nixGeneration, now time.Time, minKeep in
 		if nameScope == "" {
 			nameScope = "profile"
 		}
-		targets = append(targets, CleanupTarget{
+		target := CleanupTarget{
 			Type:      "nix_generation",
 			Name:      fmt.Sprintf("%s generation %d", nameScope, generation.Number),
 			Version:   strconv.Itoa(generation.Number),
@@ -730,7 +733,13 @@ func nixGenerationTargets(generations []nixGeneration, now time.Time, minKeep in
 			Protected: protected,
 			Action:    action,
 			Reason:    reason,
-		})
+		}
+		reclaim := CleanupReclaimNone
+		if action == "delete_generation" {
+			reclaim = CleanupReclaimDeferred
+		}
+		annotateCleanupTargetPolicy(&target, CleanupTierWarm, reclaim)
+		targets = append(targets, target)
 	}
 
 	sort.Slice(targets, func(i, j int) bool {

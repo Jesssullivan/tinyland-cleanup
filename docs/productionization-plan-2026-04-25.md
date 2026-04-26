@@ -58,6 +58,8 @@ Exit criteria:
 ## Phase 2: Runtime Contracts
 
 - Define policy budgets per cleanup domain.
+- Carry candidate policy tier, host-reclaim expectation, and logical versus
+  physical byte evidence in dry-run target output.
 - Add active-use detection for Bazel, Nix, Podman, and IDE caches.
 - Make dry-run output a stable operator contract.
 - Record free-space deltas before and after each plugin decision.

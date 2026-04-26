@@ -255,8 +255,23 @@ func writeTextTarget(w io.Writer, target plugins.CleanupTarget) error {
 	if _, err := fmt.Fprintf(w, "  - %s [%s]: %s", name, target.Type, status); err != nil {
 		return err
 	}
+	if target.Tier != "" {
+		if _, err := fmt.Fprintf(w, ", tier=%s", target.Tier); err != nil {
+			return err
+		}
+	}
+	if target.Reclaim != "" {
+		if _, err := fmt.Fprintf(w, ", reclaim=%s", target.Reclaim); err != nil {
+			return err
+		}
+	}
 	if target.Bytes > 0 {
 		if _, err := fmt.Fprintf(w, ", %s", formatByteCount(target.Bytes)); err != nil {
+			return err
+		}
+	}
+	if target.LogicalBytes > 0 && target.LogicalBytes != target.Bytes {
+		if _, err := fmt.Fprintf(w, ", logical %s", formatByteCount(target.LogicalBytes)); err != nil {
 			return err
 		}
 	}

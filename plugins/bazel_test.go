@@ -46,6 +46,7 @@ func TestBazelPlanTargetsProtectsRecentActiveAndWorkspaces(t *testing.T) {
 			Name:     "old",
 			Path:     "/tmp/old",
 			ModTime:  now.Add(-30 * 24 * time.Hour),
+			Logical:  11,
 			Physical: 10,
 		},
 		{
@@ -86,6 +87,15 @@ func TestBazelPlanTargetsProtectsRecentActiveAndWorkspaces(t *testing.T) {
 
 	if actions["old"].Action != "delete_output_base" {
 		t.Fatalf("old action = %q, want delete_output_base", actions["old"].Action)
+	}
+	if actions["old"].Tier != CleanupTierWarm || actions["old"].Reclaim != CleanupReclaimHost {
+		t.Fatalf("old target policy = tier %q reclaim %q, want warm/host", actions["old"].Tier, actions["old"].Reclaim)
+	}
+	if actions["old"].HostReclaimsSpace == nil || !*actions["old"].HostReclaimsSpace {
+		t.Fatalf("old target should be marked as host-space reclaiming: %#v", actions["old"])
+	}
+	if actions["old"].LogicalBytes != 11 {
+		t.Fatalf("old logical bytes = %d, want 11", actions["old"].LogicalBytes)
 	}
 	for _, name := range []string{"new", "active", "protected"} {
 		if actions[name].Action != "keep" || !actions[name].Protected {

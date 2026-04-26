@@ -515,7 +515,7 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 		reason = "stale inactive output base outside retention policy"
 	}
 
-	return CleanupTarget{
+	target := CleanupTarget{
 		Type:      candidate.Type,
 		Name:      candidate.Name,
 		Path:      candidate.Path,
@@ -524,6 +524,22 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 		Protected: protected,
 		Action:    action,
 		Reason:    reason,
+	}
+	if candidate.Logical > 0 && candidate.Logical != candidate.Physical {
+		target.LogicalBytes = candidate.Logical
+	}
+	annotateCleanupTargetPolicy(&target, bazelCandidateTier(candidate.Type), hostReclaimForAction(action))
+	return target
+}
+
+func bazelCandidateTier(candidateType string) string {
+	switch candidateType {
+	case "bazelisk":
+		return CleanupTierSafe
+	case "repository_cache", "disk_cache", "output_base":
+		return CleanupTierWarm
+	default:
+		return CleanupTierWarm
 	}
 }
 

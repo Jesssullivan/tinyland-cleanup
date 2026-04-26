@@ -19,8 +19,10 @@ The Bazel plan includes targets for:
 - `disk_cache`: local action cache entries;
 - `bazelisk`: Bazelisk download cache entries.
 
-Targets include bounded physical byte estimates, active-use evidence, protected
-status, the planned action, and a reason. Output bases are protected when:
+Targets include policy tier, bounded physical byte estimates, logical byte
+estimates when different, host-reclaim expectation, active-use evidence,
+protected status, the planned action, and a reason. Output bases are protected
+when:
 
 - a Bazel or Bazelisk process is active;
 - an output-base lock or server PID file is visible;
@@ -68,6 +70,12 @@ Runtime boundary:
   points inside that deleted output base are removed;
 - byte counts use top-level allocation estimates so dry-run remains responsive
   on very large generated trees;
+- Bazel output bases, repository caches, and disk caches are `warm` targets
+  because they are rebuildable but expensive; Bazelisk downloads are `safe`
+  targets;
+- `delete_output_base` and `delete_cache_tier` targets advertise
+  `reclaim=host` and `host_reclaims_space=true`; review and protected targets
+  advertise `reclaim=none`;
 - idle Bazel server stop remains a follow-up guarded by
   `allow_stop_idle_servers`.
 

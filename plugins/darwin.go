@@ -643,7 +643,8 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 		for _, entry := range listDarwinCacheEntries(jetBrainsRoot) {
 			stale := darwinCacheEntryStale(entry, cfg.JetBrains.StaleAfterDays)
 			eligible := !jetBrainsActive && (level >= LevelCritical || (level >= LevelAggressive && stale))
-			targets = append(targets, CleanupTarget{
+			action := darwinCacheAction(jetBrainsActive, enforce, eligible)
+			target := CleanupTarget{
 				Type:      "jetbrains",
 				Name:      entry.name,
 				Version:   entry.version,
@@ -651,9 +652,11 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 				Bytes:     entry.bytes,
 				Active:    jetBrainsActive,
 				Protected: darwinCacheProtected(jetBrainsActive, enforce, eligible),
-				Action:    darwinCacheAction(jetBrainsActive, enforce, eligible),
+				Action:    action,
 				Reason:    darwinCacheReason(jetBrainsActive, enforce, eligible, "JetBrains cache version", "requires aggressive stale-cache enforcement or critical pressure"),
-			})
+			}
+			annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(action))
+			targets = append(targets, target)
 		}
 	}
 
@@ -664,16 +667,19 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 		for _, entry := range entries {
 			isProtected := protected[entry.path]
 			eligible := !isProtected && level >= LevelModerate
-			targets = append(targets, CleanupTarget{
+			action := darwinCacheAction(isProtected, enforce, eligible)
+			target := CleanupTarget{
 				Type:      "playwright",
 				Name:      entry.name,
 				Version:   entry.version,
 				Path:      entry.path,
 				Bytes:     entry.bytes,
 				Protected: isProtected,
-				Action:    darwinCacheAction(isProtected, enforce, eligible),
+				Action:    action,
 				Reason:    darwinCacheReason(isProtected, enforce, eligible, "Playwright browser revision", "older than keep-latest-per-family policy"),
-			})
+			}
+			annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(action))
+			targets = append(targets, target)
 		}
 	}
 
@@ -687,16 +693,19 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 		for idx, entry := range entries {
 			isProtected := keepLatest > 0 && idx < keepLatest
 			eligible := !isProtected && level >= LevelModerate
-			targets = append(targets, CleanupTarget{
+			action := darwinCacheAction(isProtected, enforce, eligible)
+			target := CleanupTarget{
 				Type:      "bazelisk",
 				Name:      entry.name,
 				Version:   entry.version,
 				Path:      entry.path,
 				Bytes:     entry.bytes,
 				Protected: isProtected,
-				Action:    darwinCacheAction(isProtected, enforce, eligible),
+				Action:    action,
 				Reason:    darwinCacheReason(isProtected, enforce, eligible, "Bazelisk download cache", "older than keep-latest policy"),
-			})
+			}
+			annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(action))
+			targets = append(targets, target)
 		}
 	}
 
@@ -710,15 +719,18 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 			}
 			stale := dirModTimeStale(pipPath, cfg.Pip.StaleAfterDays)
 			eligible := level >= LevelModerate && stale
-			targets = append(targets, CleanupTarget{
+			action := darwinCacheAction(false, enforce, eligible)
+			target := CleanupTarget{
 				Type:      "pip",
 				Name:      filepath.Base(pipPath),
 				Path:      pipPath,
 				Bytes:     getDirAllocatedBytes(pipPath),
 				Protected: darwinCacheProtected(false, enforce, eligible),
-				Action:    darwinCacheAction(false, enforce, eligible),
+				Action:    action,
 				Reason:    darwinCacheReason(false, enforce, eligible, "pip cache", fmt.Sprintf("stale-after policy is %d days", cfg.Pip.StaleAfterDays)),
-			})
+			}
+			annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(action))
+			targets = append(targets, target)
 		}
 	}
 
@@ -751,18 +763,21 @@ func (p *CachePlugin) darwinEditorCacheTargets(home string, cfg config.DarwinDev
 		stale := dirModTimeStale(path, cfg.StaleAfterDays)
 		eligible := !active && (level >= LevelCritical || (level >= LevelModerate && stale))
 		name := darwinEditorCacheTargetName(home, path)
-		targets = append(targets, CleanupTarget{
+		action := darwinCacheAction(active, enforce, eligible)
+		target := CleanupTarget{
 			Type:      targetType,
 			Name:      name,
 			Path:      path,
 			Bytes:     getDirAllocatedBytes(path),
 			Active:    active,
 			Protected: darwinCacheProtected(active, enforce, eligible),
-			Action:    darwinCacheAction(active, enforce, eligible),
+			Action:    action,
 			Reason: darwinCacheReason(active, enforce, eligible,
 				displayName+" cache directory",
 				fmt.Sprintf("stale-after policy is %d days; critical pressure can delete inactive editor cache directories", cfg.StaleAfterDays)),
-		})
+		}
+		annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(action))
+		targets = append(targets, target)
 	}
 
 	return targets

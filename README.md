@@ -81,7 +81,7 @@ tinyland-cleanup --once --dry-run --level critical --target-used-percent 82
 ```
 
 See [docs/operator-workflow.md](docs/operator-workflow.md) for the current
-dry-run and host free-space accounting workflow.
+dry-run, candidate policy tier, and host free-space accounting workflow.
 
 Podman on macOS needs extra care because `applehv` raw sparse images do not
 shrink from guest `fstrim` alone. See

@@ -111,6 +111,7 @@ func TestRunOnceDryRunJSONReportIncludesPluginPlan(t *testing.T) {
 
 func TestRunOnceDryRunTextReportExplainsPlan(t *testing.T) {
 	var output bytes.Buffer
+	hostReclaims := false
 	mock := &planningPlugin{
 		reportingPlugin: reportingPlugin{},
 		plan: plugins.CleanupPlan{
@@ -121,12 +122,15 @@ func TestRunOnceDryRunTextReportExplainsPlan(t *testing.T) {
 			EstimatedBytesFreed: 1024 * 1024,
 			Targets: []plugins.CleanupTarget{
 				{
-					Type:      "cache",
-					Name:      "example-cache",
-					Bytes:     1024,
-					Protected: true,
-					Action:    "review",
-					Reason:    "operator review required",
+					Type:              "cache",
+					Tier:              plugins.CleanupTierWarm,
+					Name:              "example-cache",
+					Bytes:             1024,
+					Reclaim:           plugins.CleanupReclaimNone,
+					HostReclaimsSpace: &hostReclaims,
+					Protected:         true,
+					Action:            "review",
+					Reason:            "operator review required",
 				},
 			},
 			Warnings: []string{"review before cleanup"},
@@ -147,7 +151,7 @@ func TestRunOnceDryRunTextReportExplainsPlan(t *testing.T) {
 		"plan: estimated reclaim 1.0 MiB",
 		"- reporting: would run (dry_run)",
 		"reporting dry-run plan",
-		"example-cache [cache]: review, protected, 1.0 KiB - operator review required",
+		"example-cache [cache]: review, protected, tier=warm, reclaim=none, 1.0 KiB - operator review required",
 		"review before cleanup",
 	} {
 		if !strings.Contains(text, want) {

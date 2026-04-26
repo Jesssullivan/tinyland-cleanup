@@ -54,6 +54,9 @@ All notable changes to this project will be documented in this file.
   cleanup cycles.
 - CLI `--list-plugins` discovery output for plugin names, enabled state, and
   platform support.
+- Dry-run cleanup targets now carry policy tier, logical byte, reclaim kind,
+  and host-space reclaim expectation metadata where planner evidence is
+  available.
 
 ### Changed
 

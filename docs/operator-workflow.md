@@ -68,6 +68,20 @@ Dry-run mode does not call plugin cleanup methods. A plugin entry with
 `skip_reason: "dry_run"` means the plugin is enabled and would run at that
 level during a real cleanup cycle.
 
+Structured plugin targets may include policy metadata:
+
+- `tier`: cleanup risk/rebuild-cost class, such as `safe`, `warm`,
+  `disruptive`, `destructive`, or `privileged`;
+- `bytes`: measured physical allocation when available;
+- `logical_bytes`: logical size when it differs from physical allocation;
+- `reclaim`: whether the planned action is expected to reclaim host space
+  directly (`host`), only enable later reclamation (`deferred`), or reclaim no
+  space by itself (`none`);
+- `host_reclaims_space`: boolean form of the direct host-space expectation.
+
+Use this metadata to separate cheap cache cleanup from expensive rebuilds,
+privileged actions, and review-only evidence before applying a real cleanup.
+
 ## Apply
 
 After reviewing the plan, run the same level without `--dry-run`:

@@ -281,7 +281,19 @@ func (p *DevArtifactsPlugin) devArtifactTarget(targetType, name, path string, by
 		target.Action = "protect"
 		target.Reason = fmt.Sprintf("project marker %s is newer than %s", marker, formatDevArtifactAge(maxAge))
 	}
+	annotateCleanupTargetPolicy(&target, devArtifactTier(targetType), hostReclaimForAction(target.Action))
 	return target
+}
+
+func devArtifactTier(targetType string) string {
+	switch targetType {
+	case "go-build-cache", "haskell-ghcup-cache":
+		return CleanupTierSafe
+	case "lmstudio-models":
+		return CleanupTierDestructive
+	default:
+		return CleanupTierWarm
+	}
 }
 
 func (p *DevArtifactsPlugin) pythonProjectStale(parentDir string, markers []string, maxAge time.Duration) bool {
@@ -314,6 +326,7 @@ func (p *DevArtifactsPlugin) planGoBuildCache(ctx context.Context, level Cleanup
 		target.Active = true
 		target.Protected = true
 		target.Reason = "active development process detected: " + activeReason
+		annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(target.Action))
 		*targets = append(*targets, target)
 		return
 	}
@@ -330,6 +343,7 @@ func (p *DevArtifactsPlugin) planGoBuildCache(ctx context.Context, level Cleanup
 		target.Protected = true
 		target.Reason = "warning level reports Go build cache without deleting it"
 	}
+	annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(target.Action))
 	*targets = append(*targets, target)
 }
 
@@ -347,17 +361,16 @@ func (p *DevArtifactsPlugin) planHaskellCaches(home string, level CleanupLevel, 
 			target.Active = true
 			target.Protected = true
 			target.Reason = "active development process detected: " + activeReason
-			*targets = append(*targets, target)
 		} else if level >= LevelModerate {
 			target.Action = "delete"
 			target.Reason = ".ghcup/cache contains rebuildable/downloadable artifacts"
-			*targets = append(*targets, target)
 		} else {
 			target.Action = "report"
 			target.Protected = true
 			target.Reason = "warning level reports Haskell caches without deleting them"
-			*targets = append(*targets, target)
 		}
+		annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(target.Action))
+		*targets = append(*targets, target)
 	}
 
 	cabalStore := filepath.Join(home, ".cabal", "store")
@@ -373,6 +386,7 @@ func (p *DevArtifactsPlugin) planHaskellCaches(home string, level CleanupLevel, 
 			target.Active = true
 			target.Protected = true
 			target.Reason = "active development process detected: " + activeReason
+			annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(target.Action))
 			*targets = append(*targets, target)
 			return
 		}
@@ -384,6 +398,7 @@ func (p *DevArtifactsPlugin) planHaskellCaches(home string, level CleanupLevel, 
 			target.Protected = true
 			target.Reason = "moderate and warning levels preserve .cabal/store"
 		}
+		annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(target.Action))
 		*targets = append(*targets, target)
 	}
 }
@@ -404,6 +419,7 @@ func (p *DevArtifactsPlugin) planLMStudioModels(home string, level CleanupLevel,
 		target.Active = true
 		target.Protected = true
 		target.Reason = "active development process detected: " + activeReason
+		annotateCleanupTargetPolicy(&target, CleanupTierDestructive, hostReclaimForAction(target.Action))
 		*targets = append(*targets, target)
 		return
 	}
@@ -415,6 +431,7 @@ func (p *DevArtifactsPlugin) planLMStudioModels(home string, level CleanupLevel,
 		target.Protected = true
 		target.Reason = "LM Studio model cleanup is opt-in and reports until critical"
 	}
+	annotateCleanupTargetPolicy(&target, CleanupTierDestructive, hostReclaimForAction(target.Action))
 	*targets = append(*targets, target)
 }
 
