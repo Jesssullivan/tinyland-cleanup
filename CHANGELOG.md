@@ -59,6 +59,8 @@ All notable changes to this project will be documented in this file.
   available.
 - Darwin JetBrains cache planning now uses the configured `max_gb` budget to
   mark oldest inactive cache versions as opt-in aggressive cleanup candidates.
+- Nix dry-run GC lock and SQLite contention now surfaces as
+  `nix_daemon_contention` deferral when daemon-busy skipping is enabled.
 
 ### Changed
 

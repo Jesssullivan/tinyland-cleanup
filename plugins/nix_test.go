@@ -88,6 +88,48 @@ func TestNixBusyProcessReasons(t *testing.T) {
 	}
 }
 
+func TestNixContentionReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		expected string
+		ok       bool
+	}{
+		{
+			name:     "sqlite busy",
+			output:   "error: SQLite database '/nix/var/nix/db/db.sqlite' is busy",
+			expected: "sqlite database busy",
+			ok:       true,
+		},
+		{
+			name:     "database locked",
+			output:   "error: cannot open SQLite database: database is locked",
+			expected: "sqlite database locked",
+			ok:       true,
+		},
+		{
+			name:     "big lock unavailable",
+			output:   "error: opening lock file '/nix/var/nix/db/big-lock': Resource temporarily unavailable",
+			expected: "nix store big-lock busy",
+			ok:       true,
+		},
+		{
+			name:   "unrelated error",
+			output: "error: path '/nix/store/missing' does not exist",
+			ok:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := nixContentionReason(tt.output)
+			if ok != tt.ok || got != tt.expected {
+				t.Fatalf("nixContentionReason(%q) = %q, %t; want %q, %t", tt.output, got, ok, tt.expected, tt.ok)
+			}
+		})
+	}
+}
+
 func TestParseNixGenerations(t *testing.T) {
 	output := `
    1   2026-04-01 10:00:00

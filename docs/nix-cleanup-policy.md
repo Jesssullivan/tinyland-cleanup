@@ -15,6 +15,8 @@ The Nix plan includes:
 - `estimated_bytes_freed` from `nix-collect-garbage --dry-run`;
 - detected active Nix work such as `nix build`, `home-manager switch`,
   `darwin-rebuild`, `nixos-rebuild`, and worker-style `nix-daemon` activity;
+- `nix_daemon_contention` deferral when dry-run GC itself reports SQLite or
+  store lock contention and `skip_when_daemon_busy` is enabled;
 - visible GC roots when dry-run GC reports no reclaimable store space;
 - generation targets with `keep_generation`, `delete_generation`, or
   `review_privileged_generation` actions;
@@ -42,6 +44,9 @@ Runtime behavior:
 - moderate and aggressive may delete old user profile generations selected by
   the age policy, while preserving the current generation and the minimum count;
 - critical uses the stricter age policy, then runs plain Nix garbage collection;
+- dry-run GC lock or SQLite contention is treated like active Nix work when
+  `skip_when_daemon_busy` is enabled, so the plan is deferred instead of
+  continuing into generation inspection;
 - system or nix-darwin generations are reported for operator review but are not
   deleted by the unprivileged plugin path;
 - low-reclaim dry-runs run `nix-store --gc --print-roots` and emit protected

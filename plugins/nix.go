@@ -109,6 +109,16 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 	}
 
 	if output, err := p.collectGarbageDryRun(ctx, cfg.Nix); err != nil {
+		if reason, ok := nixContentionReason(output); ok {
+			plan.Metadata["nix_contention"] = reason
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("nix-collect-garbage dry-run reported store contention: %s", reason))
+			if cfg.Nix.SkipWhenDaemonBusy {
+				plan.WouldRun = false
+				plan.SkipReason = "nix_daemon_contention"
+				plan.Summary = "Nix cleanup is deferred because dry-run reported store contention"
+				return plan
+			}
+		}
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("nix-collect-garbage dry-run failed: %v", err))
 	} else {
 		estimated := p.parseDryRunFreedSpace(output)
@@ -790,6 +800,30 @@ func nixBusyProcessReasons(output string) []string {
 
 	sort.Strings(reasons)
 	return reasons
+}
+
+func nixContentionReason(output string) (string, bool) {
+	normalized := strings.ToLower(strings.Join(strings.Fields(output), " "))
+	if normalized == "" {
+		return "", false
+	}
+
+	switch {
+	case strings.Contains(normalized, "sqlite") && strings.Contains(normalized, "busy"):
+		return "sqlite database busy", true
+	case strings.Contains(normalized, "database is locked"):
+		return "sqlite database locked", true
+	case strings.Contains(normalized, "big-lock") &&
+		(strings.Contains(normalized, "resource temporarily unavailable") ||
+			strings.Contains(normalized, "temporarily unavailable") ||
+			strings.Contains(normalized, "locked") ||
+			strings.Contains(normalized, "busy")):
+		return "nix store big-lock busy", true
+	case strings.Contains(normalized, "waiting for the big nix store lock"):
+		return "nix store big-lock busy", true
+	default:
+		return "", false
+	}
 }
 
 func (p *NixPlugin) parseDryRunFreedSpace(output string) int64 {
