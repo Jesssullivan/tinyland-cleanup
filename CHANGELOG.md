@@ -20,6 +20,8 @@ All notable changes to this project will be documented in this file.
   retention targets, daemon-contention detection, and opt-in store optimization.
 - Bazel cache and output-base dry-run planning with active-use detection,
   protected workspace symlink detection, and budget metadata.
+- Top-level dry-run summary fields for planned estimated reclaim, required free
+  space, and cleanup target count.
 
 ### Changed
 

@@ -58,13 +58,18 @@ func TestRunOnceDryRunJSONReportIncludesPluginPlan(t *testing.T) {
 	mock := &planningPlugin{
 		reportingPlugin: reportingPlugin{},
 		plan: plugins.CleanupPlan{
-			Plugin:            "reporting",
-			Level:             "critical",
-			Summary:           "reporting dry-run plan",
-			WouldRun:          false,
-			SkipReason:        "preflight_failed",
-			RequiredFreeBytes: 42,
-			Steps:             []string{"inspect", "verify"},
+			Plugin:              "reporting",
+			Level:               "critical",
+			Summary:             "reporting dry-run plan",
+			WouldRun:            false,
+			SkipReason:          "preflight_failed",
+			EstimatedBytesFreed: 100,
+			RequiredFreeBytes:   42,
+			Steps:               []string{"inspect", "verify"},
+			Targets: []plugins.CleanupTarget{
+				{Type: "cache", Name: "one", Action: "review"},
+				{Type: "cache", Name: "two", Action: "review"},
+			},
 			Metadata: map[string]string{
 				"provider": "test",
 			},
@@ -89,6 +94,15 @@ func TestRunOnceDryRunJSONReportIncludesPluginPlan(t *testing.T) {
 	}
 	if report.Plugins[0].SkipReason != "dry_run" {
 		t.Fatalf("expected dry_run plugin skip reason, got %q", report.Plugins[0].SkipReason)
+	}
+	if report.PlannedEstimatedBytesFreed != 100 {
+		t.Fatalf("expected planned estimated bytes 100, got %d", report.PlannedEstimatedBytesFreed)
+	}
+	if report.PlannedRequiredFreeBytes != 42 {
+		t.Fatalf("expected planned required bytes 42, got %d", report.PlannedRequiredFreeBytes)
+	}
+	if report.PlannedTargets != 2 {
+		t.Fatalf("expected 2 planned targets, got %d", report.PlannedTargets)
 	}
 }
 

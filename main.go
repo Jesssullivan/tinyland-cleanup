@@ -259,6 +259,11 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 			if planner, ok := p.(plugins.Planner); ok {
 				plan := planner.PlanCleanup(ctx, pluginLevel, d.config, d.logger)
 				pluginReport.Plan = &plan
+				report.PlannedEstimatedBytesFreed += plan.EstimatedBytesFreed
+				report.PlannedTargets += len(plan.Targets)
+				if plan.RequiredFreeBytes > report.PlannedRequiredFreeBytes {
+					report.PlannedRequiredFreeBytes = plan.RequiredFreeBytes
+				}
 			}
 			pluginReport.SkipReason = "dry_run"
 			d.logger.Info("dry-run plugin plan",
@@ -328,19 +333,25 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 }
 
 type cycleReport struct {
-	Timestamp           string              `json:"timestamp"`
-	DryRun              bool                `json:"dry_run"`
-	ForcedLevel         bool                `json:"forced_level"`
-	Level               string              `json:"level"`
-	MonitorPath         string              `json:"monitor_path"`
-	HostFreeBeforeBytes uint64              `json:"host_free_before_bytes"`
-	HostFreeAfterBytes  uint64              `json:"host_free_after_bytes"`
-	HostFreeDeltaBytes  int64               `json:"host_free_delta_bytes"`
-	HostFreeError       string              `json:"host_free_error,omitempty"`
-	TotalBytesFreed     int64               `json:"total_bytes_freed"`
-	TotalItemsCleaned   int                 `json:"total_items_cleaned"`
-	Mounts              []mountReport       `json:"mounts"`
-	Plugins             []pluginCycleReport `json:"plugins"`
+	Timestamp           string `json:"timestamp"`
+	DryRun              bool   `json:"dry_run"`
+	ForcedLevel         bool   `json:"forced_level"`
+	Level               string `json:"level"`
+	MonitorPath         string `json:"monitor_path"`
+	HostFreeBeforeBytes uint64 `json:"host_free_before_bytes"`
+	HostFreeAfterBytes  uint64 `json:"host_free_after_bytes"`
+	HostFreeDeltaBytes  int64  `json:"host_free_delta_bytes"`
+	HostFreeError       string `json:"host_free_error,omitempty"`
+	// PlannedEstimatedBytesFreed aggregates dry-run plugin plan estimates.
+	PlannedEstimatedBytesFreed int64 `json:"planned_estimated_bytes_freed,omitempty"`
+	// PlannedRequiredFreeBytes is the largest free-space preflight requirement across plugin plans.
+	PlannedRequiredFreeBytes int64 `json:"planned_required_free_bytes,omitempty"`
+	// PlannedTargets is the total number of dry-run cleanup targets.
+	PlannedTargets    int                 `json:"planned_targets,omitempty"`
+	TotalBytesFreed   int64               `json:"total_bytes_freed"`
+	TotalItemsCleaned int                 `json:"total_items_cleaned"`
+	Mounts            []mountReport       `json:"mounts"`
+	Plugins           []pluginCycleReport `json:"plugins"`
 }
 
 type mountReport struct {

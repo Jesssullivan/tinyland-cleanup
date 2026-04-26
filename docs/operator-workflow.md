@@ -15,6 +15,8 @@ The JSON report includes:
 - the selected cleanup level;
 - monitored mount status;
 - host free-space before and after the cycle;
+- top-level dry-run totals for planned estimated reclaim, required free space,
+  and cleanup target count;
 - enabled plugins that would run;
 - plugin descriptions and dry-run skip reasons.
 
@@ -39,6 +41,11 @@ The report distinguishes:
   available;
 - `host_bytes_freed`: plugin-isolated host free-space measurement, when
   available;
+- `planned_estimated_bytes_freed`: aggregate dry-run reclaim estimate from
+  plugin plans;
+- `planned_required_free_bytes`: largest free-space preflight requirement
+  across plugin plans;
+- `planned_targets`: total number of dry-run targets across plugin plans;
 - `host_free_delta_bytes`: cycle-level host free-space delta for the monitored
   path.
 
