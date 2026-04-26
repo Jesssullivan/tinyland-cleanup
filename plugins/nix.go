@@ -270,6 +270,10 @@ func (p *NixPlugin) collectGarbage(ctx context.Context, level CleanupLevel, args
 	cmd := exec.CommandContext(ctx, "nix-collect-garbage", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if reason, ok := nixContentionReason(string(output)); ok && cfg.SkipWhenDaemonBusy {
+			logger.Warn("skipping Nix garbage collection because store contention was reported", "reason", reason)
+			return result
+		}
 		result.Error = err
 		return result
 	}
@@ -354,6 +358,10 @@ func (p *NixPlugin) deleteUserGenerationsByPolicy(ctx context.Context, level Cle
 	cmd := exec.CommandContext(deleteCtx, "nix-env", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if reason, ok := nixContentionReason(string(output)); ok && cfg.SkipWhenDaemonBusy {
+			logger.Warn("skipping Nix generation deletion because store contention was reported", "reason", reason)
+			return result
+		}
 		result.Error = fmt.Errorf("nix-env %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 		return result
 	}

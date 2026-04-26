@@ -61,6 +61,9 @@ All notable changes to this project will be documented in this file.
   mark oldest inactive cache versions as opt-in aggressive cleanup candidates.
 - Nix dry-run GC lock and SQLite contention now surfaces as
   `nix_daemon_contention` deferral when daemon-busy skipping is enabled.
+- Nix generation deletion and GC commands now treat the same contention
+  signatures as skipped cleanup rather than hard failures when daemon-busy
+  skipping is enabled.
 
 ### Changed
 

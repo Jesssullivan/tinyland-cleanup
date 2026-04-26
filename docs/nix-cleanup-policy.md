@@ -47,6 +47,9 @@ Runtime behavior:
 - dry-run GC lock or SQLite contention is treated like active Nix work when
   `skip_when_daemon_busy` is enabled, so the plan is deferred instead of
   continuing into generation inspection;
+- real generation deletion and GC commands also treat those contention
+  signatures as deferred no-op cleanup steps when `skip_when_daemon_busy` is
+  enabled;
 - system or nix-darwin generations are reported for operator review but are not
   deleted by the unprivileged plugin path;
 - low-reclaim dry-runs run `nix-store --gc --print-roots` and emit protected
