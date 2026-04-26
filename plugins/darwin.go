@@ -18,6 +18,8 @@ import (
 	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
+const darwinDevCacheGiB = int64(1024 * 1024 * 1024)
+
 // HomebrewPlugin handles Homebrew cleanup operations.
 type HomebrewPlugin struct{}
 
@@ -632,6 +634,50 @@ type darwinCacheEntry struct {
 	bytes   int64
 }
 
+func darwinCacheEntriesOverBudget(entries []darwinCacheEntry, maxGB int, keepNewest int) map[string]bool {
+	overBudget := map[string]bool{}
+	if maxGB <= 0 || len(entries) == 0 {
+		return overBudget
+	}
+
+	budget := int64(maxGB) * darwinDevCacheGiB
+	var total int64
+	for _, entry := range entries {
+		total += entry.bytes
+	}
+	if total <= budget {
+		return overBudget
+	}
+
+	sorted := append([]darwinCacheEntry(nil), entries...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].modTime.After(sorted[j].modTime)
+	})
+
+	protectedNewest := map[string]bool{}
+	for idx, entry := range sorted {
+		if idx >= keepNewest {
+			break
+		}
+		protectedNewest[entry.path] = true
+	}
+
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].modTime.Before(sorted[j].modTime)
+	})
+	for _, entry := range sorted {
+		if total <= budget {
+			break
+		}
+		if protectedNewest[entry.path] {
+			continue
+		}
+		overBudget[entry.path] = true
+		total -= entry.bytes
+	}
+	return overBudget
+}
+
 func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.DarwinDevCachesConfig, activeProcesses map[string]bool, level CleanupLevel) []CleanupTarget {
 	var targets []CleanupTarget
 	enforce := cfg.Enforce && level >= LevelModerate
@@ -640,9 +686,19 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 		jetBrainsRoot := filepath.Join(home, "Library", "Caches", "JetBrains")
 		jetBrainsActive := cfg.JetBrains.KeepActiveVersions && darwinAnyProcessActive(activeProcesses,
 			"appcode", "clion", "datagrip", "goland", "idea", "intellij", "phpstorm", "pycharm", "rider", "rubymine", "webstorm")
-		for _, entry := range listDarwinCacheEntries(jetBrainsRoot) {
+		entries := listDarwinCacheEntries(jetBrainsRoot)
+		overBudget := darwinCacheEntriesOverBudget(entries, cfg.JetBrains.MaxGB, 0)
+		for _, entry := range entries {
 			stale := darwinCacheEntryStale(entry, cfg.JetBrains.StaleAfterDays)
-			eligible := !jetBrainsActive && (level >= LevelCritical || (level >= LevelAggressive && stale))
+			budgetCandidate := overBudget[entry.path]
+			eligible := !jetBrainsActive && (level >= LevelCritical || (level >= LevelAggressive && (stale || budgetCandidate)))
+			eligibility := "requires aggressive stale-cache enforcement or critical pressure"
+			if cfg.JetBrains.MaxGB > 0 {
+				eligibility = fmt.Sprintf("requires aggressive stale-cache enforcement, max_gb budget pressure, or critical pressure; max_gb=%d", cfg.JetBrains.MaxGB)
+			}
+			if budgetCandidate {
+				eligibility = fmt.Sprintf("outside JetBrains max_gb=%d budget", cfg.JetBrains.MaxGB)
+			}
 			action := darwinCacheAction(jetBrainsActive, enforce, eligible)
 			target := CleanupTarget{
 				Type:      "jetbrains",
@@ -653,7 +709,7 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 				Active:    jetBrainsActive,
 				Protected: darwinCacheProtected(jetBrainsActive, enforce, eligible),
 				Action:    action,
-				Reason:    darwinCacheReason(jetBrainsActive, enforce, eligible, "JetBrains cache version", "requires aggressive stale-cache enforcement or critical pressure"),
+				Reason:    darwinCacheReason(jetBrainsActive, enforce, eligible, "JetBrains cache version", eligibility),
 			}
 			annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(action))
 			targets = append(targets, target)

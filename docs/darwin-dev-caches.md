@@ -21,8 +21,9 @@ The cache plugin plan includes `targets` for known cache families:
 - `cursor-cache`: selected Cursor cache directories with the same cache-only
   boundary.
 
-Targets include the cache type, name, detected version, path, physical bytes,
-active-use evidence, protected status, review action, and reason.
+Targets include the cache type, policy tier, name, detected version, path,
+physical bytes, active-use evidence, protected status, reclaim expectation,
+review action, and reason.
 
 Safety boundaries:
 
@@ -48,6 +49,7 @@ darwin_dev_caches:
 When `enforce: true`, moderate cleanup can delete unprotected Playwright and
 Bazelisk entries outside the keep-latest policy, stale pip caches, and stale
 inactive editor cache directories. Aggressive cleanup can delete inactive stale
-JetBrains cache versions. Critical cleanup can delete inactive unprotected
-JetBrains and editor cache targets regardless of age. The same protected target
-rules from dry-run planning are used for real cleanup.
+JetBrains cache versions and the oldest inactive JetBrains versions needed to
+bring `jetbrains.max_gb` back under budget. Critical cleanup can delete inactive
+unprotected JetBrains and editor cache targets regardless of age. The same
+protected target rules from dry-run planning are used for real cleanup.

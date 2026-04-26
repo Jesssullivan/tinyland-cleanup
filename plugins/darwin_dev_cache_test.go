@@ -106,6 +106,23 @@ func TestDarwinDeveloperCacheTargetsOptInEnforcement(t *testing.T) {
 	}
 }
 
+func TestDarwinCacheEntriesOverBudgetSelectsOldestEntries(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	entries := []darwinCacheEntry{
+		{path: "/cache/new", modTime: now, bytes: 600 * 1024 * 1024},
+		{path: "/cache/mid", modTime: now.Add(-1 * time.Hour), bytes: 600 * 1024 * 1024},
+		{path: "/cache/old", modTime: now.Add(-2 * time.Hour), bytes: 600 * 1024 * 1024},
+	}
+
+	overBudget := darwinCacheEntriesOverBudget(entries, 1, 1)
+	if !overBudget["/cache/old"] || overBudget["/cache/new"] {
+		t.Fatalf("expected oldest entry over budget while newest is protected: %#v", overBudget)
+	}
+	if len(overBudget) != 2 {
+		t.Fatalf("expected two entries to bring cache under budget, got %#v", overBudget)
+	}
+}
+
 func TestDarwinDeveloperCacheTargetsEditorCaches(t *testing.T) {
 	home := t.TempDir()
 	cfg := config.DefaultConfig().DarwinDevCaches

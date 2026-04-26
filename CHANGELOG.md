@@ -57,6 +57,8 @@ All notable changes to this project will be documented in this file.
 - Dry-run cleanup targets now carry policy tier, logical byte, reclaim kind,
   and host-space reclaim expectation metadata where planner evidence is
   available.
+- Darwin JetBrains cache planning now uses the configured `max_gb` budget to
+  mark oldest inactive cache versions as opt-in aggressive cleanup candidates.
 
 ### Changed
 
