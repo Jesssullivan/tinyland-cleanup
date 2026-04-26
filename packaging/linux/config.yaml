@@ -1,0 +1,96 @@
+# tinyland-cleanup Linux/Rocky package configuration
+#
+# The RPM installs this file as /etc/tinyland-cleanup/config.yaml with
+# noreplace semantics. Review with:
+#
+#   tinyland-cleanup --once --dry-run --level critical --output json --config /etc/tinyland-cleanup/config.yaml
+
+poll_interval: 60
+log_file: /var/log/tinyland-cleanup/tinyland-cleanup.log
+target_free: 70
+
+thresholds:
+  warning: 80
+  moderate: 85
+  aggressive: 90
+  critical: 95
+
+enable:
+  cache: true
+  nix_gc: true
+  docker: true
+  podman: true
+  lima: false
+  homebrew: false
+  ios_simulator: false
+  gitlab_runner: true
+  github_runner: true
+  yum: true
+  icloud: false
+  photos: false
+  dev_artifacts: true
+  bazel: true
+  apfs_snapshots: false
+
+monitored_mounts:
+  - path: /
+    label: root
+
+docker:
+  prune_images_age: 24h
+  protect_running_containers: true
+
+podman:
+  prune_images_age: 24h
+  protect_running_containers: true
+  clean_inside_vm: false
+  trim_vm_disk: false
+  compact_disk_offline: false
+  compact_min_reclaim_gb: 10
+  compact_require_no_active_containers: true
+  compact_keep_backup_until_restart: true
+  compact_provider_allowlist:
+    - applehv
+
+nix:
+  min_user_generations: 5
+  min_system_generations: 3
+  delete_generations_older_than: 14d
+  critical_delete_generations_older_than: 3d
+  allow_store_optimize: false
+  skip_when_daemon_busy: true
+  daemon_busy_backoff: 30m
+  max_gc_duration: 20m
+
+bazel:
+  roots:
+    - ~/.cache/bazel
+  bazelisk_cache: ~/.cache/bazelisk
+  max_total_gb: 20
+  keep_recent_output_bases: 5
+  stale_after: 14d
+  critical_stale_after: 3d
+  protect_workspaces:
+    - ~/git/lab
+    - ~/git/GloriousFlywheel
+  allow_stop_idle_servers: true
+  allow_delete_active_output_bases: false
+
+github_runner:
+  home: /home/github-runner
+  work_dir: ""
+
+dev_artifacts:
+  scan_paths:
+    - ~/git
+    - ~/src
+    - ~/projects
+  node_modules: true
+  python_venvs: true
+  rust_targets: false
+  go_build_cache: true
+  haskell_cache: true
+  lmstudio_models: false
+
+notify:
+  enabled: false

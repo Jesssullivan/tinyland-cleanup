@@ -26,6 +26,8 @@ All notable changes to this project will be documented in this file.
   target is reached.
 - Bazel real-cleanup deletion for stale inactive output bases, guarded by
   active-process inspection and permission normalization.
+- Linux RPM packaging configuration, systemd unit, packaged config defaults,
+  and release workflow RPM artifacts.
 
 ### Changed
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=tinyland-cleanup disk-pressure daemon
+Documentation=https://github.com/Jesssullivan/tinyland-cleanup
+After=network-online.target
+ConditionPathExists=/etc/tinyland-cleanup/config.yaml
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tinyland-cleanup --daemon --config /etc/tinyland-cleanup/config.yaml
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

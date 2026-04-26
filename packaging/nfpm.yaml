@@ -1,0 +1,52 @@
+name: tinyland-cleanup
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+release: ${NFPM_RELEASE}
+section: utils
+priority: optional
+maintainer: Jess Sullivan <jess@sulliwood.org>
+description: Conservative disk-pressure cleanup daemon for developer machines and CI hosts.
+vendor: tinyland-cleanup
+homepage: https://github.com/Jesssullivan/tinyland-cleanup
+license: MIT
+
+contents:
+  - src: ${NFPM_BINARY}
+    dst: /usr/bin/tinyland-cleanup
+    expand: true
+    file_info:
+      mode: 0755
+
+  - src: packaging/linux/config.yaml
+    dst: /etc/tinyland-cleanup/config.yaml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: packaging/systemd/tinyland-cleanup.service
+    dst: /usr/lib/systemd/system/tinyland-cleanup.service
+    file_info:
+      mode: 0644
+
+  - dst: /etc/tinyland-cleanup
+    type: dir
+    file_info:
+      mode: 0755
+
+  - dst: /var/lib/tinyland-cleanup
+    type: dir
+    file_info:
+      mode: 0755
+
+  - dst: /var/log/tinyland-cleanup
+    type: dir
+    file_info:
+      mode: 0755
+
+scripts:
+  postinstall: packaging/rpm/postinstall.sh
+  postremove: packaging/rpm/postremove.sh
+
+rpm:
+  compression: zstd

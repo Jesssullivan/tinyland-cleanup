@@ -31,6 +31,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Install Nix
+        if: matrix.goos == 'linux'
+        uses: DeterminateSystems/nix-installer-action@v22
       - name: Build
         run: |
           mkdir -p dist
@@ -45,11 +48,30 @@ jobs:
           GOFLAGS: -mod=vendor
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+      - name: RPM
+        if: matrix.goos == 'linux'
+        run: |
+          artifact="tinyland-cleanup-${GITHUB_REF_NAME}-${GOOS}-${GOARCH}"
+          version="${GITHUB_REF_NAME#v}"
+          case "${version}" in
+            [0-9]*) ;;
+            *) version="0.0.0" ;;
+          esac
+          NFPM_BINARY="dist/${artifact}/tinyland-cleanup" \
+            NFPM_VERSION="${version}" \
+            NFPM_RELEASE="${GITHUB_RUN_NUMBER}" \
+            NFPM_ARCH="${GOARCH}" \
+            nix shell nixpkgs#nfpm --command nfpm package --packager rpm --config packaging/nfpm.yaml --target dist/
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: tinyland-cleanup-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/*.rpm
 
   release:
     name: Publish release
@@ -61,11 +83,12 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: sha256sum dist/*.tar.gz > dist/SHA256SUMS
+        run: sha256sum dist/*.tar.gz dist/*.rpm > dist/SHA256SUMS
       - name: Publish
         uses: softprops/action-gh-release@v3
         with:
           draft: true
           files: |
             dist/*.tar.gz
+            dist/*.rpm
             dist/SHA256SUMS

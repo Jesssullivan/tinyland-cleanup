@@ -74,9 +74,9 @@ Bazel cache and output-base review is documented in
 ## Distribution Status
 
 Current package authority is the Nix flake package `.#tinyland-cleanup`.
-Release archives are produced from GitHub tags. RPM and broader Linux package
-publication are planned but should be added only after service/user contracts
-and upgrade semantics are explicit.
+Release archives are produced from GitHub tags. Linux RPM packaging is
+documented in [docs/rpm-packaging.md](docs/rpm-packaging.md); the RPM installs a
+systemd unit but leaves enable/start as an explicit operator action.
 
 ## Roadmap
 
