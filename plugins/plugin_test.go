@@ -219,6 +219,89 @@ func TestDockerPluginParseReclaimedSpace(t *testing.T) {
 	}
 }
 
+func TestDockerBusyProcessReasons(t *testing.T) {
+	output := `
+/nix/store/abc-docker-27.5.1/bin/docker buildx build --platform linux/amd64 --push .
+/usr/bin/docker system df
+/usr/local/bin/docker compose up web
+/usr/local/bin/docker pull alpine:latest
+`
+	reasons := dockerBusyProcessReasons(output)
+	expected := []string{"docker buildx", "docker compose up", "docker pull"}
+	if len(reasons) != len(expected) {
+		t.Fatalf("expected %d reasons, got %d: %v", len(expected), len(reasons), reasons)
+	}
+	for i := range expected {
+		if reasons[i] != expected[i] {
+			t.Fatalf("reason %d = %q, want %q; all reasons: %v", i, reasons[i], expected[i], reasons)
+		}
+	}
+}
+
+func TestParseDockerDFSummaryRows(t *testing.T) {
+	output := `TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          12        3         8.5GB     4.25GB (50%)
+Containers      2         0         1.5kB     1.5kB (100%)
+Local Volumes   4         1         10GB      6GB (60%)
+Build Cache     20        0         2GiB      512MiB
+`
+	rows := parseDockerDFSummaryRows(output)
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 rows, got %d: %#v", len(rows), rows)
+	}
+	if rows[0].Type != "Images" || rows[0].ReclaimableBytes != 4563402752 {
+		t.Fatalf("unexpected images row: %#v", rows[0])
+	}
+	if rows[2].Type != "Local Volumes" || rows[2].SizeBytes != 10737418240 {
+		t.Fatalf("unexpected volume row: %#v", rows[2])
+	}
+	if rows[3].Type != "Build Cache" || rows[3].ReclaimableBytes != 536870912 {
+		t.Fatalf("unexpected build cache row: %#v", rows[3])
+	}
+}
+
+func TestDockerPlanTargetsCriticalProtectsActiveWork(t *testing.T) {
+	rows := []dockerDFSummaryRow{
+		{Type: "Images", ReclaimableBytes: 10},
+		{Type: "Containers", ReclaimableBytes: 20},
+		{Type: "Local Volumes", ReclaimableBytes: 30},
+		{Type: "Build Cache", ReclaimableBytes: 40},
+	}
+	targets := dockerPlanTargets(rows, LevelCritical, CleanupReclaimDeferred, true)
+	if len(targets) != 4 {
+		t.Fatalf("expected 4 targets, got %d", len(targets))
+	}
+	if got := dockerEstimatedCandidateBytes(targets); got != 0 {
+		t.Fatalf("expected protected active work to estimate 0 bytes, got %d", got)
+	}
+	for _, target := range targets {
+		if !target.Protected || !target.Active || target.Action != "protect" {
+			t.Fatalf("expected protected active target, got %#v", target)
+		}
+	}
+}
+
+func TestDockerPlanTargetsCriticalEstimatesEligibleBytes(t *testing.T) {
+	rows := []dockerDFSummaryRow{
+		{Type: "Images", ReclaimableBytes: 10},
+		{Type: "Containers", ReclaimableBytes: 20},
+		{Type: "Local Volumes", ReclaimableBytes: 30},
+		{Type: "Build Cache", ReclaimableBytes: 40},
+	}
+	targets := dockerPlanTargets(rows, LevelCritical, CleanupReclaimHost, false)
+	if got := dockerEstimatedCandidateBytes(targets); got != 100 {
+		t.Fatalf("estimated bytes = %d, want 100", got)
+	}
+	for _, target := range targets {
+		if target.Action != "system_prune_with_volumes" {
+			t.Fatalf("expected critical action, got %#v", target)
+		}
+		if target.HostReclaimsSpace == nil || !*target.HostReclaimsSpace {
+			t.Fatalf("expected host reclaim annotation, got %#v", target)
+		}
+	}
+}
+
 func TestNixPluginName(t *testing.T) {
 	p := NewNixPlugin()
 	if p.Name() != "nix" {

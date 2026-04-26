@@ -35,6 +35,7 @@ plugin family under review instead of scanning every enabled cache surface:
 tinyland-cleanup --once --dry-run --level critical --plugins bazel --output text
 tinyland-cleanup --once --dry-run --level critical --plugins nix --output json
 tinyland-cleanup --once --dry-run --level critical --plugins cache --output text
+tinyland-cleanup --once --dry-run --level critical --plugins docker --output json
 ```
 
 The plugin filter is comma-separated and preserves the normal registry order:
@@ -143,6 +144,14 @@ level reports only; moderate and above mark eligible stale artifacts as
 deletion or cache-clean targets while preserving configured protected paths.
 The plan also protects matching artifact families when active package manager,
 compiler, language server, runtime, or LM Studio processes are visible.
+
+For Docker, the plan reports Docker daemon disk-usage rows from `docker system
+df`, including images, stopped containers, local volumes, and build cache when
+available. Docker cleanup is deferred when active Docker build, buildx, compose,
+pull, push, or run work is visible and `docker.protect_running_containers` is
+enabled. Reported reclaimable bytes may describe Docker daemon or VM storage
+and may not immediately equal host free-space delta on macOS or VM-backed
+Docker installations.
 
 ## Current Boundary
 
