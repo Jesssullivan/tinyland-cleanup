@@ -167,6 +167,66 @@ func TestDeleteOldSnapshotsNeverDeleteNewest(t *testing.T) {
 	}
 }
 
+func TestAPFSPlanTargetsCriticalDeletesOnlyEligibleOldSnapshots(t *testing.T) {
+	now := time.Date(2026, 1, 16, 12, 0, 0, 0, time.UTC)
+	snapshots := []snapshotInfo{
+		{Date: "2026-01-16-100000", Time: time.Date(2026, 1, 16, 10, 0, 0, 0, time.UTC)},
+		{Date: "2026-01-15-180000", Time: time.Date(2026, 1, 15, 18, 0, 0, 0, time.UTC)},
+		{Date: "2026-01-10-080000", Time: time.Date(2026, 1, 10, 8, 0, 0, 0, time.UTC)},
+	}
+	cfg := config.APFSConfig{
+		ThinEnabled:     true,
+		MaxThinGB:       50,
+		KeepRecentDays:  1,
+		DeleteOSUpdates: true,
+	}
+
+	targets := apfsPlanTargets(snapshots, LevelCritical, cfg, 50, false, true, now)
+	if len(targets) != 4 {
+		t.Fatalf("expected aggregate target plus 3 snapshots, got %d", len(targets))
+	}
+
+	if targets[0].Action != "thin_local_snapshots" || targets[0].Protected {
+		t.Fatalf("expected eligible thinning target, got %#v", targets[0])
+	}
+	if targets[1].Action != "keep" || !targets[1].Protected {
+		t.Fatalf("newest snapshot must be kept, got %#v", targets[1])
+	}
+	if targets[2].Action != "keep" || !targets[2].Protected {
+		t.Fatalf("recent snapshot must be kept, got %#v", targets[2])
+	}
+	if targets[3].Action != "delete_old_snapshot" || targets[3].Protected {
+		t.Fatalf("old snapshot should be eligible for deletion, got %#v", targets[3])
+	}
+	if got := apfsEstimatedCandidateBytes(targets); got != 20*apfsGiB {
+		t.Fatalf("estimated candidate bytes = %d, want %d", got, 20*apfsGiB)
+	}
+}
+
+func TestAPFSPlanTargetsProtectsWhenBackupActive(t *testing.T) {
+	now := time.Date(2026, 1, 16, 12, 0, 0, 0, time.UTC)
+	snapshots := []snapshotInfo{
+		{Date: "2026-01-16-100000", Time: time.Date(2026, 1, 16, 10, 0, 0, 0, time.UTC)},
+		{Date: "2026-01-10-080000", Time: time.Date(2026, 1, 10, 8, 0, 0, 0, time.UTC)},
+	}
+	cfg := config.APFSConfig{
+		ThinEnabled:     true,
+		MaxThinGB:       50,
+		KeepRecentDays:  1,
+		DeleteOSUpdates: true,
+	}
+
+	targets := apfsPlanTargets(snapshots, LevelCritical, cfg, 50, true, true, now)
+	if got := apfsEstimatedCandidateBytes(targets); got != 0 {
+		t.Fatalf("backup-active plan should estimate 0 bytes, got %d", got)
+	}
+	for _, target := range targets {
+		if !target.Protected {
+			t.Fatalf("backup-active target should be protected: %#v", target)
+		}
+	}
+}
+
 func TestAPFSConfigDefaults(t *testing.T) {
 	cfg := config.DefaultConfig()
 

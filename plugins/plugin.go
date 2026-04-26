@@ -160,7 +160,8 @@ func hostReclaimForAction(action string) string {
 	switch {
 	case strings.HasPrefix(action, "delete"),
 		action == "clean-cache",
-		action == "clean-stale-files":
+		action == "clean-stale-files",
+		action == "thin_local_snapshots":
 		return CleanupReclaimHost
 	case action == "review",
 		action == "report",
