@@ -121,13 +121,14 @@ func main() {
 
 	// Create cleanup daemon
 	d := &daemon{
-		config:   cfg,
-		registry: registry,
-		monitor:  diskMon,
-		logger:   logger,
-		dryRun:   *dryRun,
-		output:   *output,
-		report:   os.Stdout,
+		config:    cfg,
+		registry:  registry,
+		monitor:   diskMon,
+		logger:    logger,
+		dryRun:    *dryRun,
+		output:    *output,
+		report:    os.Stdout,
+		diskStats: monitor.GetDiskStats,
 	}
 
 	// Determine operation mode
@@ -178,13 +179,14 @@ func main() {
 }
 
 type daemon struct {
-	config   *config.Config
-	registry *plugins.Registry
-	monitor  *monitor.DiskMonitor
-	logger   *slog.Logger
-	dryRun   bool
-	output   string
-	report   io.Writer
+	config    *config.Config
+	registry  *plugins.Registry
+	monitor   *monitor.DiskMonitor
+	logger    *slog.Logger
+	dryRun    bool
+	output    string
+	report    io.Writer
+	diskStats func(path string) (*monitor.DiskStats, error)
 }
 
 func (d *daemon) run(ctx context.Context) error {
@@ -225,12 +227,13 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		Mounts:      assessment.Mounts,
 	}
 
-	beforeStats, beforeErr := monitor.GetDiskStats(report.MonitorPath)
+	beforeStats, beforeErr := d.getDiskStats(report.MonitorPath)
 	if beforeErr != nil {
 		report.HostFreeError = beforeErr.Error()
 		d.logger.Warn("failed to measure host free space before cleanup", "path", report.MonitorPath, "error", beforeErr)
 	} else {
 		report.HostFreeBeforeBytes = beforeStats.Free
+		d.updateTargetFreeStatus(&report, beforeStats)
 	}
 
 	if level == monitor.LevelNone {
@@ -253,6 +256,16 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 			Level:       level.String(),
 			DryRun:      d.dryRun,
 			WouldRun:    true,
+		}
+
+		if !d.dryRun && report.TargetFreeMet {
+			pluginReport.WouldRun = false
+			pluginReport.SkipReason = "target_free_met"
+			if report.StopReason == "" {
+				report.StopReason = "target_free_met"
+			}
+			report.Plugins = append(report.Plugins, pluginReport)
+			continue
 		}
 
 		if d.dryRun {
@@ -298,21 +311,14 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 			totalFreed += result.BytesFreed
 			totalItems += result.ItemsCleaned
 		}
+
+		d.updateHostFreeAfter(&report, beforeStats, beforeErr)
 	}
 
 	report.TotalBytesFreed = totalFreed
 	report.TotalItemsCleaned = totalItems
 
-	afterStats, afterErr := monitor.GetDiskStats(report.MonitorPath)
-	if afterErr != nil {
-		report.HostFreeError = afterErr.Error()
-		d.logger.Warn("failed to measure host free space after cleanup", "path", report.MonitorPath, "error", afterErr)
-	} else {
-		report.HostFreeAfterBytes = afterStats.Free
-		if beforeErr == nil {
-			report.HostFreeDeltaBytes = int64(afterStats.Free) - int64(beforeStats.Free)
-		}
-	}
+	d.updateHostFreeAfter(&report, beforeStats, beforeErr)
 
 	d.logger.Info("cleanup cycle host free-space",
 		"path", report.MonitorPath,
@@ -342,6 +348,16 @@ type cycleReport struct {
 	HostFreeAfterBytes  uint64 `json:"host_free_after_bytes"`
 	HostFreeDeltaBytes  int64  `json:"host_free_delta_bytes"`
 	HostFreeError       string `json:"host_free_error,omitempty"`
+	// TargetUsedPercent is the legacy target_free config value as a maximum used percentage.
+	TargetUsedPercent int `json:"target_used_percent"`
+	// TargetFreeBytes is the free-space equivalent required to satisfy TargetUsedPercent.
+	TargetFreeBytes uint64 `json:"target_free_bytes"`
+	// TargetFreeDeficitBytes is the remaining free-space gap to the target.
+	TargetFreeDeficitBytes int64 `json:"target_free_deficit_bytes"`
+	// TargetFreeMet reports whether the host already satisfies the target.
+	TargetFreeMet bool `json:"target_free_met"`
+	// StopReason explains why remaining cleanup plugins were skipped.
+	StopReason string `json:"stop_reason,omitempty"`
 	// PlannedEstimatedBytesFreed aggregates dry-run plugin plan estimates.
 	PlannedEstimatedBytesFreed int64 `json:"planned_estimated_bytes_freed,omitempty"`
 	// PlannedRequiredFreeBytes is the largest free-space preflight requirement across plugin plans.
@@ -394,7 +410,7 @@ func (d *daemon) assessMounts() mountAssessment {
 	if len(d.config.MonitoredMounts) > 0 {
 		// Multi-mount monitoring: check each configured mount point
 		for _, mount := range d.config.MonitoredMounts {
-			stats, err := monitor.GetDiskStats(mount.Path)
+			stats, err := d.getDiskStats(mount.Path)
 			label := mount.Label
 			if label == "" {
 				label = mount.Path
@@ -457,7 +473,7 @@ func (d *daemon) assessMounts() mountAssessment {
 			monitorPath = home
 		}
 
-		stats, detectedLevel, err := d.monitor.Check(monitorPath)
+		stats, err := d.getDiskStats(monitorPath)
 		if err != nil {
 			d.logger.Error("failed to check disk", "error", err)
 			assessment.Mounts = append(assessment.Mounts, mountReport{
@@ -468,6 +484,7 @@ func (d *daemon) assessMounts() mountAssessment {
 			})
 			return assessment
 		}
+		detectedLevel := d.monitor.CheckLevel(stats)
 
 		assessment.Mounts = append(assessment.Mounts, mountReport{
 			Label:       monitorPath,
@@ -518,6 +535,55 @@ func (d *daemon) writeReport(report cycleReport) error {
 	encoder := json.NewEncoder(d.report)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(report)
+}
+
+func (d *daemon) getDiskStats(path string) (*monitor.DiskStats, error) {
+	if d.diskStats != nil {
+		return d.diskStats(path)
+	}
+	return monitor.GetDiskStats(path)
+}
+
+func (d *daemon) updateHostFreeAfter(report *cycleReport, beforeStats *monitor.DiskStats, beforeErr error) {
+	afterStats, afterErr := d.getDiskStats(report.MonitorPath)
+	if afterErr != nil {
+		report.HostFreeError = afterErr.Error()
+		d.logger.Warn("failed to measure host free space after cleanup", "path", report.MonitorPath, "error", afterErr)
+		return
+	}
+
+	report.HostFreeAfterBytes = afterStats.Free
+	if beforeErr == nil && beforeStats != nil {
+		report.HostFreeDeltaBytes = int64(afterStats.Free) - int64(beforeStats.Free)
+	}
+	d.updateTargetFreeStatus(report, afterStats)
+}
+
+func (d *daemon) updateTargetFreeStatus(report *cycleReport, stats *monitor.DiskStats) {
+	targetFreeBytes, ok := targetFreeBytes(stats.Total, d.config.TargetFree)
+	if !ok {
+		return
+	}
+
+	report.TargetUsedPercent = d.config.TargetFree
+	report.TargetFreeBytes = targetFreeBytes
+	if stats.Free >= targetFreeBytes {
+		report.TargetFreeDeficitBytes = 0
+		report.TargetFreeMet = true
+		return
+	}
+
+	report.TargetFreeDeficitBytes = int64(targetFreeBytes - stats.Free)
+	report.TargetFreeMet = false
+}
+
+func targetFreeBytes(totalBytes uint64, targetUsedPercent int) (uint64, bool) {
+	if totalBytes == 0 || targetUsedPercent <= 0 || targetUsedPercent >= 100 {
+		return 0, false
+	}
+
+	freePercent := 100 - targetUsedPercent
+	return totalBytes * uint64(freePercent) / 100, true
 }
 
 func bytesToGB(bytes uint64) string {

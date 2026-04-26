@@ -12,7 +12,8 @@ thresholds:
   aggressive: 90   # Level 3: Prune volumes
   critical: 95     # Level 4: Emergency cleanup
 
-# Target free space percentage after cleanup
+# Target maximum used-space percentage after cleanup.
+# Historical key name is target_free.
 target_free: 70
 
 # Enable/disable specific cleanup plugins

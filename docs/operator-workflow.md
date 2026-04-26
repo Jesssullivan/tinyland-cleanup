@@ -15,6 +15,8 @@ The JSON report includes:
 - the selected cleanup level;
 - monitored mount status;
 - host free-space before and after the cycle;
+- the configured target maximum used percentage and equivalent free-space
+  deficit;
 - top-level dry-run totals for planned estimated reclaim, required free space,
   and cleanup target count;
 - enabled plugins that would run;
@@ -41,6 +43,13 @@ The report distinguishes:
   available;
 - `host_bytes_freed`: plugin-isolated host free-space measurement, when
   available;
+- `target_used_percent`: the legacy `target_free` config value, interpreted as
+  the desired maximum used percentage after cleanup;
+- `target_free_bytes`: the host free-space equivalent of that target;
+- `target_free_deficit_bytes`: remaining bytes needed to satisfy the target;
+- `target_free_met`: whether the current host free space satisfies the target;
+- `stop_reason`: why remaining plugins were skipped, currently
+  `target_free_met` when a real cleanup cycle reaches the target;
 - `planned_estimated_bytes_freed`: aggregate dry-run reclaim estimate from
   plugin plans;
 - `planned_required_free_bytes`: largest free-space preflight requirement
@@ -66,6 +75,7 @@ operator review before budget enforcement is enabled.
 ## Current Boundary
 
 This is the first stable reporting surface. It now exposes typed targets for
-selected plugins, but not per-file cleanup candidates for every plugin. Treat
-broader candidate planning, active-use evidence, cooldown state, and
-target-free stop behavior as the next policy layer.
+selected plugins, but not per-file cleanup candidates for every plugin. Real
+cleanup cycles stop remaining plugins after the host reaches the configured
+target. Treat broader candidate planning, active-use evidence, cooldown state,
+and CLI target-free overrides as the next policy layer.

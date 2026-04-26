@@ -13,6 +13,7 @@ builder and runner machines.
 - Dry-run behavior must stay useful enough for operator review.
 - Cleanup policy should explain what it plans to remove and why.
 - Host free-space accounting should be measured before and after cleanup.
+- Real cleanup should stop once the configured host free-space target is met.
 - Privileged actions, offline compaction, and service disruption must remain
   explicit policy choices.
 

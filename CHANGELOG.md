@@ -22,10 +22,14 @@ All notable changes to this project will be documented in this file.
   protected workspace symlink detection, and budget metadata.
 - Top-level dry-run summary fields for planned estimated reclaim, required free
   space, and cleanup target count.
+- Target-free report fields and real-cleanup stop behavior once the configured
+  target is reached.
 
 ### Changed
 
 - Go module path moved to `github.com/Jesssullivan/tinyland-cleanup`.
+- Clarified that the legacy `target_free` config key represents the target
+  maximum used-space percentage after cleanup.
 
 ## [0.2.0]
 

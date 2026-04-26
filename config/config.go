@@ -17,7 +17,7 @@ type Config struct {
 	// Thresholds for disk usage (percentage)
 	Thresholds Thresholds `yaml:"thresholds"`
 
-	// TargetFree percentage of disk space to achieve after cleanup
+	// TargetFree is the legacy config key for target maximum used percentage after cleanup.
 	TargetFree int `yaml:"target_free"`
 
 	// LogFile path for cleanup logs
