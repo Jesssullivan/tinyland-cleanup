@@ -36,6 +36,7 @@ tinyland-cleanup --once --dry-run --level critical --plugins bazel --output text
 tinyland-cleanup --once --dry-run --level critical --plugins nix --output json
 tinyland-cleanup --once --dry-run --level critical --plugins cache --output text
 tinyland-cleanup --once --dry-run --level critical --plugins docker --output json
+tinyland-cleanup --once --dry-run --level critical --plugins homebrew,ios-simulator,xcode --output json
 ```
 
 The plugin filter is comma-separated and preserves the normal registry order:
@@ -158,6 +159,13 @@ oldest snapshot dates, requested thinning size, sudo capability, and Time
 Machine backup state. Snapshot sizes are estimates because `tmutil` does not
 report per-snapshot allocation; real cleanup requires passwordless sudo and is
 deferred while a Time Machine backup is active.
+
+For Homebrew, iOS Simulator, and Xcode on macOS, the plan reports package-manager
+cleanup estimates, simulator device/log/runtime targets, and Xcode logs,
+DerivedData, Archives, and DeviceSupport targets. Simulator and Xcode cleanup is
+deferred while active Simulator, Xcode, SourceKit, or `xcodebuild` work is
+visible. Simulator runtime deletion remains critical-level and passwordless-sudo
+only.
 
 ## Current Boundary
 

@@ -191,14 +191,128 @@ func TestCleanupDarwinDeveloperCacheTargetsDeletesOnlyEligibleTargets(t *testing
 	}
 }
 
+func TestHomebrewPlanTargetUsesDryRunEstimate(t *testing.T) {
+	target := homebrewPlanTarget(LevelCritical, "/tmp/homebrew-cache", 10, 50, true)
+
+	if target.Action != "clean-stale-files" {
+		t.Fatalf("expected stale-file cleanup action, got %#v", target)
+	}
+	if target.Bytes != 50 {
+		t.Fatalf("expected dry-run estimate to win over cache size, got %#v", target)
+	}
+	if target.Tier != CleanupTierWarm {
+		t.Fatalf("expected Homebrew cleanup to be warm tier, got %#v", target)
+	}
+}
+
+func TestHomebrewPlanTargetTrustsZeroDryRunEstimate(t *testing.T) {
+	target := homebrewPlanTarget(LevelCritical, "/tmp/homebrew-cache", 50, 0, true)
+
+	if target.Bytes != 0 || !target.Protected || target.Action != "keep" {
+		t.Fatalf("expected zero dry-run estimate to become a kept target after plan normalization, got %#v", target)
+	}
+}
+
+func TestIOSSimulatorPlanTargetsProtectsActiveWork(t *testing.T) {
+	root := t.TempDir()
+	devicePath := filepath.Join(root, "Devices")
+	runtimesPath := filepath.Join(root, "Runtimes")
+	writeFileAt(t, filepath.Join(devicePath, "device.log"), "simulator log")
+	writeFileAt(t, filepath.Join(runtimesPath, "runtime.bin"), "runtime")
+
+	targets := iosSimulatorPlanTargets(LevelCritical, devicePath, runtimesPath, true, true)
+
+	for _, target := range targets {
+		if !target.Active || !target.Protected || target.Action != "protect" {
+			t.Fatalf("expected active simulator work to protect every target: %#v", targets)
+		}
+		if target.HostReclaimsSpace == nil || *target.HostReclaimsSpace {
+			t.Fatalf("expected protected target to report no host reclaim: %#v", target)
+		}
+	}
+	if estimated := cleanupTargetEstimatedBytes(targets); estimated != 0 {
+		t.Fatalf("expected no estimated reclaim while active work is protected, got %d", estimated)
+	}
+}
+
+func TestXcodePlanTargetsCriticalKeepsNewestDeviceSupport(t *testing.T) {
+	xcodeDir := t.TempDir()
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+
+	logPath := filepath.Join(xcodeDir, "Logs", "build.log")
+	derivedPath := filepath.Join(xcodeDir, "DerivedData", "index.bin")
+	archivePath := filepath.Join(xcodeDir, "Archives", "archive.xcarchive")
+	writeFileAt(t, logPath, "old log")
+	writeSparseFileAt(t, derivedPath, 501*1024*1024)
+	writeSparseFileAt(t, archivePath, 501*1024*1024)
+	mustChtimes(t, logPath, now.Add(-8*24*time.Hour))
+
+	for i, name := range []string{"17.0", "16.4", "15.5"} {
+		path := filepath.Join(xcodeDir, "iOS DeviceSupport", name, "symbols.bin")
+		writeFileAt(t, path, name)
+		mustChtimes(t, filepath.Dir(path), now.Add(time.Duration(-i)*time.Hour))
+	}
+
+	targets := xcodePlanTargets(LevelCritical, xcodeDir, false, now)
+
+	logs := findCleanupTarget(t, targets, "xcode-logs", "old Xcode logs")
+	if logs.Action != "delete_old_logs" || logs.Protected {
+		t.Fatalf("expected old Xcode logs to be eligible: %#v", logs)
+	}
+	derived := findCleanupTarget(t, targets, "xcode-derived-data", "DerivedData")
+	if derived.Action != "delete_derived_data" || derived.Protected {
+		t.Fatalf("expected large DerivedData to be eligible: %#v", derived)
+	}
+	archives := findCleanupTarget(t, targets, "xcode-archives", "Archives")
+	if archives.Action != "delete_archives" || archives.Protected {
+		t.Fatalf("expected large Archives to be eligible: %#v", archives)
+	}
+	newest := findCleanupTarget(t, targets, "xcode-device-support", "17.0")
+	if newest.Action != "keep" || !newest.Protected {
+		t.Fatalf("expected newest DeviceSupport to be kept: %#v", newest)
+	}
+	oldest := findCleanupTarget(t, targets, "xcode-device-support", "15.5")
+	if oldest.Action != "delete_device_support" || oldest.Protected {
+		t.Fatalf("expected oldest DeviceSupport to be eligible: %#v", oldest)
+	}
+	if estimated := cleanupTargetEstimatedBytes(targets); estimated <= 0 {
+		t.Fatalf("expected positive estimated reclaim, got %d from %#v", estimated, targets)
+	}
+}
+
 func writeCacheFile(t *testing.T, home, relPath, content string) {
 	t.Helper()
 
 	path := filepath.Join(home, relPath)
+	writeFileAt(t, path, content)
+}
+
+func writeFileAt(t *testing.T, path, content string) {
+	t.Helper()
+
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeSparseFileAt(t *testing.T, path string, size int64) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(size); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

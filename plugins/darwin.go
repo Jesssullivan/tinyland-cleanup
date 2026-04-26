@@ -48,6 +48,54 @@ func (p *HomebrewPlugin) Enabled(cfg *config.Config) bool {
 	return cfg.Enable.Homebrew
 }
 
+// PlanCleanup reports Homebrew cleanup candidates without mutating Homebrew state.
+func (p *HomebrewPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupPlan {
+	_ = cfg
+	_ = logger
+
+	plan := CleanupPlan{
+		Plugin:   p.Name(),
+		Level:    level.String(),
+		Summary:  "Homebrew cleanup plan",
+		WouldRun: true,
+		Steps:    homebrewPlanSteps(level),
+		Metadata: map[string]string{
+			"cleanup_level": level.String(),
+		},
+	}
+
+	if _, err := exec.LookPath("brew"); err != nil {
+		plan.Summary = "Homebrew is not available"
+		plan.WouldRun = false
+		plan.SkipReason = "brew_unavailable"
+		return plan
+	}
+
+	home, _ := os.UserHomeDir()
+	cachePath := filepath.Join(home, "Library", "Caches", "Homebrew")
+	cacheBytes := getDirSize(cachePath)
+	dryRunBytes, dryRunErr := p.cleanupDryRunEstimate(ctx)
+	plan.Metadata["cache_path"] = cachePath
+	plan.Metadata["cache_bytes"] = strconv.FormatInt(cacheBytes, 10)
+	plan.Metadata["cleanup_dry_run_bytes"] = strconv.FormatInt(dryRunBytes, 10)
+	plan.Metadata["cleanup_dry_run_available"] = strconv.FormatBool(dryRunErr == nil)
+	if dryRunErr != nil {
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf("brew cleanup dry-run failed: %v", dryRunErr))
+	}
+
+	target := homebrewPlanTarget(level, cachePath, cacheBytes, dryRunBytes, dryRunErr == nil)
+	if target.Bytes == 0 {
+		target.Protected = true
+		target.Action = "keep"
+		target.Reason = "Homebrew reported no cleanup candidate bytes"
+	}
+	annotateCleanupTargetPolicy(&target, target.Tier, hostReclaimForAction(target.Action))
+	plan.Targets = []CleanupTarget{target}
+	plan.EstimatedBytesFreed = cleanupTargetEstimatedBytes(plan.Targets)
+	plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
+	return plan
+}
+
 // Cleanup performs Homebrew cleanup at the specified level.
 func (p *HomebrewPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{
@@ -125,6 +173,18 @@ func (p *HomebrewPlugin) cleanupCritical(ctx context.Context, logger *slog.Logge
 	return result
 }
 
+func (p *HomebrewPlugin) cleanupDryRunEstimate(ctx context.Context) (int64, error) {
+	dryRunCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(dryRunCtx, "brew", "cleanup", "--dry-run", "--prune=0")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("brew cleanup --dry-run --prune=0 failed: %w", err)
+	}
+	return parseBrewCleanupOutput(string(output)), nil
+}
+
 // IOSSimulatorPlugin handles iOS Simulator cleanup operations.
 type IOSSimulatorPlugin struct{}
 
@@ -153,6 +213,56 @@ func (p *IOSSimulatorPlugin) Enabled(cfg *config.Config) bool {
 	return cfg.Enable.IOSSimulator
 }
 
+// PlanCleanup reports iOS Simulator cleanup candidates without deleting devices or runtimes.
+func (p *IOSSimulatorPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupPlan {
+	_ = cfg
+	_ = logger
+
+	plan := CleanupPlan{
+		Plugin:   p.Name(),
+		Level:    level.String(),
+		Summary:  "iOS Simulator cleanup plan",
+		WouldRun: true,
+		Steps:    iosSimulatorPlanSteps(level),
+		Metadata: map[string]string{
+			"cleanup_level": level.String(),
+		},
+	}
+
+	if _, err := exec.LookPath("xcrun"); err != nil {
+		plan.Summary = "xcrun is not available"
+		plan.WouldRun = false
+		plan.SkipReason = "xcrun_unavailable"
+		return plan
+	}
+
+	activeProcesses := darwinActiveProcessNames(ctx)
+	active := darwinAnyProcessActive(activeProcesses, "simulator", "coresimulator", "xcodebuild")
+	sudoCap := DetectSudo(ctx)
+	home, _ := os.UserHomeDir()
+	devicePath := filepath.Join(home, "Library", "Developer", "CoreSimulator", "Devices")
+	runtimesPath := "/Library/Developer/CoreSimulator/Volumes"
+
+	plan.Metadata["active_simulator_processes"] = strconv.FormatBool(active)
+	plan.Metadata["sudo_available"] = strconv.FormatBool(sudoCap.Available)
+	plan.Metadata["sudo_passwordless"] = strconv.FormatBool(sudoCap.Passwordless)
+	plan.Metadata["device_path"] = devicePath
+	plan.Metadata["runtimes_path"] = runtimesPath
+	plan.Targets = iosSimulatorPlanTargets(level, devicePath, runtimesPath, active, sudoCap.Passwordless)
+	plan.EstimatedBytesFreed = cleanupTargetEstimatedBytes(plan.Targets)
+	plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
+
+	if active {
+		plan.Summary = "iOS Simulator cleanup is deferred because simulator work is active"
+		plan.WouldRun = false
+		plan.SkipReason = "ios_simulator_active"
+	}
+	if level == LevelCritical && !sudoCap.Passwordless {
+		plan.Warnings = append(plan.Warnings, "critical runtime deletion requires passwordless sudo")
+	}
+	return plan
+}
+
 // Cleanup performs iOS Simulator cleanup at the specified level.
 func (p *IOSSimulatorPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{
@@ -163,6 +273,12 @@ func (p *IOSSimulatorPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	// Check if xcrun is available
 	if _, err := exec.LookPath("xcrun"); err != nil {
 		logger.Debug("xcrun not available, skipping")
+		return result
+	}
+
+	activeProcesses := darwinActiveProcessNames(ctx)
+	if darwinAnyProcessActive(activeProcesses, "simulator", "coresimulator", "xcodebuild") {
+		logger.Warn("iOS Simulator work is active, skipping simulator cleanup")
 		return result
 	}
 
@@ -281,6 +397,47 @@ func (p *XcodePlugin) Enabled(cfg *config.Config) bool {
 	return cfg.Enable.IOSSimulator // Bundled with iOS Simulator cleanup
 }
 
+// PlanCleanup reports Xcode cleanup candidates without deleting Xcode state.
+func (p *XcodePlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupPlan {
+	_ = cfg
+	_ = logger
+
+	plan := CleanupPlan{
+		Plugin:   p.Name(),
+		Level:    level.String(),
+		Summary:  "Xcode cleanup plan",
+		WouldRun: true,
+		Steps:    xcodePlanSteps(level),
+		Metadata: map[string]string{
+			"cleanup_level": level.String(),
+		},
+	}
+
+	home, _ := os.UserHomeDir()
+	xcodeDevDir := filepath.Join(home, "Library", "Developer", "Xcode")
+	if !pathExistsAndIsDir(xcodeDevDir) {
+		plan.Summary = "No Xcode developer directory found"
+		plan.WouldRun = false
+		plan.SkipReason = "xcode_data_unavailable"
+		return plan
+	}
+
+	activeProcesses := darwinActiveProcessNames(ctx)
+	active := darwinAnyProcessActive(activeProcesses, "xcode", "xcodebuild", "sourcekit")
+	plan.Metadata["xcode_dev_dir"] = xcodeDevDir
+	plan.Metadata["active_xcode_processes"] = strconv.FormatBool(active)
+	plan.Targets = xcodePlanTargets(level, xcodeDevDir, active, time.Now())
+	plan.EstimatedBytesFreed = cleanupTargetEstimatedBytes(plan.Targets)
+	plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
+
+	if active {
+		plan.Summary = "Xcode cleanup is deferred because Xcode work is active"
+		plan.WouldRun = false
+		plan.SkipReason = "xcode_active"
+	}
+	return plan
+}
+
 // Cleanup performs Xcode cleanup at the specified level.
 func (p *XcodePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{
@@ -292,6 +449,12 @@ func (p *XcodePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	xcodeDevDir := filepath.Join(home, "Library", "Developer", "Xcode")
 
 	if _, err := os.Stat(xcodeDevDir); os.IsNotExist(err) {
+		return result
+	}
+
+	activeProcesses := darwinActiveProcessNames(ctx)
+	if darwinAnyProcessActive(activeProcesses, "xcode", "xcodebuild", "sourcekit") {
+		logger.Warn("Xcode work is active, skipping Xcode cleanup")
 		return result
 	}
 
@@ -408,6 +571,285 @@ func (p *XcodePlugin) cleanDeviceSupport(dir string, keepCount int, logger *slog
 	}
 
 	return freed
+}
+
+func homebrewPlanSteps(level CleanupLevel) []string {
+	switch level {
+	case LevelWarning:
+		return []string{"Run brew cleanup -s to remove Homebrew downloads cache"}
+	case LevelModerate, LevelAggressive:
+		return []string{"Run brew cleanup --prune=0 to remove old formula and cask versions"}
+	case LevelCritical:
+		return []string{"Run brew autoremove", "Run brew cleanup --prune=0"}
+	default:
+		return []string{"Report Homebrew cleanup state"}
+	}
+}
+
+func homebrewPlanTarget(level CleanupLevel, cachePath string, cacheBytes int64, dryRunBytes int64, dryRunAvailable bool) CleanupTarget {
+	bytes := cacheBytes
+	action := "clean-cache"
+	reason := "Homebrew downloads cache is eligible for cleanup"
+	protected := level < LevelWarning
+	if level >= LevelModerate {
+		action = "clean-stale-files"
+		reason = "Homebrew dry-run reports old formula, cask, or cache cleanup candidates"
+		if dryRunAvailable {
+			bytes = dryRunBytes
+		} else if dryRunBytes > bytes {
+			bytes = dryRunBytes
+		}
+	}
+	if level >= LevelCritical {
+		reason = "critical level runs brew autoremove and full cleanup"
+	}
+	if protected {
+		action = "report"
+		reason = "no cleanup level selected"
+	}
+	if bytes == 0 {
+		protected = true
+		action = "keep"
+		reason = "Homebrew reported no cleanup candidate bytes"
+	}
+	return CleanupTarget{
+		Type:      "homebrew-cache",
+		Tier:      CleanupTierWarm,
+		Name:      "Homebrew cleanup",
+		Path:      cachePath,
+		Bytes:     bytes,
+		Protected: protected,
+		Action:    action,
+		Reason:    reason,
+	}
+}
+
+func iosSimulatorPlanSteps(level CleanupLevel) []string {
+	switch level {
+	case LevelWarning, LevelModerate:
+		return []string{"Delete unavailable iOS Simulator devices"}
+	case LevelAggressive:
+		return []string{"Delete unavailable iOS Simulator devices", "Delete simulator device log files"}
+	case LevelCritical:
+		return []string{"Delete unavailable iOS Simulator devices", "Delete simulator device log files", "Delete simulator runtimes when passwordless sudo is available"}
+	default:
+		return []string{"Report iOS Simulator cleanup state"}
+	}
+}
+
+func iosSimulatorPlanTargets(level CleanupLevel, devicePath string, runtimesPath string, active bool, sudoPasswordless bool) []CleanupTarget {
+	targets := []CleanupTarget{{
+		Type:      "ios-simulator-devices",
+		Tier:      CleanupTierSafe,
+		Name:      "unavailable simulator devices",
+		Path:      devicePath,
+		Bytes:     0,
+		Active:    active,
+		Protected: active || level < LevelWarning,
+		Action:    "delete_unavailable_devices",
+		Reason:    "xcrun simctl delete unavailable removes devices already marked unavailable",
+	}}
+	if targets[0].Protected {
+		targets[0].Action = "protect"
+		targets[0].Reason = "simulator device cleanup is not currently eligible"
+		if active {
+			targets[0].Reason = "active simulator or Xcode process detected"
+		}
+	}
+	annotateCleanupTargetPolicy(&targets[0], targets[0].Tier, hostReclaimForAction(targets[0].Action))
+
+	logBytes := filesWithSuffixSize(devicePath, ".log")
+	logTarget := CleanupTarget{
+		Type:      "ios-simulator-logs",
+		Tier:      CleanupTierSafe,
+		Name:      "simulator device logs",
+		Path:      devicePath,
+		Bytes:     logBytes,
+		Active:    active,
+		Protected: active || level < LevelAggressive || logBytes == 0,
+		Action:    "delete_simulator_logs",
+		Reason:    "aggressive level deletes simulator device log files",
+	}
+	if logTarget.Protected {
+		logTarget.Action = "protect"
+		logTarget.Reason = "simulator logs are not currently eligible"
+	}
+	annotateCleanupTargetPolicy(&logTarget, logTarget.Tier, hostReclaimForAction(logTarget.Action))
+	targets = append(targets, logTarget)
+
+	runtimeBytes := getDirSize(runtimesPath)
+	runtimeTarget := CleanupTarget{
+		Type:      "ios-simulator-runtimes",
+		Tier:      CleanupTierPrivileged,
+		Name:      "simulator runtimes",
+		Path:      runtimesPath,
+		Bytes:     runtimeBytes,
+		Active:    active,
+		Protected: active || level < LevelCritical || runtimeBytes <= darwinDevCacheGiB || !sudoPasswordless,
+		Action:    "delete_simulator_runtimes",
+		Reason:    "critical level can delete installed simulator runtimes when they exceed 1 GiB",
+	}
+	if runtimeTarget.Protected {
+		runtimeTarget.Action = "protect"
+		runtimeTarget.Reason = "simulator runtimes are not currently eligible"
+	}
+	annotateCleanupTargetPolicy(&runtimeTarget, runtimeTarget.Tier, hostReclaimForAction(runtimeTarget.Action))
+	targets = append(targets, runtimeTarget)
+	return targets
+}
+
+func xcodePlanSteps(level CleanupLevel) []string {
+	switch level {
+	case LevelWarning, LevelModerate:
+		return []string{"Delete Xcode logs older than 7 days"}
+	case LevelAggressive:
+		return []string{"Delete Xcode logs older than 7 days", "Delete Xcode DerivedData when larger than 500 MiB"}
+	case LevelCritical:
+		return []string{"Delete Xcode logs older than 7 days", "Delete Xcode DerivedData when larger than 500 MiB", "Delete Xcode Archives when larger than 500 MiB", "Delete old iOS DeviceSupport directories while preserving the newest two"}
+	default:
+		return []string{"Report Xcode cleanup state"}
+	}
+}
+
+func xcodePlanTargets(level CleanupLevel, xcodeDevDir string, active bool, now time.Time) []CleanupTarget {
+	var targets []CleanupTarget
+
+	logsDir := filepath.Join(xcodeDevDir, "Logs")
+	logBytes := oldFilesSize(logsDir, 7*24*time.Hour, now)
+	targets = append(targets, xcodePlanTarget("xcode-logs", "old Xcode logs", logsDir, logBytes, CleanupTierSafe, active || level < LevelWarning || logBytes == 0, "delete_old_logs", "logs older than 7 days are eligible"))
+
+	derivedData := filepath.Join(xcodeDevDir, "DerivedData")
+	derivedBytes := getDirSize(derivedData)
+	derivedProtected := active || level < LevelAggressive || derivedBytes <= 500*1024*1024
+	targets = append(targets, xcodePlanTarget("xcode-derived-data", "DerivedData", derivedData, derivedBytes, CleanupTierWarm, derivedProtected, "delete_derived_data", "DerivedData is rebuildable and eligible at aggressive or critical levels when larger than 500 MiB"))
+
+	archivesDir := filepath.Join(xcodeDevDir, "Archives")
+	archiveBytes := getDirSize(archivesDir)
+	archiveProtected := active || level < LevelCritical || archiveBytes <= 500*1024*1024
+	targets = append(targets, xcodePlanTarget("xcode-archives", "Archives", archivesDir, archiveBytes, CleanupTierDestructive, archiveProtected, "delete_archives", "Archives are eligible only at critical level when larger than 500 MiB"))
+
+	deviceSupportDir := filepath.Join(xcodeDevDir, "iOS DeviceSupport")
+	targets = append(targets, xcodeDeviceSupportPlanTargets(deviceSupportDir, 2, active, level)...)
+	return targets
+}
+
+func xcodePlanTarget(targetType string, name string, path string, bytes int64, tier string, protected bool, action string, reason string) CleanupTarget {
+	target := CleanupTarget{
+		Type:      targetType,
+		Tier:      tier,
+		Name:      name,
+		Path:      path,
+		Bytes:     bytes,
+		Protected: protected,
+		Action:    action,
+		Reason:    reason,
+	}
+	if protected {
+		target.Action = "protect"
+		target.Reason = "target is not currently eligible"
+	}
+	annotateCleanupTargetPolicy(&target, target.Tier, hostReclaimForAction(target.Action))
+	return target
+}
+
+func xcodeDeviceSupportPlanTargets(dir string, keepCount int, active bool, level CleanupLevel) []CleanupTarget {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	type dirEntry struct {
+		name    string
+		path    string
+		modTime time.Time
+		bytes   int64
+	}
+	var dirs []dirEntry
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		dirs = append(dirs, dirEntry{
+			name:    entry.Name(),
+			path:    path,
+			modTime: info.ModTime(),
+			bytes:   getDirSize(path),
+		})
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		return dirs[i].modTime.After(dirs[j].modTime)
+	})
+
+	targets := make([]CleanupTarget, 0, len(dirs))
+	for idx, entry := range dirs {
+		protected := active || level < LevelCritical || idx < keepCount
+		target := CleanupTarget{
+			Type:      "xcode-device-support",
+			Tier:      CleanupTierWarm,
+			Name:      entry.name,
+			Path:      entry.path,
+			Bytes:     entry.bytes,
+			Protected: protected,
+			Action:    "delete_device_support",
+			Reason:    "old iOS DeviceSupport directory is outside keep-newest policy",
+		}
+		if protected {
+			target.Action = "keep"
+			target.Reason = "newest DeviceSupport directories are preserved"
+			if active {
+				target.Action = "protect"
+				target.Reason = "active Xcode process detected"
+			}
+		}
+		annotateCleanupTargetPolicy(&target, target.Tier, hostReclaimForAction(target.Action))
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func oldFilesSize(dir string, maxAge time.Duration, now time.Time) int64 {
+	cutoff := now.Add(-maxAge)
+	var size int64
+	filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if info.ModTime().Before(cutoff) {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size
+}
+
+func filesWithSuffixSize(dir string, suffix string) int64 {
+	var size int64
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(path, suffix) {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size
+}
+
+func cleanupTargetEstimatedBytes(targets []CleanupTarget) int64 {
+	var total int64
+	for _, target := range targets {
+		if target.Protected {
+			continue
+		}
+		total += target.Bytes
+	}
+	return total
 }
 
 // CachePlugin handles macOS cache cleanup.
