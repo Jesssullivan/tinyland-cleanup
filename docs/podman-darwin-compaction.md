@@ -18,10 +18,11 @@ The Podman plan reports:
 
 - provider and running state;
 - disk format and disk path;
+- scratch directory, temp image path, and rollback backup path;
 - logical image size and physical host allocation;
 - required temporary free space based on physical allocation plus headroom;
 - active-container status;
-- whether `qemu-img` is available;
+- whether `qemu-img` is available and which executable path will be used;
 - protected targets for blocked VM disk compaction, scratch-space requirements,
   and active-container quiescence;
 - the exact stop, convert, verify, replace, and start sequence.
@@ -41,6 +42,8 @@ podman:
   compact_min_reclaim_gb: 8
   compact_require_no_active_containers: true
   compact_keep_backup_until_restart: true
+  compact_scratch_dir: ""
+  compact_qemu_img_path: ""
   compact_provider_allowlist:
     - applehv
     - libkrun
@@ -51,6 +54,18 @@ The preflight skips compaction when the disk path is outside expected Podman
 machine directories, `qemu-img` is unavailable, active containers are running,
 the provider is unknown, a rollback backup already exists, or the filesystem
 does not have enough physical free space for the compacted copy.
+
+`compact_scratch_dir` may point at a reviewed scratch directory when the default
+VM disk directory cannot hold the temporary compacted image. The current
+mutation flow only supports scratch directories on the same filesystem as the VM
+disk, because replacement is performed with filesystem renames. Cross-device
+scratch directories are reported as protected targets with
+`scratch_dir_cross_device_replace_unsupported` until a separate copy-and-verify
+replacement flow lands.
+
+`compact_qemu_img_path` is optional. Set it only when the daemon environment does
+not have `qemu-img` on `PATH`, for example when operators intentionally provide
+the executable from a Nix profile or wrapped package.
 
 When `active_containers` or `insufficient_free_space` appears, treat the plan as
 a quiescence or scratch-capacity task. Do not force compaction on an active

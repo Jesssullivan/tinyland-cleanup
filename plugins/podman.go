@@ -47,14 +47,19 @@ type podmanCompactionPlan struct {
 	Provider                  string
 	DiskFormat                string
 	DiskPath                  string
+	ScratchDir                string
 	TempPath                  string
 	BackupPath                string
 	ConfigEnabled             bool
+	QemuImgPath               string
 	QemuImgAvailable          bool
 	ActiveContainers          bool
 	ActiveContainerCheckError string
 	DiskPathExpected          bool
 	BackupExists              bool
+	ScratchDirConfigured      bool
+	ScratchDirAvailable       bool
+	ScratchDirCrossDevice     bool
 	LogicalBytes              int64
 	PhysicalBytes             int64
 	FreeBytes                 int64
@@ -70,12 +75,17 @@ type podmanCompactionPlanInput struct {
 	MachineName               string
 	Provider                  string
 	DiskPath                  string
+	ScratchDir                string
 	ConfigEnabled             bool
+	QemuImgPath               string
 	QemuImgAvailable          bool
 	ActiveContainers          bool
 	ActiveContainerCheckError string
 	DiskPathExpected          bool
 	BackupExists              bool
+	ScratchDirConfigured      bool
+	ScratchDirAvailable       bool
+	ScratchDirCrossDevice     bool
 	LogicalBytes              int64
 	PhysicalBytes             int64
 	FreeBytes                 int64
@@ -196,14 +206,19 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 			plan.Metadata["offline_compaction_provider"] = compaction.Provider
 			plan.Metadata["offline_compaction_format"] = compaction.DiskFormat
 			plan.Metadata["offline_compaction_disk_path"] = compaction.DiskPath
+			plan.Metadata["offline_compaction_scratch_dir"] = compaction.ScratchDir
 			plan.Metadata["offline_compaction_temp_path"] = compaction.TempPath
 			plan.Metadata["offline_compaction_backup_path"] = compaction.BackupPath
+			plan.Metadata["offline_compaction_qemu_img_path"] = compaction.QemuImgPath
 			plan.Metadata["offline_compaction_logical_bytes"] = strconv.FormatInt(compaction.LogicalBytes, 10)
 			plan.Metadata["offline_compaction_physical_bytes"] = strconv.FormatInt(compaction.PhysicalBytes, 10)
 			plan.Metadata["offline_compaction_free_bytes"] = strconv.FormatInt(compaction.FreeBytes, 10)
 			plan.Metadata["offline_compaction_required_free_bytes"] = strconv.FormatInt(compaction.RequiredFreeBytes, 10)
 			plan.Metadata["offline_compaction_estimated_reclaim_bytes"] = strconv.FormatInt(compaction.EstimatedReclaimBytes, 10)
 			plan.Metadata["offline_compaction_active_containers"] = strconv.FormatBool(compaction.ActiveContainers)
+			plan.Metadata["offline_compaction_scratch_dir_configured"] = strconv.FormatBool(compaction.ScratchDirConfigured)
+			plan.Metadata["offline_compaction_scratch_dir_available"] = strconv.FormatBool(compaction.ScratchDirAvailable)
+			plan.Metadata["offline_compaction_scratch_dir_cross_device"] = strconv.FormatBool(compaction.ScratchDirCrossDevice)
 			plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
 		}
 	}
@@ -634,11 +649,13 @@ func parseFstrimOutput(output string) int64 {
 }
 
 func (p *PodmanPlugin) planOfflineCompaction(ctx context.Context, cfg *config.Config, logger *slog.Logger) podmanCompactionPlan {
+	qemuImgPath, qemuImgAvailable := resolveQemuImgPath(cfg.Podman.CompactQemuImgPath)
 	input := podmanCompactionPlanInput{
 		MachineName:      p.environment.MachineName,
 		Provider:         p.environment.VMProvider,
 		ConfigEnabled:    cfg.Podman.CompactDiskOffline,
-		QemuImgAvailable: commandAvailable("qemu-img"),
+		QemuImgPath:      qemuImgPath,
+		QemuImgAvailable: qemuImgAvailable,
 		Config:           cfg.Podman,
 	}
 
@@ -654,6 +671,8 @@ func (p *PodmanPlugin) planOfflineCompaction(ctx context.Context, cfg *config.Co
 	input.DiskPath = diskPath
 	input.DiskPathExpected = expectedPodmanMachineDiskPath(diskPath)
 	input.BackupExists = pathExists(diskPath + ".backup")
+	input.ScratchDir = filepath.Dir(diskPath)
+	input.ScratchDirAvailable = true
 
 	if stat, err := os.Stat(diskPath); err == nil {
 		input.LogicalBytes = stat.Size()
@@ -672,10 +691,38 @@ func (p *PodmanPlugin) planOfflineCompaction(ctx context.Context, cfg *config.Co
 		input.PhysicalBytes = input.LogicalBytes
 	}
 
-	if free, err := getFreeDiskSpace(filepath.Dir(diskPath)); err == nil {
+	if configuredScratchDir := strings.TrimSpace(cfg.Podman.CompactScratchDir); configuredScratchDir != "" {
+		home, _ := os.UserHomeDir()
+		input.ScratchDirConfigured = true
+		input.ScratchDir = filepath.Clean(expandHome(configuredScratchDir, home))
+		stat, err := os.Stat(input.ScratchDir)
+		if err != nil {
+			logger.Debug("Podman compaction scratch directory preflight failed", "scratch_dir", input.ScratchDir, "error", err)
+			input.ScratchDirAvailable = false
+			plan := buildPodmanCompactionPlan(input)
+			plan.SkipReason = "scratch_dir_unavailable"
+			plan.Warnings = append(plan.Warnings, err.Error())
+			return plan
+		}
+		if !stat.IsDir() {
+			logger.Debug("Podman compaction scratch path is not a directory", "scratch_dir", input.ScratchDir)
+			input.ScratchDirAvailable = false
+			plan := buildPodmanCompactionPlan(input)
+			plan.SkipReason = "scratch_dir_not_directory"
+			return plan
+		}
+	}
+
+	if diskDevice, err := deviceID(filepath.Dir(diskPath)); err == nil {
+		if scratchDevice, err := deviceID(input.ScratchDir); err == nil {
+			input.ScratchDirCrossDevice = diskDevice != scratchDevice
+		}
+	}
+
+	if free, err := getFreeDiskSpace(input.ScratchDir); err == nil {
 		input.FreeBytes = int64FromUint64(free)
 	} else {
-		logger.Debug("Podman disk free-space preflight failed", "disk", diskPath, "error", err)
+		logger.Debug("Podman disk free-space preflight failed", "scratch_dir", input.ScratchDir, "error", err)
 		plan := buildPodmanCompactionPlan(input)
 		plan.SkipReason = "free_space_check_failed"
 		plan.Warnings = append(plan.Warnings, err.Error())
@@ -695,11 +742,20 @@ func (p *PodmanPlugin) planOfflineCompaction(ctx context.Context, cfg *config.Co
 
 func buildPodmanCompactionPlan(input podmanCompactionPlanInput) podmanCompactionPlan {
 	diskFormat, supportedProvider := podmanDiskFormat(input.Provider)
+	scratchDir := input.ScratchDir
 	tempPath := ""
 	backupPath := ""
 	if input.DiskPath != "" {
-		tempPath = input.DiskPath + ".compact"
+		if scratchDir == "" {
+			scratchDir = filepath.Dir(input.DiskPath)
+		}
+		tempPath = filepath.Join(scratchDir, filepath.Base(input.DiskPath)+".compact")
 		backupPath = input.DiskPath + ".backup"
+	}
+	scratchDirAvailable := input.ScratchDirAvailable || (!input.ScratchDirConfigured && scratchDir != "")
+	qemuImgPath := input.QemuImgPath
+	if qemuImgPath == "" {
+		qemuImgPath = "qemu-img"
 	}
 
 	physicalBytes := input.PhysicalBytes
@@ -721,14 +777,19 @@ func buildPodmanCompactionPlan(input podmanCompactionPlanInput) podmanCompaction
 		Provider:                  input.Provider,
 		DiskFormat:                diskFormat,
 		DiskPath:                  input.DiskPath,
+		ScratchDir:                scratchDir,
 		TempPath:                  tempPath,
 		BackupPath:                backupPath,
 		ConfigEnabled:             input.ConfigEnabled,
+		QemuImgPath:               qemuImgPath,
 		QemuImgAvailable:          input.QemuImgAvailable,
 		ActiveContainers:          input.ActiveContainers,
 		ActiveContainerCheckError: input.ActiveContainerCheckError,
 		DiskPathExpected:          input.DiskPathExpected,
 		BackupExists:              input.BackupExists,
+		ScratchDirConfigured:      input.ScratchDirConfigured,
+		ScratchDirAvailable:       scratchDirAvailable,
+		ScratchDirCrossDevice:     input.ScratchDirCrossDevice,
 		LogicalBytes:              input.LogicalBytes,
 		PhysicalBytes:             physicalBytes,
 		FreeBytes:                 input.FreeBytes,
@@ -736,9 +797,10 @@ func buildPodmanCompactionPlan(input podmanCompactionPlanInput) podmanCompaction
 		EstimatedReclaimBytes:     estimatedReclaimBytes,
 		Steps: []string{
 			fmt.Sprintf("Inspect Podman machine %q disk metadata", input.MachineName),
+			fmt.Sprintf("Check offline compaction scratch space at %s", scratchDir),
 			"Confirm no active containers are running",
 			fmt.Sprintf("Stop Podman machine %q", input.MachineName),
-			fmt.Sprintf("Convert %s to %s with qemu-img convert -f %s -O %s", input.DiskPath, tempPath, diskFormat, diskFormat),
+			fmt.Sprintf("Convert %s to %s with %s convert -f %s -O %s", input.DiskPath, tempPath, qemuImgPath, diskFormat, diskFormat),
 			"Verify the compacted image before replacing the original",
 			"Preserve the original disk image as rollback backup until restart succeeds",
 			fmt.Sprintf("Replace %s with compacted image", input.DiskPath),
@@ -775,6 +837,10 @@ func buildPodmanCompactionPlan(input podmanCompactionPlanInput) podmanCompaction
 		plan.SkipReason = "active_containers"
 	case !input.QemuImgAvailable:
 		plan.SkipReason = "qemu_img_missing"
+	case !scratchDirAvailable:
+		plan.SkipReason = "scratch_dir_unavailable"
+	case input.ScratchDirConfigured && input.ScratchDirCrossDevice:
+		plan.SkipReason = "scratch_dir_cross_device_replace_unsupported"
 	case physicalBytes <= 0:
 		plan.SkipReason = "physical_size_unknown"
 	case minReclaimBytes > 0 && physicalBytes < minReclaimBytes:
@@ -822,15 +888,28 @@ func podmanCompactionTargets(plan podmanCompactionPlan) []CleanupTarget {
 	if plan.RequiredFreeBytes > 0 {
 		action := "review_required_free_space"
 		reason := "offline compaction needs temporary scratch space for the compacted image"
+		scratchPath := plan.ScratchDir
+		if scratchPath == "" && plan.DiskPath != "" {
+			scratchPath = filepath.Dir(plan.DiskPath)
+		}
 		if plan.SkipReason == "insufficient_free_space" {
 			action = "protect_insufficient_free_space"
-			reason = "not enough free space is available beside the VM disk for offline compaction"
+			reason = "not enough free space is available in the offline compaction scratch directory"
+		} else if plan.SkipReason == "scratch_dir_unavailable" {
+			action = "protect_scratch_dir_unavailable"
+			reason = "configured offline compaction scratch directory is unavailable"
+		} else if plan.SkipReason == "scratch_dir_not_directory" {
+			action = "protect_scratch_dir_unavailable"
+			reason = "configured offline compaction scratch path is not a directory"
+		} else if plan.SkipReason == "scratch_dir_cross_device_replace_unsupported" {
+			action = "protect_cross_device_scratch"
+			reason = "configured scratch directory is on a different filesystem than the VM disk"
 		}
 		target := CleanupTarget{
 			Type:      "podman_compaction_scratch",
 			Tier:      CleanupTierDisruptive,
 			Name:      "offline compaction scratch space",
-			Path:      filepath.Dir(plan.DiskPath),
+			Path:      scratchPath,
 			Bytes:     plan.RequiredFreeBytes,
 			Protected: true,
 			Action:    action,
@@ -876,6 +955,12 @@ func podmanCompactionSkipReason(reason string) string {
 		return "not enough scratch free space is available for offline compaction"
 	case "qemu_img_missing":
 		return "qemu-img is required for offline compaction"
+	case "scratch_dir_unavailable":
+		return "configured offline compaction scratch directory is unavailable"
+	case "scratch_dir_not_directory":
+		return "configured offline compaction scratch path is not a directory"
+	case "scratch_dir_cross_device_replace_unsupported":
+		return "configured offline compaction scratch directory is on a different filesystem than the VM disk"
 	case "backup_path_exists":
 		return "existing rollback backup must be resolved before offline compaction"
 	case "disk_path_outside_podman_machine_dirs":
@@ -970,9 +1055,19 @@ func (p *PodmanPlugin) hasActiveContainers(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(output) != "", nil
 }
 
-func commandAvailable(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
+func resolveQemuImgPath(configuredPath string) (string, bool) {
+	if strings.TrimSpace(configuredPath) != "" {
+		home, _ := os.UserHomeDir()
+		path := filepath.Clean(expandHome(strings.TrimSpace(configuredPath), home))
+		info, err := os.Stat(path)
+		return path, err == nil && !info.IsDir()
+	}
+
+	path, err := exec.LookPath("qemu-img")
+	if err != nil {
+		return "qemu-img", false
+	}
+	return path, true
 }
 
 func int64FromUint64(value uint64) int64 {
@@ -1027,7 +1122,11 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 
 	// 2. Convert to sparse copy
 	logger.Info("compacting Podman machine disk", "machine", p.environment.MachineName)
-	convertCmd := exec.CommandContext(ctx, "qemu-img", "convert",
+	qemuImgPath := plan.QemuImgPath
+	if qemuImgPath == "" {
+		qemuImgPath = "qemu-img"
+	}
+	convertCmd := exec.CommandContext(ctx, qemuImgPath, "convert",
 		"-f", plan.DiskFormat, "-O", plan.DiskFormat, plan.DiskPath, plan.TempPath)
 	if output, err := convertCmd.CombinedOutput(); err != nil {
 		os.Remove(plan.TempPath)
@@ -1039,7 +1138,7 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 
 	// 3. Verify if qcow2 format
 	if plan.DiskFormat == "qcow2" {
-		checkCmd := exec.CommandContext(ctx, "qemu-img", "check", plan.TempPath)
+		checkCmd := exec.CommandContext(ctx, qemuImgPath, "check", plan.TempPath)
 		if output, err := checkCmd.CombinedOutput(); err != nil {
 			os.Remove(plan.TempPath)
 			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()

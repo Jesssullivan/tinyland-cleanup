@@ -240,6 +240,12 @@ func TestPodmanCompactDefaults(t *testing.T) {
 	if len(cfg.Podman.CompactProviderAllowlist) == 0 {
 		t.Fatal("Podman.CompactProviderAllowlist should have defaults")
 	}
+	if cfg.Podman.CompactScratchDir != "" {
+		t.Errorf("Podman.CompactScratchDir should default to empty, got %q", cfg.Podman.CompactScratchDir)
+	}
+	if cfg.Podman.CompactQemuImgPath != "" {
+		t.Errorf("Podman.CompactQemuImgPath should default to empty, got %q", cfg.Podman.CompactQemuImgPath)
+	}
 }
 
 func TestNixPolicyDefaults(t *testing.T) {
@@ -390,6 +396,8 @@ podman:
   compact_min_reclaim_gb: 12
   compact_require_no_active_containers: false
   compact_keep_backup_until_restart: false
+  compact_scratch_dir: /Volumes/TinylandSSD/tinyland-cleanup-podman
+  compact_qemu_img_path: /nix/store/example-qemu/bin/qemu-img
   compact_provider_allowlist:
     - applehv
 nix:
@@ -498,6 +506,12 @@ darwin_dev_caches:
 	}
 	if len(cfg.Podman.CompactProviderAllowlist) != 1 || cfg.Podman.CompactProviderAllowlist[0] != "applehv" {
 		t.Errorf("unexpected Podman.CompactProviderAllowlist: %#v", cfg.Podman.CompactProviderAllowlist)
+	}
+	if cfg.Podman.CompactScratchDir != "/Volumes/TinylandSSD/tinyland-cleanup-podman" {
+		t.Errorf("Podman.CompactScratchDir should be custom path, got %q", cfg.Podman.CompactScratchDir)
+	}
+	if cfg.Podman.CompactQemuImgPath != "/nix/store/example-qemu/bin/qemu-img" {
+		t.Errorf("Podman.CompactQemuImgPath should be custom path, got %q", cfg.Podman.CompactQemuImgPath)
 	}
 	if cfg.Nix.MinUserGenerations != 7 {
 		t.Errorf("Nix.MinUserGenerations should be 7 per config, got %d", cfg.Nix.MinUserGenerations)

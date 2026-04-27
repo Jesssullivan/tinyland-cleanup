@@ -180,6 +180,10 @@ type PodmanConfig struct {
 	CompactKeepBackupUntilRestart bool `yaml:"compact_keep_backup_until_restart"`
 	// CompactProviderAllowlist restricts offline compaction to known providers
 	CompactProviderAllowlist []string `yaml:"compact_provider_allowlist"`
+	// CompactScratchDir stores the temporary compacted image; empty keeps it beside the VM disk
+	CompactScratchDir string `yaml:"compact_scratch_dir"`
+	// CompactQemuImgPath overrides qemu-img discovery for offline compaction
+	CompactQemuImgPath string `yaml:"compact_qemu_img_path"`
 }
 
 // BazelConfig holds Bazel output base and cache cleanup settings.

@@ -69,6 +69,34 @@ docker:
   # Don't prune images used by running containers
   protect_running_containers: true
 
+# Podman-specific settings
+podman:
+  prune_images_age: "24h"
+  protect_running_containers: true
+  machine_names:
+    - podman-machine-default
+  clean_inside_vm: true
+  trim_vm_disk: true
+
+  # Offline VM disk compaction is disruptive and remains opt-in.
+  compact_disk_offline: false
+  compact_min_reclaim_gb: 8
+  compact_require_no_active_containers: true
+  compact_keep_backup_until_restart: true
+  compact_provider_allowlist:
+    - applehv
+    - libkrun
+    - qemu
+
+  # Empty scratch dir keeps the compacted temp image beside the VM disk.
+  # Configured scratch dirs must be on the same filesystem until the
+  # cross-device replacement flow is implemented.
+  compact_scratch_dir: ""
+
+  # Optional absolute qemu-img path when the daemon environment does not have
+  # qemu-img on PATH.
+  compact_qemu_img_path: ""
+
 # Nix store and profile generation cleanup settings
 nix:
   # Preserve rollback safety even under disk pressure

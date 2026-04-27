@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
@@ -202,6 +203,121 @@ func TestPodmanCompactionTargetsExposeScratchDeficit(t *testing.T) {
 	disk := findPodmanTarget(t, targets, "podman_vm_disk")
 	if disk.Reclaim != CleanupReclaimNone || disk.HostReclaimsSpace == nil || *disk.HostReclaimsSpace {
 		t.Fatalf("blocked disk target should not count as host reclaim: %#v", disk)
+	}
+}
+
+func TestPodmanCompactionPlanUsesConfiguredScratchDir(t *testing.T) {
+	cfg := testPodmanCompactionConfig()
+	scratchDir := "/Volumes/TinylandSSD/tinyland-cleanup-podman"
+	qemuImgPath := "/nix/store/example-qemu/bin/qemu-img"
+
+	plan := buildPodmanCompactionPlan(podmanCompactionPlanInput{
+		MachineName:          "podman-machine-default",
+		Provider:             "applehv",
+		DiskPath:             "/Users/test/.local/share/containers/podman/machine/applehv/podman-machine-default.raw",
+		ScratchDir:           scratchDir,
+		ConfigEnabled:        true,
+		QemuImgPath:          qemuImgPath,
+		QemuImgAvailable:     true,
+		DiskPathExpected:     true,
+		ScratchDirConfigured: true,
+		ScratchDirAvailable:  true,
+		LogicalBytes:         100 * podmanCompactionGiB,
+		PhysicalBytes:        12 * podmanCompactionGiB,
+		FreeBytes:            14 * podmanCompactionGiB,
+		Config:               cfg,
+	})
+
+	if !plan.CanCompact {
+		t.Fatalf("expected configured scratch dir compaction to be eligible, got skip reason %q", plan.SkipReason)
+	}
+	expectedTemp := filepath.Join(scratchDir, "podman-machine-default.raw.compact")
+	if plan.TempPath != expectedTemp {
+		t.Fatalf("expected temp path %q, got %q", expectedTemp, plan.TempPath)
+	}
+	if plan.ScratchDir != scratchDir {
+		t.Fatalf("expected scratch dir %q, got %q", scratchDir, plan.ScratchDir)
+	}
+	if plan.QemuImgPath != qemuImgPath {
+		t.Fatalf("expected qemu-img path %q, got %q", qemuImgPath, plan.QemuImgPath)
+	}
+	if !strings.Contains(strings.Join(plan.Steps, "\n"), qemuImgPath+" convert") {
+		t.Fatalf("expected plan steps to include configured qemu-img path: %#v", plan.Steps)
+	}
+
+	targets := podmanCompactionTargets(plan)
+	scratch := findPodmanTarget(t, targets, "podman_compaction_scratch")
+	if scratch.Path != scratchDir {
+		t.Fatalf("expected scratch target path %q, got %q", scratchDir, scratch.Path)
+	}
+}
+
+func TestPodmanCompactionPlanRejectsCrossDeviceScratchDir(t *testing.T) {
+	cfg := testPodmanCompactionConfig()
+	scratchDir := "/Volumes/TinylandSSD/tinyland-cleanup-podman"
+
+	plan := buildPodmanCompactionPlan(podmanCompactionPlanInput{
+		MachineName:           "podman-machine-default",
+		Provider:              "applehv",
+		DiskPath:              "/Users/test/.local/share/containers/podman/machine/applehv/podman-machine-default.raw",
+		ScratchDir:            scratchDir,
+		ConfigEnabled:         true,
+		QemuImgAvailable:      true,
+		DiskPathExpected:      true,
+		ScratchDirConfigured:  true,
+		ScratchDirAvailable:   true,
+		ScratchDirCrossDevice: true,
+		LogicalBytes:          100 * podmanCompactionGiB,
+		PhysicalBytes:         12 * podmanCompactionGiB,
+		FreeBytes:             80 * podmanCompactionGiB,
+		Config:                cfg,
+	})
+
+	if plan.CanCompact {
+		t.Fatal("expected cross-device scratch dir to block compaction")
+	}
+	if plan.SkipReason != "scratch_dir_cross_device_replace_unsupported" {
+		t.Fatalf("expected scratch_dir_cross_device_replace_unsupported, got %q", plan.SkipReason)
+	}
+
+	targets := podmanCompactionTargets(plan)
+	scratch := findPodmanTarget(t, targets, "podman_compaction_scratch")
+	if scratch.Action != "protect_cross_device_scratch" || scratch.Path != scratchDir {
+		t.Fatalf("expected protected cross-device scratch target, got %#v", scratch)
+	}
+}
+
+func TestPodmanCompactionPlanRejectsUnavailableScratchDir(t *testing.T) {
+	cfg := testPodmanCompactionConfig()
+	scratchDir := "/Volumes/TinylandSSD/tinyland-cleanup-podman"
+
+	plan := buildPodmanCompactionPlan(podmanCompactionPlanInput{
+		MachineName:          "podman-machine-default",
+		Provider:             "applehv",
+		DiskPath:             "/Users/test/.local/share/containers/podman/machine/applehv/podman-machine-default.raw",
+		ScratchDir:           scratchDir,
+		ConfigEnabled:        true,
+		QemuImgAvailable:     true,
+		DiskPathExpected:     true,
+		ScratchDirConfigured: true,
+		ScratchDirAvailable:  false,
+		LogicalBytes:         100 * podmanCompactionGiB,
+		PhysicalBytes:        12 * podmanCompactionGiB,
+		FreeBytes:            0,
+		Config:               cfg,
+	})
+
+	if plan.CanCompact {
+		t.Fatal("expected unavailable scratch dir to block compaction")
+	}
+	if plan.SkipReason != "scratch_dir_unavailable" {
+		t.Fatalf("expected scratch_dir_unavailable, got %q", plan.SkipReason)
+	}
+
+	targets := podmanCompactionTargets(plan)
+	scratch := findPodmanTarget(t, targets, "podman_compaction_scratch")
+	if scratch.Action != "protect_scratch_dir_unavailable" || scratch.Path != scratchDir {
+		t.Fatalf("expected protected unavailable scratch target, got %#v", scratch)
 	}
 }
 
