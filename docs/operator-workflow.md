@@ -146,11 +146,16 @@ and active editor or IDE processes.
 
 For workspace build artifacts, the `dev-artifacts` plan reports rebuildable
 targets such as `node_modules`, Python virtualenvs, Rust `target/` directories,
-Go build cache, Haskell caches, and opt-in LM Studio model caches. Warning
-level reports only; moderate and above mark eligible stale artifacts as
-deletion or cache-clean targets while preserving configured protected paths.
-The plan also protects matching artifact families when active package manager,
-compiler, language server, runtime, or LM Studio processes are visible.
+Zig `.zig-cache` and `zig-out` directories, Go build cache, Haskell caches,
+opt-in LM Studio model caches, and review-only large local disk/image artifacts
+such as `.dmg`, `.img`, `.qcow2`, `.raw`, `.iso`, `.sparsebundle`, `.utm`,
+`.pvm`, and `.vmwarevm` targets. Warning level reports only; moderate and above
+mark eligible stale artifacts as deletion or cache-clean targets while
+preserving configured protected paths. Large local disk/image artifacts are
+always protected and excluded from estimated reclaim because they can be
+developer-owned state. The plan also protects matching artifact families when
+active package manager, compiler, language server, runtime, or LM Studio
+processes are visible.
 
 For Docker, the plan reports Docker daemon disk-usage rows from `docker system
 df`, including images, stopped containers, local volumes, and build cache when

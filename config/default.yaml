@@ -34,6 +34,7 @@ enable:
   gitlab_runner: true   # GitLab runner cache cleanup
   github_runner: true   # GitHub Actions runner cleanup (Linux only)
   yum: true             # DNF/YUM package cache cleanup (Linux only)
+  dev_artifacts: true   # Rebuildable workspace artifacts
   bazel: true           # Bazel output base and cache cleanup planning
 
 # GitHub Actions runner settings (Linux only)
@@ -138,6 +139,24 @@ bazel:
     - ~/git/GloriousFlywheel
   allow_stop_idle_servers: true
   allow_delete_active_output_bases: false
+
+# Workspace development artifact settings
+dev_artifacts:
+  scan_paths:
+    - ~/git
+    - ~/src
+    - ~/projects
+  node_modules: true
+  python_venvs: true
+  rust_targets: true
+  zig_artifacts: true
+  go_build_cache: true
+  haskell_cache: true
+  lmstudio_models: false
+  # Review-only: report large local disk images and VM bundles, never auto-delete.
+  large_local_artifacts: true
+  large_local_artifact_min_mb: 1024
+  protect_paths: []
 
 # Darwin developer-cache review settings.
 # Enforcement is opt-in; keep false until dry-run targets are reviewed.

@@ -252,12 +252,18 @@ type DevArtifactsConfig struct {
 	PythonVenvs bool `yaml:"python_venvs"`
 	// RustTargets enables Rust target/ cleanup
 	RustTargets bool `yaml:"rust_targets"`
+	// ZigArtifacts enables Zig .zig-cache/ and zig-out/ cleanup
+	ZigArtifacts bool `yaml:"zig_artifacts"`
 	// GoBuildCache enables Go build cache cleanup
 	GoBuildCache bool `yaml:"go_build_cache"`
 	// HaskellCache enables .ghcup/cache and .cabal/store cleanup
 	HaskellCache bool `yaml:"haskell_cache"`
 	// LMStudioModels enables .lmstudio model cleanup (opt-in)
 	LMStudioModels bool `yaml:"lmstudio_models"`
+	// LargeLocalArtifacts enables review-only reporting for large disk images and VM bundles
+	LargeLocalArtifacts bool `yaml:"large_local_artifacts"`
+	// LargeLocalArtifactMinMB is the minimum physical size for review-only large local artifact targets
+	LargeLocalArtifactMinMB int `yaml:"large_local_artifact_min_mb"`
 	// ProtectPaths are paths that should never be cleaned
 	ProtectPaths []string `yaml:"protect_paths"`
 }
@@ -416,14 +422,17 @@ func DefaultConfig() *Config {
 			MinFileSizeMB:  10,
 		},
 		DevArtifacts: DevArtifactsConfig{
-			ScanPaths:      defaultScanPaths,
-			NodeModules:    true,
-			PythonVenvs:    true,
-			RustTargets:    true,
-			GoBuildCache:   true,
-			HaskellCache:   true,
-			LMStudioModels: false,
-			ProtectPaths:   []string{},
+			ScanPaths:               defaultScanPaths,
+			NodeModules:             true,
+			PythonVenvs:             true,
+			RustTargets:             true,
+			ZigArtifacts:            true,
+			GoBuildCache:            true,
+			HaskellCache:            true,
+			LMStudioModels:          false,
+			LargeLocalArtifacts:     true,
+			LargeLocalArtifactMinMB: 1024,
+			ProtectPaths:            []string{},
 		},
 		DarwinDevCaches: DarwinDevCachesConfig{
 			Enabled:    runtime.GOOS == "darwin",

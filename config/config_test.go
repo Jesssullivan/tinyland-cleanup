@@ -174,6 +174,9 @@ func TestDevArtifactsConfigDefaults(t *testing.T) {
 	if !cfg.DevArtifacts.RustTargets {
 		t.Error("DevArtifacts.RustTargets should be true by default")
 	}
+	if !cfg.DevArtifacts.ZigArtifacts {
+		t.Error("DevArtifacts.ZigArtifacts should be true by default")
+	}
 	if !cfg.DevArtifacts.GoBuildCache {
 		t.Error("DevArtifacts.GoBuildCache should be true by default")
 	}
@@ -182,6 +185,12 @@ func TestDevArtifactsConfigDefaults(t *testing.T) {
 	}
 	if cfg.DevArtifacts.LMStudioModels {
 		t.Error("DevArtifacts.LMStudioModels should be false by default (opt-in)")
+	}
+	if !cfg.DevArtifacts.LargeLocalArtifacts {
+		t.Error("DevArtifacts.LargeLocalArtifacts should be true by default")
+	}
+	if cfg.DevArtifacts.LargeLocalArtifactMinMB <= 0 {
+		t.Error("DevArtifacts.LargeLocalArtifactMinMB should be positive by default")
 	}
 }
 
@@ -473,6 +482,9 @@ darwin_dev_caches:
 	}
 	if cfg.DevArtifacts.RustTargets {
 		t.Error("DevArtifacts.RustTargets should be false per config")
+	}
+	if !cfg.DevArtifacts.ZigArtifacts {
+		t.Error("DevArtifacts.ZigArtifacts should stay true by default when omitted")
 	}
 	if !cfg.DevArtifacts.LMStudioModels {
 		t.Error("DevArtifacts.LMStudioModels should be true per config")

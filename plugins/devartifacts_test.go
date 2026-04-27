@@ -145,6 +145,12 @@ func TestFindArtifactDirs(t *testing.T) {
 	os.WriteFile(filepath.Join(project2, "Cargo.toml"), []byte("[package]\nname = \"test\""), 0644)
 	os.WriteFile(filepath.Join(project2, "target", "debug", "binary"), []byte("ELF"), 0644)
 
+	// Project 3: Zig
+	project3 := filepath.Join(tmpDir, "project3")
+	os.MkdirAll(filepath.Join(project3, ".zig-cache", "o"), 0755)
+	os.WriteFile(filepath.Join(project3, "build.zig"), []byte("const std = @import(\"std\");"), 0644)
+	os.WriteFile(filepath.Join(project3, ".zig-cache", "o", "artifact"), []byte("cache"), 0644)
+
 	// Find node_modules with marker
 	var foundNodeModules []string
 	p.findArtifactDirs(tmpDir, "node_modules", "package.json", func(dir string, size int64) {
@@ -163,6 +169,16 @@ func TestFindArtifactDirs(t *testing.T) {
 
 	if len(foundTargets) != 1 {
 		t.Errorf("expected 1 Rust target, found %d", len(foundTargets))
+	}
+
+	// Find Zig .zig-cache with build.zig marker
+	var foundZigCaches []string
+	p.findArtifactDirs(tmpDir, ".zig-cache", "build.zig", func(dir string, size int64) {
+		foundZigCaches = append(foundZigCaches, dir)
+	})
+
+	if len(foundZigCaches) != 1 {
+		t.Errorf("expected 1 Zig cache, found %d", len(foundZigCaches))
 	}
 }
 
@@ -261,6 +277,52 @@ func TestCleanNodeModulesProtected(t *testing.T) {
 	}
 }
 
+func TestCleanZigArtifactsStale(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	project := filepath.Join(tmpDir, "old-zig")
+	os.MkdirAll(filepath.Join(project, ".zig-cache", "o"), 0755)
+	os.MkdirAll(filepath.Join(project, "zig-out", "bin"), 0755)
+	os.WriteFile(filepath.Join(project, ".zig-cache", "o", "artifact"), []byte("cache"), 0644)
+	os.WriteFile(filepath.Join(project, "zig-out", "bin", "tool"), []byte("binary"), 0644)
+	buildZig := filepath.Join(project, "build.zig")
+	os.WriteFile(buildZig, []byte("const std = @import(\"std\");"), 0644)
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	os.Chtimes(buildZig, oldTime, oldTime)
+
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
+	if freed == 0 {
+		t.Fatal("expected stale Zig artifacts to be cleaned")
+	}
+	if pathExists(filepath.Join(project, ".zig-cache")) {
+		t.Error(".zig-cache should have been removed")
+	}
+	if pathExists(filepath.Join(project, "zig-out")) {
+		t.Error("zig-out should have been removed")
+	}
+}
+
+func TestCleanZigArtifactsFresh(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	project := filepath.Join(tmpDir, "fresh-zig")
+	os.MkdirAll(filepath.Join(project, ".zig-cache", "o"), 0755)
+	os.WriteFile(filepath.Join(project, ".zig-cache", "o", "artifact"), []byte("cache"), 0644)
+	os.WriteFile(filepath.Join(project, "build.zig"), []byte("const std = @import(\"std\");"), 0644)
+
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
+	if freed != 0 {
+		t.Fatal("expected fresh Zig artifacts to be preserved")
+	}
+	if !pathExists(filepath.Join(project, ".zig-cache")) {
+		t.Error(".zig-cache should still exist")
+	}
+}
+
 func TestCleanupWarningLevel(t *testing.T) {
 	p := NewDevArtifactsPlugin()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -291,6 +353,7 @@ func TestPlanCleanupWarningReportsDevArtifacts(t *testing.T) {
 	cfg.DevArtifacts.ScanPaths = []string{tmpDir}
 	cfg.DevArtifacts.PythonVenvs = false
 	cfg.DevArtifacts.RustTargets = false
+	cfg.DevArtifacts.ZigArtifacts = false
 	cfg.DevArtifacts.GoBuildCache = false
 	cfg.DevArtifacts.HaskellCache = false
 
@@ -336,6 +399,7 @@ func TestPlanCleanupModerateClassifiesDevArtifacts(t *testing.T) {
 	cfg.DevArtifacts.ScanPaths = []string{tmpDir}
 	cfg.DevArtifacts.PythonVenvs = false
 	cfg.DevArtifacts.RustTargets = false
+	cfg.DevArtifacts.ZigArtifacts = false
 	cfg.DevArtifacts.GoBuildCache = false
 	cfg.DevArtifacts.HaskellCache = false
 	cfg.DevArtifacts.ProtectPaths = []string{protectedProject}
@@ -391,11 +455,95 @@ func TestPlanNodeModulesProtectsActiveDevelopmentProcess(t *testing.T) {
 	}
 }
 
+func TestPlanZigArtifactsProtectsActiveDevelopmentProcess(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	project := filepath.Join(tmpDir, "active-zig")
+	if err := os.MkdirAll(filepath.Join(project, ".zig-cache", "o"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".zig-cache", "o", "artifact"), []byte("cache"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	buildZig := filepath.Join(project, "build.zig")
+	if err := os.WriteFile(buildZig, []byte("const std = @import(\"std\");"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	if err := os.Chtimes(buildZig, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	var targets []CleanupTarget
+	p.planZigArtifacts(tmpDir, 30*24*time.Hour, true, nil, map[string]string{
+		"zig-artifact": "Zig toolchain process",
+	}, &targets)
+
+	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
+	if target.Action != "protect" || !target.Protected || !target.Active {
+		t.Fatalf("expected active Zig artifact to be protected, got %#v", target)
+	}
+}
+
+func TestPlanLargeLocalArtifactsReportsReviewOnlyTargets(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+
+	imagePath := filepath.Join(tmpDir, "betterkvm", "images", "pikvm.img")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imagePath, []byte("disk image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	bundlePath := filepath.Join(tmpDir, "linux-xr-case-sensitive.sparsebundle")
+	if err := os.MkdirAll(filepath.Join(bundlePath, "bands"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundlePath, "bands", "0"), []byte("bundle data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var targets []CleanupTarget
+	p.planLargeLocalArtifacts(tmpDir, 1, nil, &targets)
+
+	image := findDevArtifactTarget(t, targets, "large-local-artifact", imagePath)
+	if image.Action != "review" || !image.Protected || image.Tier != CleanupTierDestructive || image.Reclaim != CleanupReclaimNone {
+		t.Fatalf("expected review-only destructive/no-reclaim image target, got %#v", image)
+	}
+	bundle := findDevArtifactTarget(t, targets, "large-local-artifact", bundlePath)
+	if bundle.Action != "review" || !bundle.Protected || bundle.Bytes <= 0 {
+		t.Fatalf("expected review-only sparsebundle target with bytes, got %#v", bundle)
+	}
+}
+
+func TestPlanLargeLocalArtifactsHonorsProtectPaths(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	imagePath := filepath.Join(tmpDir, "protected", "machine.qcow2")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(imagePath, []byte("disk image"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var targets []CleanupTarget
+	p.planLargeLocalArtifacts(tmpDir, 1, []string{filepath.Dir(imagePath)}, &targets)
+
+	target := findDevArtifactTarget(t, targets, "large-local-artifact", imagePath)
+	if target.Action != "protect" || !target.Protected {
+		t.Fatalf("expected protected large local artifact target, got %#v", target)
+	}
+}
+
 func TestDevArtifactBusyProcessReasons(t *testing.T) {
 	ps := `
 /nix/store/node/bin/node node vite dev
 /nix/store/uv/bin/uv uv pip install -r requirements.txt
 /nix/store/rust/bin/cargo cargo build
+/nix/store/zig/bin/zig zig build
 /nix/store/go/bin/go go test ./...
 /nix/store/cabal/bin/cabal cabal build all
 /Applications/LM Studio.app/Contents/MacOS/LM Studio
@@ -406,6 +554,7 @@ func TestDevArtifactBusyProcessReasons(t *testing.T) {
 		"node_modules":    "Node.js package manager or runtime",
 		"python-venv":     "Python toolchain process",
 		"rust-target":     "Rust toolchain process",
+		"zig-artifact":    "Zig toolchain process",
 		"go-build-cache":  "Go toolchain process",
 		"haskell-cache":   "Haskell toolchain process",
 		"lmstudio-models": "LM Studio process",

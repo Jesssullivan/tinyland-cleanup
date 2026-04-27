@@ -31,8 +31,12 @@ All notable changes to this project will be documented in this file.
 - Persistent daemon cleanup state with per-plugin cooldowns for non-critical
   daemon-triggered cleanup cycles.
 - Structured dry-run targets for development artifacts such as stale
-  `node_modules`, Python virtualenvs, Rust `target/` directories, Go build
-  cache, Haskell caches, and opt-in LM Studio model caches.
+  `node_modules`, Python virtualenvs, Rust `target/` directories, Zig
+  `.zig-cache` and `zig-out` directories, Go build cache, Haskell caches, and
+  opt-in LM Studio model caches.
+- Review-only large local artifact targets for disk images and VM bundles such
+  as `.dmg`, `.img`, `.qcow2`, `.raw`, `.iso`, `.sparsebundle`, `.utm`, `.pvm`,
+  and `.vmwarevm` paths.
 - Opt-in Darwin developer-cache enforcement for typed JetBrains, Playwright,
   Bazelisk, and pip cache targets.
 - Nix low-reclaim dry-runs now emit protected GC-root attribution targets so
@@ -47,7 +51,7 @@ All notable changes to this project will be documented in this file.
   configured budget.
 - Repo-local Bazel symlink cleanup after successful stale output-base deletion.
 - Active-process protection for development artifact cleanup families such as
-  Node.js, Python, Rust, Go, Haskell, and LM Studio.
+  Node.js, Python, Rust, Zig, Go, Haskell, and LM Studio.
 - Typed Darwin developer-cache targets for VS Code and Cursor cache-only
   directories, with active-editor protection.
 - CLI `--plugins` filter for bounded dry-run evidence collection and targeted

@@ -1,6 +1,7 @@
 // Package plugins provides cleanup plugin implementations.
 // devartifacts.go scans for stale development artifacts like node_modules,
-// .venv, Rust target/, Go build cache, Haskell caches, and LM Studio models.
+// .venv, Rust target/, Zig artifacts, Go build cache, Haskell caches,
+// LM Studio models, and review-only large local artifacts.
 package plugins
 
 import (
@@ -35,7 +36,7 @@ func (p *DevArtifactsPlugin) Name() string {
 
 // Description returns the plugin description.
 func (p *DevArtifactsPlugin) Description() string {
-	return "Cleans stale development artifacts (node_modules, .venv, target/, go cache, haskell, lmstudio)"
+	return "Cleans stale development artifacts (node_modules, .venv, target/, zig, go cache, haskell, lmstudio) and reports large local artifacts"
 }
 
 // SupportedPlatforms returns supported platforms (all).
@@ -54,7 +55,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 
 	home, _ := os.UserHomeDir()
 	daCfg := cfg.DevArtifacts
-	nodeAge, venvAge, rustAge, mutates := devArtifactThresholds(level)
+	nodeAge, venvAge, rustAge, zigAge, mutates := devArtifactThresholds(level)
 	plan := CleanupPlan{
 		Plugin:   p.Name(),
 		Level:    level.String(),
@@ -62,8 +63,9 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		WouldRun: true,
 		Steps: []string{
 			"Scan configured development workspaces for rebuildable artifact directories",
-			"Use project marker mtimes to classify stale node_modules, .venv, and Rust target directories",
+			"Use project marker mtimes to classify stale node_modules, .venv, Rust target, and Zig artifact directories",
 			"Protect artifact families when matching package manager, compiler, language server, or runtime processes are active",
+			"Report large disk images and VM bundles for manual review without deleting them",
 			"Honor configured protected paths before any deletion candidate is eligible",
 		},
 		Metadata: map[string]string{
@@ -96,6 +98,12 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		}
 		if daCfg.RustTargets {
 			p.planRustTargets(expanded, rustAge, mutates, daCfg.ProtectPaths, active, &targets)
+		}
+		if daCfg.ZigArtifacts {
+			p.planZigArtifacts(expanded, zigAge, mutates, daCfg.ProtectPaths, active, &targets)
+		}
+		if daCfg.LargeLocalArtifacts {
+			p.planLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, &targets)
 		}
 	}
 
@@ -142,7 +150,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	daCfg := cfg.DevArtifacts
 
 	// Determine staleness thresholds based on level
-	nodeAge, venvAge, rustAge, mutates := devArtifactThresholds(level)
+	nodeAge, venvAge, rustAge, zigAge, mutates := devArtifactThresholds(level)
 	if !mutates {
 		// Report only - no deletion
 		p.reportArtifacts(ctx, daCfg, home, logger)
@@ -185,6 +193,14 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 				result.ItemsCleaned++
 			}
 		}
+
+		if daCfg.ZigArtifacts && !devArtifactFamilyActive(active, "zig-artifact") {
+			freed := p.cleanZigArtifacts(ctx, expanded, zigAge, daCfg.ProtectPaths, logger)
+			result.BytesFreed += freed
+			if freed > 0 {
+				result.ItemsCleaned++
+			}
+		}
 	}
 
 	// Go build cache (not path-dependent - it's a global cache)
@@ -217,16 +233,16 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	return result
 }
 
-func devArtifactThresholds(level CleanupLevel) (nodeAge, venvAge, rustAge time.Duration, mutates bool) {
+func devArtifactThresholds(level CleanupLevel) (nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool) {
 	switch level {
 	case LevelModerate:
-		return 30 * 24 * time.Hour, 60 * 24 * time.Hour, 30 * 24 * time.Hour, true
+		return 30 * 24 * time.Hour, 60 * 24 * time.Hour, 30 * 24 * time.Hour, 30 * 24 * time.Hour, true
 	case LevelAggressive:
-		return 7 * 24 * time.Hour, 14 * 24 * time.Hour, 7 * 24 * time.Hour, true
+		return 7 * 24 * time.Hour, 14 * 24 * time.Hour, 7 * 24 * time.Hour, 7 * 24 * time.Hour, true
 	case LevelCritical:
-		return 0, 0, 0, true
+		return 0, 0, 0, 0, true
 	default:
-		return 0, 0, 0, false
+		return 0, 0, 0, 0, false
 	}
 }
 
@@ -252,6 +268,124 @@ func (p *DevArtifactsPlugin) planRustTargets(scanPath string, maxAge time.Durati
 		stale := maxAge == 0 || p.isFileStale(marker, maxAge)
 		*targets = append(*targets, p.devArtifactTarget("rust-target", "target", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "Cargo.toml", maxAge, active))
 	})
+}
+
+func (p *DevArtifactsPlugin) planZigArtifacts(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, targets *[]CleanupTarget) {
+	for _, artifactName := range []string{".zig-cache", "zig-out"} {
+		p.findArtifactDirs(scanPath, artifactName, "build.zig", func(dir string, size int64) {
+			marker := filepath.Join(filepath.Dir(dir), "build.zig")
+			stale := maxAge == 0 || p.isFileStale(marker, maxAge)
+			*targets = append(*targets, p.devArtifactTarget("zig-artifact", artifactName, dir, size, stale, mutates, p.isProtected(dir, protectPaths), "build.zig", maxAge, active))
+		})
+	}
+}
+
+func (p *DevArtifactsPlugin) planLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, targets *[]CleanupTarget) {
+	p.findLargeLocalArtifacts(scanPath, minBytes, protectPaths, func(target CleanupTarget) {
+		*targets = append(*targets, target)
+	})
+}
+
+func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, callback func(CleanupTarget)) {
+	scanDepth := strings.Count(scanPath, string(os.PathSeparator))
+	fileKinds := largeLocalArtifactFileKinds()
+	dirKinds := largeLocalArtifactDirKinds()
+
+	filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		currentDepth := strings.Count(path, string(os.PathSeparator)) - scanDepth
+		if currentDepth > 4 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		baseName := filepath.Base(path)
+		lowerBase := strings.ToLower(baseName)
+		if info.IsDir() {
+			if strings.HasPrefix(baseName, ".") {
+				return filepath.SkipDir
+			}
+			if kind, ok := dirKinds[filepath.Ext(lowerBase)]; ok {
+				size := getDirAllocatedBytes(path)
+				if size >= minBytes {
+					callback(p.largeLocalArtifactTarget(kind, path, size, 0, p.isProtected(path, protectPaths)))
+				}
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		kind, ok := fileKinds[filepath.Ext(lowerBase)]
+		if !ok {
+			return nil
+		}
+		physicalBytes, err := getFileAllocatedBytes(path)
+		if err != nil {
+			physicalBytes = info.Size()
+		}
+		if physicalBytes < minBytes {
+			return nil
+		}
+		callback(p.largeLocalArtifactTarget(kind, path, physicalBytes, info.Size(), p.isProtected(path, protectPaths)))
+		return nil
+	})
+}
+
+func (p *DevArtifactsPlugin) largeLocalArtifactTarget(kind, path string, physicalBytes, logicalBytes int64, protected bool) CleanupTarget {
+	action := "review"
+	reason := "large local disk/image artifact requires manual review before removal"
+	if protected {
+		action = "protect"
+		reason = "path is covered by dev_artifacts.protect_paths"
+	}
+	target := CleanupTarget{
+		Type:         "large-local-artifact",
+		Name:         kind,
+		Path:         path,
+		Bytes:        physicalBytes,
+		LogicalBytes: logicalBytes,
+		Protected:    true,
+		Action:       action,
+		Reason:       reason,
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierDestructive, CleanupReclaimNone)
+	return target
+}
+
+func largeLocalArtifactMinBytes(cfg config.DevArtifactsConfig) int64 {
+	if cfg.LargeLocalArtifactMinMB <= 0 {
+		return 1024 * 1024 * 1024
+	}
+	return int64(cfg.LargeLocalArtifactMinMB) * 1024 * 1024
+}
+
+func largeLocalArtifactFileKinds() map[string]string {
+	return map[string]string{
+		".dmg":   "disk image",
+		".img":   "disk image",
+		".iso":   "ISO image",
+		".qcow2": "qcow2 disk image",
+		".raw":   "raw disk image",
+		".vhd":   "VHD disk image",
+		".vhdx":  "VHDX disk image",
+	}
+}
+
+func largeLocalArtifactDirKinds() map[string]string {
+	return map[string]string{
+		".pvm":          "Parallels VM bundle",
+		".sparsebundle": "sparse bundle disk image",
+		".utm":          "UTM VM bundle",
+		".vmwarevm":     "VMware VM bundle",
+	}
 }
 
 func (p *DevArtifactsPlugin) devArtifactTarget(targetType, name, path string, bytes int64, stale, mutates, protected bool, marker string, maxAge time.Duration, active map[string]string) CleanupTarget {
@@ -289,7 +423,7 @@ func devArtifactTier(targetType string) string {
 	switch targetType {
 	case "go-build-cache", "haskell-ghcup-cache":
 		return CleanupTierSafe
-	case "lmstudio-models":
+	case "lmstudio-models", "large-local-artifact":
 		return CleanupTierDestructive
 	default:
 		return CleanupTierWarm
@@ -484,6 +618,9 @@ func devArtifactBusyProcessReasons(output string) map[string]string {
 		case command == "cargo" || command == "rustc" || command == "rust-analyzer" ||
 			arg0 == "cargo" || arg0 == "rustc" || arg0 == "rust-analyzer":
 			add("rust-target", "Rust toolchain process")
+		case command == "zig" || command == "zls" ||
+			arg0 == "zig" || arg0 == "zls":
+			add("zig-artifact", "Zig toolchain process")
 		case (command == "go" || arg0 == "go") &&
 			(strings.Contains(normalized, " go build") ||
 				strings.Contains(normalized, " go test") ||
@@ -558,6 +695,22 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 		if daCfg.RustTargets {
 			p.findArtifactDirs(expanded, "target", "Cargo.toml", func(dir string, size int64) {
 				logger.Info("found Rust target", "path", dir, "size_mb", size/(1024*1024))
+			})
+		}
+
+		// Find and report Zig artifacts
+		if daCfg.ZigArtifacts {
+			for _, artifactName := range []string{".zig-cache", "zig-out"} {
+				p.findArtifactDirs(expanded, artifactName, "build.zig", func(dir string, size int64) {
+					logger.Info("found Zig artifact", "path", dir, "size_mb", size/(1024*1024))
+				})
+			}
+		}
+
+		// Find and report large local artifacts for manual review.
+		if daCfg.LargeLocalArtifacts {
+			p.findLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, func(target CleanupTarget) {
+				logger.Info("found large local artifact", "path", target.Path, "size_mb", target.Bytes/(1024*1024), "type", target.Name)
 			})
 		}
 	}
@@ -709,6 +862,38 @@ func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath stri
 
 	if totalFreed > 0 {
 		logger.Info("cleaned stale Rust targets", "freed_mb", totalFreed/(1024*1024))
+	}
+
+	return totalFreed
+}
+
+// cleanZigArtifacts removes stale Zig .zig-cache and zig-out directories.
+// A Zig artifact is stale if sibling build.zig hasn't been modified within maxAge.
+func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, logger *slog.Logger) int64 {
+	var totalFreed int64
+
+	for _, artifactName := range []string{".zig-cache", "zig-out"} {
+		p.findArtifactDirs(scanPath, artifactName, "build.zig", func(dir string, size int64) {
+			if p.isProtected(dir, protectPaths) {
+				return
+			}
+
+			buildZig := filepath.Join(filepath.Dir(dir), "build.zig")
+			if maxAge > 0 && !p.isFileStale(buildZig, maxAge) {
+				return
+			}
+
+			logger.Debug("removing stale Zig artifact", "path", dir, "size_mb", size/(1024*1024))
+			if err := os.RemoveAll(dir); err != nil {
+				logger.Debug("failed to remove Zig artifact", "path", dir, "error", err)
+				return
+			}
+			totalFreed += size
+		})
+	}
+
+	if totalFreed > 0 {
+		logger.Info("cleaned stale Zig artifacts", "freed_mb", totalFreed/(1024*1024))
 	}
 
 	return totalFreed

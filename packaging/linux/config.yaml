@@ -93,9 +93,12 @@ dev_artifacts:
   node_modules: true
   python_venvs: true
   rust_targets: false
+  zig_artifacts: true
   go_build_cache: true
   haskell_cache: true
   lmstudio_models: false
+  large_local_artifacts: true
+  large_local_artifact_min_mb: 1024
 
 notify:
   enabled: false
