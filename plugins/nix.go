@@ -828,6 +828,10 @@ func nixBusyProcessReasons(output string) []string {
 		}
 	}
 
+	nixCommandPattern := regexp.MustCompile(`\bnix\s+(build|develop|shell|flake|profile|store|copy|run|log)\b`)
+	nixStoreGCPattern := regexp.MustCompile(`\bnix-store\s+.*\s--gc\b|\bnix-store\s+--gc\b`)
+	nixStoreGCShortPattern := regexp.MustCompile(`\bnix\s+store\s+gc\b`)
+
 	for _, line := range strings.Split(output, "\n") {
 		normalized := strings.ToLower(strings.Join(strings.Fields(line), " "))
 		if normalized == "" {
@@ -843,10 +847,14 @@ func nixBusyProcessReasons(output string) []string {
 			add("nixos-rebuild")
 		case strings.Contains(normalized, "nix-collect-garbage"):
 			add("nix-collect-garbage")
+		case nixStoreGCShortPattern.MatchString(normalized):
+			add("nix store gc")
+		case nixStoreGCPattern.MatchString(normalized):
+			add("nix-store --gc")
 		case strings.Contains(normalized, "nix-store") && strings.ContainsAny(normalized, "-"):
 			add("nix-store")
-		case regexp.MustCompile(`\bnix\s+(build|develop|shell|flake|profile|store|copy|run|log)\b`).MatchString(normalized):
-			add("nix " + regexp.MustCompile(`\bnix\s+(build|develop|shell|flake|profile|store|copy|run|log)\b`).FindStringSubmatch(normalized)[1])
+		case nixCommandPattern.MatchString(normalized):
+			add("nix " + nixCommandPattern.FindStringSubmatch(normalized)[1])
 		case strings.Contains(normalized, "nix-daemon") &&
 			(strings.Contains(normalized, "--stdio") ||
 				strings.Contains(normalized, "--serve") ||

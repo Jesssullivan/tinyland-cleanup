@@ -13,7 +13,8 @@ tinyland-cleanup --once --dry-run --level critical --output json
 The Nix plan includes:
 
 - `estimated_bytes_freed` from `nix-collect-garbage --dry-run`;
-- detected active Nix work such as `nix build`, `home-manager switch`,
+- detected active Nix work such as `nix build`, `nix store gc`,
+  `nix-collect-garbage`, `nix-store --gc`, `home-manager switch`,
   `darwin-rebuild`, `nixos-rebuild`, and worker-style `nix-daemon` activity;
 - protected `nix_active_work`, `nix_process_inspection`, or
   `nix_store_contention` targets when cleanup is deferred before mutation;

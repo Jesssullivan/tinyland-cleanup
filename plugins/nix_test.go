@@ -73,13 +73,16 @@ func TestParseNixPolicyDuration(t *testing.T) {
 func TestNixBusyProcessReasons(t *testing.T) {
 	ps := `
 /nix/var/nix/profiles/default/bin/nix nix build .#package
+/nix/var/nix/profiles/default/bin/nix nix store gc --dry-run
 /run/current-system/sw/bin/home-manager home-manager switch --flake .#jess
 /nix/store/abc/bin/nix-daemon nix-daemon --daemon
 /nix/store/def/bin/nix-daemon nix-daemon --stdio
+/nix/store/ghi/bin/nix-store nix-store --gc --print-roots
+/nix/store/jkl/bin/nix-collect-garbage nix-collect-garbage --dry-run
 /usr/bin/zsh zsh -lc echo idle
 `
 	reasons := nixBusyProcessReasons(ps)
-	want := []string{"home-manager switch", "nix build", "nix-daemon worker"}
+	want := []string{"home-manager switch", "nix build", "nix store gc", "nix-collect-garbage", "nix-daemon worker", "nix-store --gc"}
 
 	if len(reasons) != len(want) {
 		t.Fatalf("got reasons %v, want %v", reasons, want)
