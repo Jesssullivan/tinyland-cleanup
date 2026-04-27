@@ -89,8 +89,8 @@ podman:
     - qemu
 
   # Empty scratch dir keeps the compacted temp image beside the VM disk.
-  # Configured scratch dirs must be on the same filesystem until the
-  # cross-device replacement flow is implemented.
+  # Configured scratch dirs may live on another filesystem; cross-device
+  # replacement requires compact_keep_backup_until_restart.
   compact_scratch_dir: ""
 
   # Optional absolute qemu-img path when the daemon environment does not have

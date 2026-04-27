@@ -21,6 +21,7 @@ The Podman plan reports:
 - scratch directory, temp image path, and rollback backup path;
 - logical image size and physical host allocation;
 - required temporary free space based on physical allocation plus headroom;
+  cross-device scratch also accounts for the rollback backup copy;
 - active-container status;
 - whether `qemu-img` is available and which executable path will be used;
 - protected targets for blocked VM disk compaction, scratch-space requirements,
@@ -52,16 +53,18 @@ podman:
 
 The preflight skips compaction when the disk path is outside expected Podman
 machine directories, `qemu-img` is unavailable, active containers are running,
-the provider is unknown, a rollback backup already exists, or the filesystem
-does not have enough physical free space for the compacted copy.
+the provider is unknown, a rollback backup already exists, or the scratch
+filesystem does not have enough physical free space for the compacted copy and
+any required rollback backup.
 
 `compact_scratch_dir` may point at a reviewed scratch directory when the default
-VM disk directory cannot hold the temporary compacted image. The current
-mutation flow only supports scratch directories on the same filesystem as the VM
-disk, because replacement is performed with filesystem renames. Cross-device
-scratch directories are reported as protected targets with
-`scratch_dir_cross_device_replace_unsupported` until a separate copy-and-verify
-replacement flow lands.
+VM disk directory cannot hold the temporary compacted image. Same-filesystem
+scratch uses filesystem renames for replacement. Cross-device scratch uses a
+copy-and-verify flow: write the compacted image to scratch, write a rollback
+backup to scratch, remove the original VM disk after backup succeeds, then write
+the compacted image back to the original disk path with `qemu-img`. That path
+requires `compact_keep_backup_until_restart: true` and enough scratch space for
+both the compacted image and rollback backup.
 
 `compact_qemu_img_path` is optional. Set it only when the daemon environment does
 not have `qemu-img` on `PATH`, for example when operators intentionally provide

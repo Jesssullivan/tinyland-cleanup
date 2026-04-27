@@ -252,8 +252,59 @@ func TestPodmanCompactionPlanUsesConfiguredScratchDir(t *testing.T) {
 	}
 }
 
-func TestPodmanCompactionPlanRejectsCrossDeviceScratchDir(t *testing.T) {
+func TestPodmanCompactionPlanAllowsCrossDeviceScratchDirWithBackup(t *testing.T) {
 	cfg := testPodmanCompactionConfig()
+	scratchDir := "/Volumes/TinylandSSD/tinyland-cleanup-podman"
+	physicalBytes := int64(12 * podmanCompactionGiB)
+
+	plan := buildPodmanCompactionPlan(podmanCompactionPlanInput{
+		MachineName:           "podman-machine-default",
+		Provider:              "applehv",
+		DiskPath:              "/Users/test/.local/share/containers/podman/machine/applehv/podman-machine-default.raw",
+		ScratchDir:            scratchDir,
+		ConfigEnabled:         true,
+		QemuImgAvailable:      true,
+		DiskPathExpected:      true,
+		ScratchDirConfigured:  true,
+		ScratchDirAvailable:   true,
+		ScratchDirCrossDevice: true,
+		LogicalBytes:          100 * podmanCompactionGiB,
+		PhysicalBytes:         physicalBytes,
+		FreeBytes:             80 * podmanCompactionGiB,
+		Config:                cfg,
+	})
+
+	if !plan.CanCompact {
+		t.Fatalf("expected cross-device scratch dir compaction to be eligible, got skip reason %q", plan.SkipReason)
+	}
+	if !plan.CrossDeviceReplacement {
+		t.Fatal("expected cross-device replacement mode")
+	}
+	expectedBackup := filepath.Join(scratchDir, "podman-machine-default.raw.backup")
+	if plan.BackupPath != expectedBackup {
+		t.Fatalf("expected cross-device backup path %q, got %q", expectedBackup, plan.BackupPath)
+	}
+	expectedRequired := podmanCompactionRequiredFreeBytes(physicalBytes, true)
+	if plan.RequiredFreeBytes != expectedRequired {
+		t.Fatalf("expected required free bytes %d, got %d", expectedRequired, plan.RequiredFreeBytes)
+	}
+	if plan.RequiredFreeBytes != podmanCompactionRequiredFreeBytes(physicalBytes, false)+physicalBytes {
+		t.Fatalf("expected cross-device requirement to include rollback backup, got %d", plan.RequiredFreeBytes)
+	}
+	if !strings.Contains(strings.Join(plan.Steps, "\n"), "Write compacted image back") {
+		t.Fatalf("expected cross-device write-back steps, got %#v", plan.Steps)
+	}
+
+	targets := podmanCompactionTargets(plan)
+	scratch := findPodmanTarget(t, targets, "podman_compaction_scratch")
+	if scratch.Action != "review_required_free_space" || scratch.Path != scratchDir {
+		t.Fatalf("expected review scratch target, got %#v", scratch)
+	}
+}
+
+func TestPodmanCompactionPlanRejectsCrossDeviceScratchDirWithoutBackup(t *testing.T) {
+	cfg := testPodmanCompactionConfig()
+	cfg.CompactKeepBackupUntilRestart = false
 	scratchDir := "/Volumes/TinylandSSD/tinyland-cleanup-podman"
 
 	plan := buildPodmanCompactionPlan(podmanCompactionPlanInput{
@@ -274,16 +325,16 @@ func TestPodmanCompactionPlanRejectsCrossDeviceScratchDir(t *testing.T) {
 	})
 
 	if plan.CanCompact {
-		t.Fatal("expected cross-device scratch dir to block compaction")
+		t.Fatal("expected cross-device scratch dir without rollback backup to block compaction")
 	}
-	if plan.SkipReason != "scratch_dir_cross_device_replace_unsupported" {
-		t.Fatalf("expected scratch_dir_cross_device_replace_unsupported, got %q", plan.SkipReason)
+	if plan.SkipReason != "cross_device_backup_disabled" {
+		t.Fatalf("expected cross_device_backup_disabled, got %q", plan.SkipReason)
 	}
 
 	targets := podmanCompactionTargets(plan)
 	scratch := findPodmanTarget(t, targets, "podman_compaction_scratch")
-	if scratch.Action != "protect_cross_device_scratch" || scratch.Path != scratchDir {
-		t.Fatalf("expected protected cross-device scratch target, got %#v", scratch)
+	if scratch.Action != "protect_cross_device_backup_disabled" || scratch.Path != scratchDir {
+		t.Fatalf("expected protected cross-device backup target, got %#v", scratch)
 	}
 }
 
