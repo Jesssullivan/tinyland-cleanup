@@ -15,6 +15,10 @@ The Nix plan includes:
 - `estimated_bytes_freed` from `nix-collect-garbage --dry-run`;
 - detected active Nix work such as `nix build`, `home-manager switch`,
   `darwin-rebuild`, `nixos-rebuild`, and worker-style `nix-daemon` activity;
+- protected `nix_active_work`, `nix_process_inspection`, or
+  `nix_store_contention` targets when cleanup is deferred before mutation;
+- `retry_after` metadata derived from `daemon_busy_backoff` so operators can
+  distinguish a temporary deferral from a cleanup-policy mismatch;
 - `nix_daemon_contention` deferral when dry-run GC itself reports SQLite or
   store lock contention and `skip_when_daemon_busy` is enabled;
 - visible GC roots when dry-run GC reports no reclaimable store space;
@@ -47,6 +51,9 @@ Runtime behavior:
 - dry-run GC lock or SQLite contention is treated like active Nix work when
   `skip_when_daemon_busy` is enabled, so the plan is deferred instead of
   continuing into generation inspection;
+- active-work, process-inspection, and store-contention deferrals are surfaced
+  as protected dry-run targets with no reclaim estimate, plus retry guidance
+  based on `daemon_busy_backoff`;
 - real generation deletion and GC commands also treat those contention
   signatures as deferred no-op cleanup steps when `skip_when_daemon_busy` is
   enabled;

@@ -91,19 +91,26 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 	}
 
 	if busy, err := p.activeNixProcesses(ctx); err != nil {
-		plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not inspect active Nix processes: %v", err))
 		if cfg.Nix.SkipWhenDaemonBusy {
-			plan.WouldRun = false
-			plan.SkipReason = "nix_process_inspection_failed"
-			plan.Summary = "Nix cleanup is deferred because active process inspection failed"
+			nixDeferPlan(&plan,
+				"nix_process_inspection_failed",
+				"Nix cleanup is deferred because active process inspection failed",
+				cfg.Nix,
+				[]CleanupTarget{nixDeferralTarget("nix_process_inspection", "active Nix process inspection", "protect_process_inspection", false, fmt.Sprintf("could not inspect active Nix processes: %v", err), cfg.Nix.DaemonBusyBackoff)},
+				fmt.Sprintf("could not inspect active Nix processes: %v", err),
+			)
 			return plan
 		}
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not inspect active Nix processes: %v", err))
 	} else if len(busy) > 0 {
 		plan.Metadata["active_nix_processes"] = strings.Join(busy, ", ")
 		if cfg.Nix.SkipWhenDaemonBusy {
-			plan.WouldRun = false
-			plan.SkipReason = "nix_daemon_busy"
-			plan.Summary = "Nix cleanup is deferred because active Nix work was detected"
+			nixDeferPlan(&plan,
+				"nix_daemon_busy",
+				"Nix cleanup is deferred because active Nix work was detected",
+				cfg.Nix,
+				nixActiveWorkTargets(busy, cfg.Nix.DaemonBusyBackoff),
+			)
 			return plan
 		}
 	}
@@ -113,9 +120,12 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 			plan.Metadata["nix_contention"] = reason
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("nix-collect-garbage dry-run reported store contention: %s", reason))
 			if cfg.Nix.SkipWhenDaemonBusy {
-				plan.WouldRun = false
-				plan.SkipReason = "nix_daemon_contention"
-				plan.Summary = "Nix cleanup is deferred because dry-run reported store contention"
+				nixDeferPlan(&plan,
+					"nix_daemon_contention",
+					"Nix cleanup is deferred because dry-run reported store contention",
+					cfg.Nix,
+					[]CleanupTarget{nixDeferralTarget("nix_store_contention", reason, "protect_store_contention", true, "Nix store lock or SQLite contention was reported by dry-run GC", cfg.Nix.DaemonBusyBackoff)},
+				)
 				return plan
 			}
 		}
@@ -146,6 +156,23 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 	}
 
 	return plan
+}
+
+func nixDeferPlan(plan *CleanupPlan, skipReason string, summary string, cfg config.NixConfig, targets []CleanupTarget, warnings ...string) {
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]string{}
+	}
+	plan.WouldRun = false
+	plan.SkipReason = skipReason
+	plan.Summary = summary
+	plan.Targets = append(plan.Targets, targets...)
+	plan.Metadata["deferral_reason"] = skipReason
+	plan.Metadata["retry_after"] = cfg.DaemonBusyBackoff
+	plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
+	plan.Warnings = append(plan.Warnings, warnings...)
+	if cfg.DaemonBusyBackoff != "" {
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf("retry Nix cleanup after %s once active work is idle and process inspection is available", cfg.DaemonBusyBackoff))
+	}
 }
 
 // Cleanup performs Nix garbage collection at the specified level.
@@ -442,6 +469,30 @@ func (p *NixPlugin) activeNixProcesses(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	return nixBusyProcessReasons(string(output)), nil
+}
+
+func nixActiveWorkTargets(reasons []string, backoff string) []CleanupTarget {
+	targets := make([]CleanupTarget, 0, len(reasons))
+	for _, reason := range reasons {
+		targets = append(targets, nixDeferralTarget("nix_active_work", reason, "protect_active_work", true, "active Nix work is using the store", backoff))
+	}
+	return targets
+}
+
+func nixDeferralTarget(targetType string, name string, action string, active bool, reason string, backoff string) CleanupTarget {
+	if backoff != "" {
+		reason = fmt.Sprintf("%s; retry after %s once idle", reason, backoff)
+	}
+	target := CleanupTarget{
+		Type:      targetType,
+		Name:      name,
+		Active:    active,
+		Protected: true,
+		Action:    action,
+		Reason:    reason,
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierDisruptive, CleanupReclaimNone)
+	return target
 }
 
 func nixPlanSteps(level CleanupLevel, cfg config.NixConfig) []string {

@@ -1,8 +1,11 @@
 package plugins
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
 func TestNixPluginParseDryRunFreedSpace(t *testing.T) {
@@ -85,6 +88,51 @@ func TestNixBusyProcessReasons(t *testing.T) {
 		if reasons[i] != want[i] {
 			t.Fatalf("got reasons %v, want %v", reasons, want)
 		}
+	}
+}
+
+func TestNixActiveWorkTargetsProtectStoreWork(t *testing.T) {
+	targets := nixActiveWorkTargets([]string{"home-manager switch", "nix build"}, "30m")
+	if len(targets) != 2 {
+		t.Fatalf("got %d targets, want 2", len(targets))
+	}
+
+	for _, target := range targets {
+		if target.Action != "protect_active_work" || !target.Active || !target.Protected {
+			t.Fatalf("active Nix work target should be protected: %+v", target)
+		}
+		if target.Tier != CleanupTierDisruptive || target.Reclaim != CleanupReclaimNone {
+			t.Fatalf("active Nix work should be disruptive/no-reclaim: %+v", target)
+		}
+		if target.HostReclaimsSpace == nil || *target.HostReclaimsSpace {
+			t.Fatalf("active Nix work target should not reclaim host space: %+v", target)
+		}
+		if !strings.Contains(target.Reason, "retry after 30m") {
+			t.Fatalf("active Nix work target should include retry guidance: %+v", target)
+		}
+	}
+}
+
+func TestNixDeferPlanAddsOperatorRetryMetadata(t *testing.T) {
+	plan := CleanupPlan{
+		WouldRun: true,
+		Metadata: map[string]string{},
+	}
+	cfg := config.NixConfig{DaemonBusyBackoff: "15m"}
+
+	nixDeferPlan(&plan, "nix_daemon_busy", "deferred", cfg, nixActiveWorkTargets([]string{"nix build"}, cfg.DaemonBusyBackoff))
+
+	if plan.WouldRun || plan.SkipReason != "nix_daemon_busy" || plan.Summary != "deferred" {
+		t.Fatalf("unexpected deferred plan state: %+v", plan)
+	}
+	if plan.Metadata["retry_after"] != "15m" || plan.Metadata["deferral_reason"] != "nix_daemon_busy" || plan.Metadata["target_count"] != "1" {
+		t.Fatalf("deferred plan metadata missing retry details: %+v", plan.Metadata)
+	}
+	if len(plan.Targets) != 1 || plan.Targets[0].Action != "protect_active_work" {
+		t.Fatalf("deferred plan should include active work target: %+v", plan.Targets)
+	}
+	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0], "retry Nix cleanup after 15m") || !strings.Contains(plan.Warnings[0], "process inspection is available") {
+		t.Fatalf("deferred plan should include retry warning: %+v", plan.Warnings)
 	}
 }
 

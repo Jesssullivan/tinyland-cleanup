@@ -131,6 +131,12 @@ For macOS Podman VM disk compaction, review
 `applehv` raw images is advisory and is not counted as host-side reclaimed
 space.
 
+For Nix, active build, Home Manager, rebuild, `nix-store`, and worker-style
+`nix-daemon` activity defers cleanup when `skip_when_daemon_busy` is enabled.
+The dry-run plan reports protected active-work or store-contention targets and
+`retry_after` metadata from `nix.daemon_busy_backoff`; treat those as temporary
+operator backoff signals, not reclaim candidates.
+
 For Darwin IDE and tool caches, review
 [darwin-dev-caches.md](darwin-dev-caches.md). These targets are reported for
 operator review, and real deletion requires `darwin_dev_caches.enforce: true`.
