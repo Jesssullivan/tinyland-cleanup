@@ -184,9 +184,12 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 
 			compaction := p.planOfflineCompaction(ctx, cfg, logger)
 			plan.RequiredFreeBytes = compaction.RequiredFreeBytes
-			plan.EstimatedBytesFreed = compaction.EstimatedReclaimBytes
+			if compaction.CanCompact {
+				plan.EstimatedBytesFreed = compaction.EstimatedReclaimBytes
+			}
 			plan.Warnings = append(plan.Warnings, compaction.Warnings...)
 			plan.Steps = append(plan.Steps, compaction.Steps...)
+			plan.Targets = append(plan.Targets, podmanCompactionTargets(compaction)...)
 			plan.Metadata["offline_compaction_enabled"] = strconv.FormatBool(compaction.ConfigEnabled)
 			plan.Metadata["offline_compaction_can_run"] = strconv.FormatBool(compaction.CanCompact)
 			plan.Metadata["offline_compaction_skip_reason"] = compaction.SkipReason
@@ -201,6 +204,7 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 			plan.Metadata["offline_compaction_required_free_bytes"] = strconv.FormatInt(compaction.RequiredFreeBytes, 10)
 			plan.Metadata["offline_compaction_estimated_reclaim_bytes"] = strconv.FormatInt(compaction.EstimatedReclaimBytes, 10)
 			plan.Metadata["offline_compaction_active_containers"] = strconv.FormatBool(compaction.ActiveContainers)
+			plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
 		}
 	}
 
@@ -782,6 +786,109 @@ func buildPodmanCompactionPlan(input podmanCompactionPlanInput) podmanCompaction
 	}
 
 	return plan
+}
+
+func podmanCompactionTargets(plan podmanCompactionPlan) []CleanupTarget {
+	if plan.DiskPath == "" && plan.RequiredFreeBytes == 0 && !plan.ActiveContainers {
+		return nil
+	}
+
+	var targets []CleanupTarget
+	if plan.DiskPath != "" {
+		action := "compact_disk_offline"
+		reclaim := CleanupReclaimHost
+		reason := "offline compaction is eligible and expected to reclaim host allocation"
+		if !plan.CanCompact {
+			action = "protect_offline_compaction"
+			reclaim = CleanupReclaimNone
+			reason = podmanCompactionSkipReason(plan.SkipReason)
+		}
+		target := CleanupTarget{
+			Type:         "podman_vm_disk",
+			Tier:         CleanupTierDisruptive,
+			Name:         plan.MachineName,
+			Path:         plan.DiskPath,
+			Bytes:        plan.EstimatedReclaimBytes,
+			LogicalBytes: plan.LogicalBytes,
+			Active:       plan.ActiveContainers,
+			Protected:    !plan.CanCompact,
+			Action:       action,
+			Reason:       reason,
+		}
+		annotateCleanupTargetPolicy(&target, target.Tier, reclaim)
+		targets = append(targets, target)
+	}
+
+	if plan.RequiredFreeBytes > 0 {
+		action := "review_required_free_space"
+		reason := "offline compaction needs temporary scratch space for the compacted image"
+		if plan.SkipReason == "insufficient_free_space" {
+			action = "protect_insufficient_free_space"
+			reason = "not enough free space is available beside the VM disk for offline compaction"
+		}
+		target := CleanupTarget{
+			Type:      "podman_compaction_scratch",
+			Tier:      CleanupTierDisruptive,
+			Name:      "offline compaction scratch space",
+			Path:      filepath.Dir(plan.DiskPath),
+			Bytes:     plan.RequiredFreeBytes,
+			Protected: true,
+			Action:    action,
+			Reason:    reason,
+		}
+		annotateCleanupTargetPolicy(&target, target.Tier, CleanupReclaimNone)
+		targets = append(targets, target)
+	}
+
+	if plan.ActiveContainers || plan.ActiveContainerCheckError != "" {
+		action := "protect_active_containers"
+		active := plan.ActiveContainers
+		reason := "active Podman containers must be quiesced before offline compaction"
+		if plan.ActiveContainerCheckError != "" {
+			action = "protect_container_inspection"
+			reason = fmt.Sprintf("could not inspect active Podman containers: %s", plan.ActiveContainerCheckError)
+		}
+		target := CleanupTarget{
+			Type:      "podman_active_containers",
+			Tier:      CleanupTierDisruptive,
+			Name:      "active Podman containers",
+			Active:    active,
+			Protected: true,
+			Action:    action,
+			Reason:    reason,
+		}
+		annotateCleanupTargetPolicy(&target, target.Tier, CleanupReclaimNone)
+		targets = append(targets, target)
+	}
+
+	return targets
+}
+
+func podmanCompactionSkipReason(reason string) string {
+	switch reason {
+	case "":
+		return "offline compaction is not eligible"
+	case "compact_disk_offline_disabled":
+		return "offline compaction is disabled by config"
+	case "active_containers":
+		return "active Podman containers must be stopped before offline compaction"
+	case "insufficient_free_space":
+		return "not enough scratch free space is available for offline compaction"
+	case "qemu_img_missing":
+		return "qemu-img is required for offline compaction"
+	case "backup_path_exists":
+		return "existing rollback backup must be resolved before offline compaction"
+	case "disk_path_outside_podman_machine_dirs":
+		return "VM disk path is outside expected Podman machine directories"
+	case "provider_not_allowlisted":
+		return "VM provider is not allowlisted for offline compaction"
+	case "unsupported_provider":
+		return "VM provider is not supported for offline compaction"
+	case "below_minimum_physical_allocation":
+		return "VM disk physical allocation is below the configured compaction threshold"
+	default:
+		return "offline compaction preflight blocked compaction: " + reason
+	}
 }
 
 func podmanDiskFormat(provider string) (string, bool) {

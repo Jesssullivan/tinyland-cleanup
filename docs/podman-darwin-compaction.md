@@ -22,7 +22,14 @@ The Podman plan reports:
 - required temporary free space based on physical allocation plus headroom;
 - active-container status;
 - whether `qemu-img` is available;
+- protected targets for blocked VM disk compaction, scratch-space requirements,
+  and active-container quiescence;
 - the exact stop, convert, verify, replace, and start sequence.
+
+`estimated_bytes_freed` is counted only when the offline compaction preflight
+can run. Blocked compaction still reports the potential reclaim in
+`offline_compaction_estimated_reclaim_bytes` and on protected targets for
+operator review.
 
 ## Enable
 
@@ -44,6 +51,10 @@ The preflight skips compaction when the disk path is outside expected Podman
 machine directories, `qemu-img` is unavailable, active containers are running,
 the provider is unknown, a rollback backup already exists, or the filesystem
 does not have enough physical free space for the compacted copy.
+
+When `active_containers` or `insufficient_free_space` appears, treat the plan as
+a quiescence or scratch-capacity task. Do not force compaction on an active
+developer VM just because the raw image has large potential reclaim.
 
 ## Rollback Boundary
 
