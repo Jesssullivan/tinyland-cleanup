@@ -46,6 +46,12 @@ darwin_dev_caches:
   enforce: false
 ```
 
+When Darwin developer caches are enabled, real `cache` cleanup uses this typed
+target model as the authority. With `enforce: false`, cleanup returns without
+deleting legacy generic cache paths such as pip, npm, Go, Cargo, or broad
+`~/Library/Caches` entries. This keeps dry-run review and real mutation aligned
+on developer machines.
+
 When `enforce: true`, moderate cleanup can delete unprotected Playwright and
 Bazelisk entries outside the keep-latest policy, stale pip caches, and stale
 inactive editor cache directories. Aggressive cleanup can delete inactive stale

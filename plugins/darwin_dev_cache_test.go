@@ -191,6 +191,69 @@ func TestCleanupDarwinDeveloperCacheTargetsDeletesOnlyEligibleTargets(t *testing
 	}
 }
 
+func TestCacheCleanupDarwinDevCachesDisabledEnforcementSkipsLegacyMutation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	pipCache := filepath.Join(home, ".cache", "pip", "cache.bin")
+	npmCache := filepath.Join(home, ".npm", "_cacache", "cache.bin")
+	writeFileAt(t, pipCache, "pip")
+	writeFileAt(t, npmCache, "npm")
+
+	cfg := config.DefaultConfig()
+	cfg.DarwinDevCaches.Enabled = true
+	cfg.DarwinDevCaches.Enforce = false
+
+	plugin := &CachePlugin{}
+	result := plugin.Cleanup(context.Background(), LevelCritical, cfg, nilLogger())
+	if result.BytesFreed != 0 || result.ItemsCleaned != 0 {
+		t.Fatalf("expected no mutation when Darwin cache enforcement is disabled, got %#v", result)
+	}
+	if !pathExists(pipCache) || !pathExists(npmCache) {
+		t.Fatalf("legacy generic cache paths should be preserved when typed Darwin enforcement is disabled")
+	}
+}
+
+func TestCacheCleanupDarwinDevCachesUsesTypedTargetsWhenEnforced(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	oldBrowser := filepath.Join(home, "Library", "Caches", "ms-playwright", "chromium-1148")
+	newBrowser := filepath.Join(home, "Library", "Caches", "ms-playwright", "chromium-1149")
+	legacyNPM := filepath.Join(home, ".npm", "_cacache", "cache.bin")
+	writeCacheFile(t, home, "Library/Caches/ms-playwright/chromium-1148/browser.bin", "old chromium")
+	writeCacheFile(t, home, "Library/Caches/ms-playwright/chromium-1149/browser.bin", "new chromium")
+	writeFileAt(t, legacyNPM, "npm")
+
+	now := time.Now()
+	mustChtimes(t, oldBrowser, now.Add(-2*time.Hour))
+	mustChtimes(t, newBrowser, now)
+
+	cfg := config.DefaultConfig()
+	cfg.DarwinDevCaches.Enabled = true
+	cfg.DarwinDevCaches.Enforce = true
+	cfg.DarwinDevCaches.Pip.Enabled = false
+	cfg.DarwinDevCaches.JetBrains.Enabled = false
+	cfg.DarwinDevCaches.Bazelisk.Enabled = false
+	cfg.DarwinDevCaches.VSCode.Enabled = false
+	cfg.DarwinDevCaches.Cursor.Enabled = false
+
+	plugin := &CachePlugin{}
+	result := plugin.Cleanup(context.Background(), LevelModerate, cfg, nilLogger())
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("expected one typed Darwin cache target to be deleted, got %#v", result)
+	}
+	if pathExists(oldBrowser) {
+		t.Fatalf("expected old Playwright revision to be deleted by typed enforcement")
+	}
+	if !pathExists(newBrowser) {
+		t.Fatalf("expected newest Playwright revision to remain")
+	}
+	if !pathExists(legacyNPM) {
+		t.Fatalf("legacy generic npm cache should not be deleted by typed Darwin cleanup")
+	}
+}
+
 func TestHomebrewPlanTargetUsesDryRunEstimate(t *testing.T) {
 	target := homebrewPlanTarget(LevelCritical, "/tmp/homebrew-cache", 10, 50, true)
 

@@ -952,6 +952,18 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 
 	home, _ := os.UserHomeDir()
 
+	if cfg.DarwinDevCaches.Enabled {
+		if !cfg.DarwinDevCaches.Enforce {
+			logger.Info("skipping Darwin cache cleanup because darwin_dev_caches.enforce is false")
+			return result
+		}
+		if level < LevelModerate {
+			logger.Info("skipping Darwin cache cleanup below moderate pressure")
+			return result
+		}
+		return p.cleanupDarwinDeveloperCacheTargets(ctx, level, home, cfg.DarwinDevCaches, logger)
+	}
+
 	// pip cache
 	pipCache := filepath.Join(home, ".cache", "pip")
 	if size := getDirSize(pipCache); size > 0 {
@@ -1052,16 +1064,6 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 			sizeAfter := getDirSize(libraryCaches)
 			result.BytesFreed += sizeBefore - sizeAfter
 			logger.Debug("cleaned macOS Library/Caches", "freed_mb", (sizeBefore-sizeAfter)/(1024*1024))
-		}
-	}
-
-	if cfg.DarwinDevCaches.Enabled && cfg.DarwinDevCaches.Enforce && level >= LevelModerate {
-		darwinResult := p.cleanupDarwinDeveloperCacheTargets(ctx, level, home, cfg.DarwinDevCaches, logger)
-		result.BytesFreed += darwinResult.BytesFreed
-		result.EstimatedBytesFreed += darwinResult.EstimatedBytesFreed
-		result.ItemsCleaned += darwinResult.ItemsCleaned
-		if darwinResult.Error != nil {
-			result.Error = darwinResult.Error
 		}
 	}
 
