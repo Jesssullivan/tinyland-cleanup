@@ -88,6 +88,11 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 	}
 
 	tracker := newDevArtifactGitTracker()
+	mountedImages := map[string]string{}
+	if daCfg.LargeLocalArtifacts {
+		mountedImages = largeLocalMountedDiskImages(ctx)
+	}
+
 	var targets []CleanupTarget
 	for _, scanPath := range daCfg.ScanPaths {
 		expanded := expandHome(scanPath, home)
@@ -107,7 +112,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			p.planZigArtifacts(expanded, zigAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.LargeLocalArtifacts {
-			p.planLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, &targets)
+			p.planLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, mountedImages, &targets)
 		}
 	}
 
@@ -292,13 +297,13 @@ func (p *DevArtifactsPlugin) planZigArtifacts(scanPath string, maxAge time.Durat
 	}
 }
 
-func (p *DevArtifactsPlugin) planLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, targets *[]CleanupTarget) {
-	p.findLargeLocalArtifacts(scanPath, minBytes, protectPaths, func(target CleanupTarget) {
+func (p *DevArtifactsPlugin) planLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, targets *[]CleanupTarget) {
+	p.findLargeLocalArtifacts(scanPath, minBytes, protectPaths, mountedImages, func(target CleanupTarget) {
 		*targets = append(*targets, target)
 	})
 }
 
-func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, callback func(CleanupTarget)) {
+func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, callback func(CleanupTarget)) {
 	scanDepth := strings.Count(scanPath, string(os.PathSeparator))
 	fileKinds := largeLocalArtifactFileKinds()
 	dirKinds := largeLocalArtifactDirKinds()
@@ -325,7 +330,7 @@ func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes i
 			if kind, ok := dirKinds[filepath.Ext(lowerBase)]; ok {
 				size := getDirAllocatedBytes(path)
 				if size >= minBytes {
-					callback(p.largeLocalArtifactTarget(kind, path, size, 0, p.isProtected(path, protectPaths)))
+					callback(p.largeLocalArtifactTarget(kind, path, size, 0, p.isProtected(path, protectPaths), mountedImages[filepath.Clean(path)]))
 				}
 				return filepath.SkipDir
 			}
@@ -346,15 +351,19 @@ func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes i
 		if physicalBytes < minBytes {
 			return nil
 		}
-		callback(p.largeLocalArtifactTarget(kind, path, physicalBytes, info.Size(), p.isProtected(path, protectPaths)))
+		callback(p.largeLocalArtifactTarget(kind, path, physicalBytes, info.Size(), p.isProtected(path, protectPaths), mountedImages[filepath.Clean(path)]))
 		return nil
 	})
 }
 
-func (p *DevArtifactsPlugin) largeLocalArtifactTarget(kind, path string, physicalBytes, logicalBytes int64, protected bool) CleanupTarget {
+func (p *DevArtifactsPlugin) largeLocalArtifactTarget(kind, path string, physicalBytes, logicalBytes int64, protected bool, mountPoint string) CleanupTarget {
 	action := "review"
 	reason := "large local disk/image artifact requires manual review before removal"
-	if protected {
+	active := mountPoint != ""
+	if active {
+		action = "protect"
+		reason = "disk/image artifact is mounted at " + mountPoint + "; detach before manual cleanup"
+	} else if protected {
 		action = "protect"
 		reason = "path is covered by dev_artifacts.protect_paths"
 	}
@@ -364,12 +373,64 @@ func (p *DevArtifactsPlugin) largeLocalArtifactTarget(kind, path string, physica
 		Path:         path,
 		Bytes:        physicalBytes,
 		LogicalBytes: logicalBytes,
+		Active:       active,
 		Protected:    true,
 		Action:       action,
 		Reason:       reason,
 	}
 	annotateCleanupTargetPolicy(&target, CleanupTierDestructive, CleanupReclaimNone)
 	return target
+}
+
+func largeLocalMountedDiskImages(ctx context.Context) map[string]string {
+	hdiutil, err := exec.LookPath("hdiutil")
+	if err != nil {
+		return nil
+	}
+	infoCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(infoCtx, hdiutil, "info").Output()
+	if err != nil {
+		return nil
+	}
+	return parseLargeLocalMountedDiskImages(string(output))
+}
+
+func parseLargeLocalMountedDiskImages(output string) map[string]string {
+	mounted := map[string]string{}
+	currentImage := ""
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "image-path") {
+			if _, value, ok := strings.Cut(trimmed, ":"); ok {
+				currentImage = filepath.Clean(strings.TrimSpace(value))
+			}
+			continue
+		}
+		if currentImage == "" || !strings.HasPrefix(trimmed, "/dev/") {
+			continue
+		}
+		mountPoint := largeLocalMountPointFromHdiutilLine(trimmed)
+		if mountPoint != "" {
+			mounted[currentImage] = mountPoint
+		}
+	}
+	return mounted
+}
+
+func largeLocalMountPointFromHdiutilLine(line string) string {
+	parts := strings.Split(line, "\t")
+	if len(parts) > 1 {
+		mountPoint := strings.TrimSpace(parts[len(parts)-1])
+		if strings.HasPrefix(mountPoint, "/") {
+			return mountPoint
+		}
+	}
+	fields := strings.Fields(line)
+	if len(fields) > 0 && strings.HasPrefix(fields[len(fields)-1], "/") {
+		return fields[len(fields)-1]
+	}
+	return ""
 }
 
 func largeLocalArtifactMinBytes(cfg config.DevArtifactsConfig) int64 {
@@ -872,7 +933,7 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 
 		// Find and report large local artifacts for manual review.
 		if daCfg.LargeLocalArtifacts {
-			p.findLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, func(target CleanupTarget) {
+			p.findLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, nil, func(target CleanupTarget) {
 				logger.Info("found large local artifact", "path", target.Path, "size_mb", target.Bytes/(1024*1024), "type", target.Name)
 			})
 		}

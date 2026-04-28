@@ -697,7 +697,7 @@ func TestPlanLargeLocalArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planLargeLocalArtifacts(tmpDir, 1, nil, &targets)
+	p.planLargeLocalArtifacts(tmpDir, 1, nil, nil, &targets)
 
 	image := findDevArtifactTarget(t, targets, "large-local-artifact", imagePath)
 	if image.Action != "review" || !image.Protected || image.Tier != CleanupTierDestructive || image.Reclaim != CleanupReclaimNone {
@@ -706,6 +706,48 @@ func TestPlanLargeLocalArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	bundle := findDevArtifactTarget(t, targets, "large-local-artifact", bundlePath)
 	if bundle.Action != "review" || !bundle.Protected || bundle.Bytes <= 0 {
 		t.Fatalf("expected review-only sparsebundle target with bytes, got %#v", bundle)
+	}
+}
+
+func TestPlanLargeLocalArtifactsReportsMountedImagesAsActive(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	bundlePath := filepath.Join(tmpDir, "linux-xr-case-sensitive.sparsebundle")
+	if err := os.MkdirAll(filepath.Join(bundlePath, "bands"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundlePath, "bands", "0"), []byte("bundle data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var targets []CleanupTarget
+	p.planLargeLocalArtifacts(tmpDir, 1, nil, map[string]string{
+		filepath.Clean(bundlePath): "/Volumes/linux-xr-cs",
+	}, &targets)
+
+	target := findDevArtifactTarget(t, targets, "large-local-artifact", bundlePath)
+	if target.Action != "protect" || !target.Protected || !target.Active {
+		t.Fatalf("expected mounted sparsebundle to be active/protected, got %#v", target)
+	}
+	if !strings.Contains(target.Reason, "mounted at /Volumes/linux-xr-cs") {
+		t.Fatalf("expected mount point in reason, got %q", target.Reason)
+	}
+}
+
+func TestParseLargeLocalMountedDiskImages(t *testing.T) {
+	output := `
+image-path      : /Users/jess/Downloads/installer.dmg
+/dev/disk8s1	41504653-0000-11AA-AA11-00306543ECAC	/Volumes/Installer
+image-path      : /Users/jess/git/linux-xr-case-sensitive.sparsebundle
+/dev/disk9	EF57347C-0000-11AA-AA11-00306543ECAC
+/dev/disk9s1	41504653-0000-11AA-AA11-00306543ECAC	/Volumes/linux-xr-cs
+`
+	mounted := parseLargeLocalMountedDiskImages(output)
+	if mounted["/Users/jess/Downloads/installer.dmg"] != "/Volumes/Installer" {
+		t.Fatalf("installer mount missing: %#v", mounted)
+	}
+	if mounted["/Users/jess/git/linux-xr-case-sensitive.sparsebundle"] != "/Volumes/linux-xr-cs" {
+		t.Fatalf("sparsebundle mount missing: %#v", mounted)
 	}
 }
 
@@ -721,7 +763,7 @@ func TestPlanLargeLocalArtifactsHonorsProtectPaths(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planLargeLocalArtifacts(tmpDir, 1, []string{filepath.Dir(imagePath)}, &targets)
+	p.planLargeLocalArtifacts(tmpDir, 1, []string{filepath.Dir(imagePath)}, nil, &targets)
 
 	target := findDevArtifactTarget(t, targets, "large-local-artifact", imagePath)
 	if target.Action != "protect" || !target.Protected {
