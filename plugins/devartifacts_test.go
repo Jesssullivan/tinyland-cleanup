@@ -237,7 +237,7 @@ func TestCleanNodeModulesStale(t *testing.T) {
 	os.Chtimes(packageJSON, oldTime, oldTime)
 
 	// Clean with 30-day threshold - should remove
-	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
+	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
 
 	if freed == 0 {
 		t.Error("expected node_modules to be cleaned (stale > 30 days)")
@@ -262,7 +262,7 @@ func TestCleanNodeModulesFresh(t *testing.T) {
 	// package.json has current mtime (just created)
 
 	// Clean with 30-day threshold - should NOT remove
-	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
+	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
 
 	if freed != 0 {
 		t.Error("expected fresh node_modules to be preserved")
@@ -290,7 +290,7 @@ func TestCleanNodeModulesProtected(t *testing.T) {
 
 	// Clean with protection - should NOT remove
 	protectPaths := []string{project}
-	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, protectPaths, logger)
+	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, protectPaths, newDevArtifactGitTracker(), logger)
 
 	if freed != 0 {
 		t.Error("expected protected node_modules to be preserved")
@@ -316,7 +316,7 @@ func TestCleanZigArtifactsStale(t *testing.T) {
 	os.Chtimes(cacheArtifact, oldTime, oldTime)
 	os.Chtimes(outputArtifact, oldTime, oldTime)
 
-	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
 	if freed == 0 {
 		t.Fatal("expected stale Zig artifacts to be cleaned")
 	}
@@ -338,7 +338,7 @@ func TestCleanZigArtifactsFresh(t *testing.T) {
 	os.WriteFile(filepath.Join(project, ".zig-cache", "o", "artifact"), []byte("cache"), 0644)
 	os.WriteFile(filepath.Join(project, "build.zig"), []byte("const std = @import(\"std\");"), 0644)
 
-	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
 	if freed != 0 {
 		t.Fatal("expected fresh Zig artifacts to be preserved")
 	}
@@ -368,7 +368,7 @@ func TestPlanZigArtifactsProtectsRecentOutputAtCritical(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planZigArtifacts(tmpDir, 0, true, nil, nil, &targets)
+	p.planZigArtifacts(tmpDir, 0, true, nil, nil, newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
 	if target.Action != "protect" || !target.Protected {
@@ -400,7 +400,7 @@ func TestCleanZigArtifactsPreservesRecentOutputAtCritical(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 0, nil, logger)
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 0, nil, newDevArtifactGitTracker(), logger)
 	if freed != 0 {
 		t.Fatalf("expected recent Zig output to be preserved, freed %d bytes", freed)
 	}
@@ -434,7 +434,7 @@ func TestPlanZigArtifactsProtectsTrackedCache(t *testing.T) {
 	runGit(t, git, project, "add", "build.zig", ".zig-cache/o/artifact")
 
 	var targets []CleanupTarget
-	p.planZigArtifacts(tmpDir, 30*24*time.Hour, true, nil, nil, &targets)
+	p.planZigArtifacts(tmpDir, 30*24*time.Hour, true, nil, nil, newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
 	if target.Action != "protect" || !target.Protected {
@@ -470,12 +470,47 @@ func TestCleanZigArtifactsPreservesTrackedCache(t *testing.T) {
 	runGit(t, git, project, "init")
 	runGit(t, git, project, "add", "build.zig", ".zig-cache/o/artifact")
 
-	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
 	if freed != 0 {
 		t.Fatalf("expected tracked Zig cache to be preserved, freed %d bytes", freed)
 	}
 	if !pathExists(filepath.Join(project, ".zig-cache")) {
 		t.Error(".zig-cache should still exist")
+	}
+}
+
+func TestDevArtifactGitTrackerCachesTrackedFilesPerRepo(t *testing.T) {
+	git := requireGit(t)
+	tmpDir := t.TempDir()
+	project := filepath.Join(tmpDir, "tracked-zig")
+	if err := os.MkdirAll(filepath.Join(project, ".zig-cache", "o"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, "zig-out", "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".zig-cache", "o", "artifact"), []byte("cache"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "zig-out", "bin", "tool"), []byte("binary"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "build.zig"), []byte("const std = @import(\"std\");"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	runGit(t, git, project, "init")
+	runGit(t, git, project, "add", "build.zig", ".zig-cache/o/artifact")
+
+	tracker := newDevArtifactGitTracker()
+	if !tracker.ContainsTrackedFiles(filepath.Join(project, ".zig-cache")) {
+		t.Fatal("expected tracked .zig-cache content")
+	}
+	if tracker.ContainsTrackedFiles(filepath.Join(project, "zig-out")) {
+		t.Fatal("expected untracked zig-out content")
+	}
+	if len(tracker.trackedFilesByRoot) != 1 {
+		t.Fatalf("expected one git ls-files cache entry, got %d", len(tracker.trackedFilesByRoot))
 	}
 }
 
@@ -603,7 +638,7 @@ func TestPlanNodeModulesProtectsActiveDevelopmentProcess(t *testing.T) {
 	var targets []CleanupTarget
 	p.planNodeModules(tmpDir, 30*24*time.Hour, true, nil, map[string]string{
 		"node_modules": "Node.js package manager or runtime",
-	}, &targets)
+	}, newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "node_modules", filepath.Join(project, "node_modules"))
 	if target.Action != "protect" || !target.Protected || !target.Active {
@@ -633,7 +668,7 @@ func TestPlanZigArtifactsProtectsActiveDevelopmentProcess(t *testing.T) {
 	var targets []CleanupTarget
 	p.planZigArtifacts(tmpDir, 30*24*time.Hour, true, nil, map[string]string{
 		"zig-artifact": "Zig toolchain process",
-	}, &targets)
+	}, newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
 	if target.Action != "protect" || !target.Protected || !target.Active {

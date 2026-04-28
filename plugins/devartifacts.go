@@ -87,6 +87,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		plan.Metadata["active_dev_artifacts"] = strings.Join(devArtifactActivityReasons(active), ", ")
 	}
 
+	tracker := newDevArtifactGitTracker()
 	var targets []CleanupTarget
 	for _, scanPath := range daCfg.ScanPaths {
 		expanded := expandHome(scanPath, home)
@@ -94,16 +95,16 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			continue
 		}
 		if daCfg.NodeModules {
-			p.planNodeModules(expanded, nodeAge, mutates, daCfg.ProtectPaths, active, &targets)
+			p.planNodeModules(expanded, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.PythonVenvs {
-			p.planPythonVenvs(expanded, venvAge, mutates, daCfg.ProtectPaths, active, &targets)
+			p.planPythonVenvs(expanded, venvAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.RustTargets {
-			p.planRustTargets(expanded, rustAge, mutates, daCfg.ProtectPaths, active, &targets)
+			p.planRustTargets(expanded, rustAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.ZigArtifacts {
-			p.planZigArtifacts(expanded, zigAge, mutates, daCfg.ProtectPaths, active, &targets)
+			p.planZigArtifacts(expanded, zigAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.LargeLocalArtifacts {
 			p.planLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, &targets)
@@ -166,6 +167,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		return result
 	}
 
+	tracker := newDevArtifactGitTracker()
+
 	// Scan configured paths for dev artifacts
 	for _, scanPath := range daCfg.ScanPaths {
 		expanded := expandHome(scanPath, home)
@@ -174,7 +177,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 
 		if daCfg.NodeModules && !devArtifactFamilyActive(active, "node_modules") {
-			freed := p.cleanNodeModules(ctx, expanded, nodeAge, daCfg.ProtectPaths, logger)
+			freed := p.cleanNodeModules(ctx, expanded, nodeAge, daCfg.ProtectPaths, tracker, logger)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -182,7 +185,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 
 		if daCfg.PythonVenvs && !devArtifactFamilyActive(active, "python-venv") {
-			freed := p.cleanPythonVenvs(ctx, expanded, venvAge, daCfg.ProtectPaths, logger)
+			freed := p.cleanPythonVenvs(ctx, expanded, venvAge, daCfg.ProtectPaths, tracker, logger)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -190,7 +193,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 
 		if daCfg.RustTargets && !devArtifactFamilyActive(active, "rust-target") {
-			freed := p.cleanRustTargets(ctx, expanded, rustAge, daCfg.ProtectPaths, logger)
+			freed := p.cleanRustTargets(ctx, expanded, rustAge, daCfg.ProtectPaths, tracker, logger)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -198,7 +201,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 
 		if daCfg.ZigArtifacts && !devArtifactFamilyActive(active, "zig-artifact") {
-			freed := p.cleanZigArtifacts(ctx, expanded, zigAge, daCfg.ProtectPaths, logger)
+			freed := p.cleanZigArtifacts(ctx, expanded, zigAge, daCfg.ProtectPaths, tracker, logger)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -249,37 +252,37 @@ func devArtifactThresholds(level CleanupLevel) (nodeAge, venvAge, rustAge, zigAg
 	}
 }
 
-func (p *DevArtifactsPlugin) planNodeModules(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planNodeModules(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
 	p.findArtifactDirs(scanPath, "node_modules", "package.json", func(dir string, size int64) {
 		marker := filepath.Join(filepath.Dir(dir), "package.json")
 		stale := maxAge == 0 || p.isFileStale(marker, maxAge)
-		*targets = append(*targets, p.devArtifactTarget("node_modules", "node_modules", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", devArtifactContainsTrackedFiles(dir), "package.json", maxAge, active))
+		*targets = append(*targets, p.devArtifactTarget("node_modules", "node_modules", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", tracker.ContainsTrackedFiles(dir), "package.json", maxAge, active))
 	})
 }
 
-func (p *DevArtifactsPlugin) planPythonVenvs(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planPythonVenvs(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
 	markers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
 	p.findArtifactDirs(scanPath, ".venv", "", func(dir string, size int64) {
 		stale := maxAge == 0 || p.pythonProjectStale(filepath.Dir(dir), markers, maxAge)
-		*targets = append(*targets, p.devArtifactTarget("python-venv", ".venv", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", devArtifactContainsTrackedFiles(dir), strings.Join(markers, ", "), maxAge, active))
+		*targets = append(*targets, p.devArtifactTarget("python-venv", ".venv", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", tracker.ContainsTrackedFiles(dir), strings.Join(markers, ", "), maxAge, active))
 	})
 }
 
-func (p *DevArtifactsPlugin) planRustTargets(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planRustTargets(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
 	p.findArtifactDirs(scanPath, "target", "Cargo.toml", func(dir string, size int64) {
 		marker := filepath.Join(filepath.Dir(dir), "Cargo.toml")
 		stale := maxAge == 0 || p.isFileStale(marker, maxAge)
-		*targets = append(*targets, p.devArtifactTarget("rust-target", "target", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", devArtifactContainsTrackedFiles(dir), "Cargo.toml", maxAge, active))
+		*targets = append(*targets, p.devArtifactTarget("rust-target", "target", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", tracker.ContainsTrackedFiles(dir), "Cargo.toml", maxAge, active))
 	})
 }
 
-func (p *DevArtifactsPlugin) planZigArtifacts(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planZigArtifacts(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
 	for _, artifactName := range []string{".zig-cache", "zig-out"} {
 		p.findArtifactDirs(scanPath, artifactName, "build.zig", func(dir string, size int64) {
 			marker := filepath.Join(filepath.Dir(dir), "build.zig")
 			stale := maxAge == 0 || p.isFileStale(marker, maxAge)
 			protected := p.isProtected(dir, protectPaths)
-			tracked := devArtifactContainsTrackedFiles(dir)
+			tracked := tracker.ContainsTrackedFiles(dir)
 			recentReason := ""
 			if !protected && !tracked {
 				recentReason = devArtifactRecentOutputProtectReason(dir)
@@ -684,22 +687,123 @@ func formatDevArtifactAge(maxAge time.Duration) string {
 	return maxAge.String()
 }
 
+type devArtifactGitTracker struct {
+	gitPath            string
+	repoRootByDir      map[string]string
+	trackedFilesByRoot map[string][]string
+}
+
+func newDevArtifactGitTracker() *devArtifactGitTracker {
+	gitPath, _ := exec.LookPath("git")
+	return &devArtifactGitTracker{
+		gitPath:            gitPath,
+		repoRootByDir:      make(map[string]string),
+		trackedFilesByRoot: make(map[string][]string),
+	}
+}
+
 func devArtifactContainsTrackedFiles(path string) bool {
-	if _, err := exec.LookPath("git"); err != nil {
+	return newDevArtifactGitTracker().ContainsTrackedFiles(path)
+}
+
+func (t *devArtifactGitTracker) ContainsTrackedFiles(path string) bool {
+	if t == nil || t.gitPath == "" {
 		return false
 	}
 
-	insideCtx, insideCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer insideCancel()
-	insideCmd := exec.CommandContext(insideCtx, "git", "-C", path, "rev-parse", "--is-inside-work-tree")
-	if err := insideCmd.Run(); err != nil {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
 		return false
 	}
+	repoRoot := t.repoRootForPath(absPath)
+	if repoRoot == "" {
+		return false
+	}
+	files := t.trackedFiles(repoRoot)
+	if len(files) == 0 {
+		return false
+	}
+	rel, err := filepath.Rel(repoRoot, absPath)
+	if err != nil {
+		return false
+	}
+	return devArtifactTrackedFilesContain(files, filepath.ToSlash(filepath.Clean(rel)))
+}
 
-	listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer listCancel()
-	listCmd := exec.CommandContext(listCtx, "git", "-C", path, "ls-files", "--error-unmatch", "--", ".")
-	return listCmd.Run() == nil
+func (t *devArtifactGitTracker) repoRootForPath(path string) string {
+	info, err := os.Stat(path)
+	if err == nil && !info.IsDir() {
+		path = filepath.Dir(path)
+	}
+
+	var visited []string
+	dir := path
+	for {
+		if root, ok := t.repoRootByDir[dir]; ok {
+			for _, visitedDir := range visited {
+				t.repoRootByDir[visitedDir] = root
+			}
+			return root
+		}
+		visited = append(visited, dir)
+
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			for _, visitedDir := range visited {
+				t.repoRootByDir[visitedDir] = dir
+			}
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			for _, visitedDir := range visited {
+				t.repoRootByDir[visitedDir] = ""
+			}
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func (t *devArtifactGitTracker) trackedFiles(repoRoot string) []string {
+	if files, ok := t.trackedFilesByRoot[repoRoot]; ok {
+		return files
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, t.gitPath, "-C", repoRoot, "ls-files", "-z")
+	output, err := cmd.Output()
+	if err != nil {
+		t.trackedFilesByRoot[repoRoot] = nil
+		return nil
+	}
+
+	var files []string
+	for _, file := range strings.Split(string(output), "\x00") {
+		if file != "" {
+			files = append(files, file)
+		}
+	}
+	sort.Strings(files)
+	t.trackedFilesByRoot[repoRoot] = files
+	return files
+}
+
+func devArtifactTrackedFilesContain(files []string, rel string) bool {
+	if rel == "." {
+		return len(files) > 0
+	}
+	idx := sort.SearchStrings(files, rel)
+	if idx < len(files) && files[idx] == rel {
+		return true
+	}
+
+	prefix := rel + "/"
+	idx = sort.Search(len(files), func(i int) bool {
+		return files[i] >= prefix
+	})
+	return idx < len(files) && strings.HasPrefix(files[idx], prefix)
 }
 
 var errRecentDevArtifactContent = errors.New("recent dev artifact content")
@@ -809,14 +913,14 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 // cleanNodeModules removes stale node_modules directories.
 // A node_modules is considered stale if the sibling package.json hasn't been
 // modified within the maxAge threshold.
-func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, logger *slog.Logger) int64 {
+func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger) int64 {
 	var totalFreed int64
 
 	p.findArtifactDirs(scanPath, "node_modules", "package.json", func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
-		if devArtifactContainsTrackedFiles(dir) {
+		if tracker.ContainsTrackedFiles(dir) {
 			logger.Debug("preserving node_modules containing tracked files", "path", dir)
 			return
 		}
@@ -845,7 +949,7 @@ func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath stri
 // cleanPythonVenvs removes stale Python virtual environments.
 // A .venv is stale if sibling pyproject.toml/setup.py/requirements.txt hasn't
 // been modified within the maxAge threshold.
-func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, logger *slog.Logger) int64 {
+func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger) int64 {
 	var totalFreed int64
 	pythonMarkers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
 
@@ -853,7 +957,7 @@ func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath stri
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
-		if devArtifactContainsTrackedFiles(dir) {
+		if tracker.ContainsTrackedFiles(dir) {
 			logger.Debug("preserving .venv containing tracked files", "path", dir)
 			return
 		}
@@ -906,14 +1010,14 @@ func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath stri
 
 // cleanRustTargets removes stale Rust target/ directories.
 // A target/ is stale if sibling Cargo.toml hasn't been modified within maxAge.
-func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, logger *slog.Logger) int64 {
+func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger) int64 {
 	var totalFreed int64
 
 	p.findArtifactDirs(scanPath, "target", "Cargo.toml", func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
-		if devArtifactContainsTrackedFiles(dir) {
+		if tracker.ContainsTrackedFiles(dir) {
 			logger.Debug("preserving Rust target containing tracked files", "path", dir)
 			return
 		}
@@ -940,7 +1044,7 @@ func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath stri
 
 // cleanZigArtifacts removes stale Zig .zig-cache and zig-out directories.
 // A Zig artifact is stale if sibling build.zig hasn't been modified within maxAge.
-func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, logger *slog.Logger) int64 {
+func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger) int64 {
 	var totalFreed int64
 
 	for _, artifactName := range []string{".zig-cache", "zig-out"} {
@@ -948,7 +1052,7 @@ func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath str
 			if p.isProtected(dir, protectPaths) {
 				return
 			}
-			if devArtifactContainsTrackedFiles(dir) {
+			if tracker.ContainsTrackedFiles(dir) {
 				logger.Debug("preserving Zig artifact containing tracked files", "path", dir)
 				return
 			}
