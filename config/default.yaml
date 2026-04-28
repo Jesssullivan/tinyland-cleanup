@@ -124,6 +124,8 @@ nix:
 bazel:
   roots:
     - ~/.cache/bazel
+    # Darwin defaults also include /private/var/tmp/_bazel_$USER,
+    # /var/tmp/_bazel_$USER, and /private/tmp from compiled defaults.
   workspace_roots:
     - ~/git
     - ~/src

@@ -20,7 +20,7 @@ import (
 
 const bazelGiB = int64(1024 * 1024 * 1024)
 
-var bazelCommandPattern = regexp.MustCompile(`\b(bazel|bazelisk)\s+(build|test|run|coverage|query|sync|fetch|clean|mobile-install|aquery|cquery)\b`)
+var bazelCommandPattern = regexp.MustCompile(`\b(bazel|bazelisk)\s+(build|test|run|coverage|query|sync|fetch|clean|mobile-install|aquery|cquery|mod)\b`)
 
 // BazelPlugin reports Bazel output bases and cache tiers.
 type BazelPlugin struct{}
@@ -36,6 +36,11 @@ type bazelCandidate struct {
 	Protected bool
 	Action    string
 	Reason    string
+}
+
+type bazelProcessInfo struct {
+	Reasons     []string
+	OutputBases []string
 }
 
 // NewBazelPlugin creates a new Bazel cleanup plugin.
@@ -95,15 +100,21 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 	}
 
 	home, _ := os.UserHomeDir()
-	activeReasons, activeErr := p.activeBazelProcesses(ctx)
+	activeInfo, activeErr := p.activeBazelProcessInfo(ctx)
 	if activeErr != nil {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not inspect active Bazel processes: %v", activeErr))
-	} else if len(activeReasons) > 0 {
-		plan.Metadata["active_bazel_processes"] = strings.Join(activeReasons, ", ")
+	} else {
+		if len(activeInfo.Reasons) > 0 {
+			plan.Metadata["active_bazel_processes"] = strings.Join(activeInfo.Reasons, ", ")
+		}
+		if len(activeInfo.OutputBases) > 0 {
+			plan.Metadata["process_output_base_count"] = strconv.Itoa(len(activeInfo.OutputBases))
+		}
 	}
 
-	candidates := p.discoverCandidates(home, cfg.Bazel)
-	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), len(activeReasons) > 0)
+	globalActive := len(activeInfo.Reasons) > 0 || len(activeInfo.OutputBases) > 0
+	candidates := p.discoverCandidates(home, cfg.Bazel, activeInfo.OutputBases)
+	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
 	plan.Targets = targets
 	plan.EstimatedBytesFreed = bazelEstimatedCandidateBytes(targets)
 	plan.Metadata["target_count"] = strconv.Itoa(len(targets))
@@ -142,18 +153,23 @@ func (p *BazelPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 }
 
 func (p *BazelPlugin) activeBazelProcesses(ctx context.Context) ([]string, error) {
+	info, err := p.activeBazelProcessInfo(ctx)
+	return info.Reasons, err
+}
+
+func (p *BazelPlugin) activeBazelProcessInfo(ctx context.Context) (bazelProcessInfo, error) {
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return bazelProcessInfo{}, err
 	}
-	return bazelBusyProcessReasons(string(output)), nil
+	return bazelBusyProcessInfo(string(output)), nil
 }
 
-func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig) []bazelCandidate {
+func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, processOutputBases []string) []bazelCandidate {
 	var candidates []bazelCandidate
 	seen := map[string]bool{}
 
@@ -168,6 +184,12 @@ func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig) []
 	for _, root := range cfg.Roots {
 		expanded := expandHome(root, home)
 		for _, candidate := range discoverBazelRootCandidates(expanded) {
+			add(candidate)
+		}
+	}
+
+	for _, outputBase := range processOutputBases {
+		for _, candidate := range discoverBazelProcessOutputBase(outputBase) {
 			add(candidate)
 		}
 	}
@@ -190,6 +212,18 @@ func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig) []
 	}
 
 	return candidates
+}
+
+func discoverBazelProcessOutputBase(path string) []bazelCandidate {
+	path = filepath.Clean(path)
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() || !isBazelOutputBase(path) {
+		return nil
+	}
+	candidate := newBazelCandidate("output_base", filepath.Base(path), path, info.ModTime())
+	candidate.Active = true
+	candidate.Reason = "discovered from active Bazel process --output_base"
+	return []bazelCandidate{candidate}
 }
 
 func discoverBazelRootCandidates(root string) []bazelCandidate {
@@ -219,6 +253,10 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 		}
 		path := filepath.Join(root, entry.Name())
 		switch {
+		case isBazelOutputBase(path):
+			if info, err := entry.Info(); err == nil {
+				candidates = append(candidates, newBazelCandidate("output_base", entry.Name(), path, info.ModTime()))
+			}
 		case strings.HasPrefix(entry.Name(), "_bazel_"):
 			candidates = append(candidates, discoverBazelOutputBases(path)...)
 		case entry.Name() == "repository_cache":
@@ -763,29 +801,83 @@ func normalizeBazelDeletionPermissions(root string, logger *slog.Logger) error {
 }
 
 func bazelBusyProcessReasons(output string) []string {
-	seen := map[string]bool{}
-	var reasons []string
+	return bazelBusyProcessInfo(output).Reasons
+}
+
+func bazelBusyProcessInfo(output string) bazelProcessInfo {
+	reasonSeen := map[string]bool{}
+	outputBaseSeen := map[string]bool{}
+	var info bazelProcessInfo
 	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(strings.ToLower(line))
-		if len(fields) < 2 {
+		originalFields := strings.Fields(line)
+		lowerFields := strings.Fields(strings.ToLower(line))
+		if len(lowerFields) < 2 {
 			continue
 		}
-		command := filepath.Base(fields[0])
-		arg0 := filepath.Base(fields[1])
-		if command != "bazel" && command != "bazelisk" && arg0 != "bazel" && arg0 != "bazelisk" {
+
+		if bazelProcessLineHasBazel(originalFields) {
+			for _, outputBase := range bazelOutputBaseArgs(originalFields) {
+				if !outputBaseSeen[outputBase] {
+					outputBaseSeen[outputBase] = true
+					info.OutputBases = append(info.OutputBases, outputBase)
+				}
+			}
+		}
+
+		command := filepath.Base(lowerFields[0])
+		arg0 := filepath.Base(lowerFields[1])
+		if !bazelCommandName(command) && !bazelCommandName(arg0) {
 			continue
 		}
-		normalized := strings.Join(fields[1:], " ")
+		normalized := strings.Join(lowerFields[1:], " ")
 		matches := bazelCommandPattern.FindStringSubmatch(normalized)
 		if len(matches) < 3 {
 			continue
 		}
 		reason := matches[1] + " " + matches[2]
-		if !seen[reason] {
-			seen[reason] = true
-			reasons = append(reasons, reason)
+		if !reasonSeen[reason] {
+			reasonSeen[reason] = true
+			info.Reasons = append(info.Reasons, reason)
 		}
 	}
-	sort.Strings(reasons)
-	return reasons
+	sort.Strings(info.Reasons)
+	sort.Strings(info.OutputBases)
+	return info
+}
+
+func bazelProcessLineHasBazel(fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	for idx, field := range fields {
+		if idx > 1 {
+			break
+		}
+		if bazelCommandName(filepath.Base(strings.ToLower(field))) {
+			return true
+		}
+	}
+	return false
+}
+
+func bazelCommandName(command string) bool {
+	return command == "bazel" || command == "bazelisk" || strings.HasPrefix(command, "bazel(")
+}
+
+func bazelOutputBaseArgs(fields []string) []string {
+	var outputBases []string
+	for idx, field := range fields {
+		switch {
+		case strings.HasPrefix(field, "--output_base="):
+			outputBase := strings.TrimPrefix(field, "--output_base=")
+			if outputBase != "" {
+				outputBases = append(outputBases, outputBase)
+			}
+		case field == "--output_base" && idx+1 < len(fields):
+			if fields[idx+1] != "" {
+				outputBases = append(outputBases, fields[idx+1])
+			}
+		}
+	}
+	return outputBases
 }

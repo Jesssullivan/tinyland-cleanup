@@ -16,19 +16,52 @@ func TestDiscoverBazelRootCandidates(t *testing.T) {
 	root := t.TempDir()
 	outputBase := filepath.Join(root, "_bazel_jess", "abc123")
 	makeBazelOutputBase(t, outputBase)
+	explicitOutputBase := filepath.Join(root, "tinyvectors-external-smoke-ob")
+	makeBazelOutputBase(t, explicitOutputBase)
 	mustMkdir(t, filepath.Join(root, "repository_cache"))
 	mustMkdir(t, filepath.Join(root, "disk_cache"))
 
 	candidates := discoverBazelRootCandidates(root)
 	byType := map[string]bool{}
+	byPath := map[string]bool{}
 	for _, candidate := range candidates {
 		byType[candidate.Type] = true
+		byPath[candidate.Path] = true
+	}
+	resolvedExplicitOutputBase, err := filepath.EvalSymlinks(explicitOutputBase)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	for _, candidateType := range []string{"output_base", "repository_cache", "disk_cache"} {
 		if !byType[candidateType] {
 			t.Fatalf("expected %s candidate, got %#v", candidateType, candidates)
 		}
+	}
+	if !byPath[resolvedExplicitOutputBase] {
+		t.Fatalf("expected direct explicit output base %s, got %#v", explicitOutputBase, candidates)
+	}
+}
+
+func TestDiscoverBazelCandidatesIncludesProcessOutputBases(t *testing.T) {
+	root := t.TempDir()
+	outputBase := filepath.Join(root, "process-ob")
+	makeBazelOutputBase(t, outputBase)
+
+	candidates := NewBazelPlugin().discoverCandidates(root, config.BazelConfig{}, []string{outputBase})
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates, want 1: %#v", len(candidates), candidates)
+	}
+	resolvedOutputBase, err := filepath.EvalSymlinks(outputBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := candidates[0]
+	if candidate.Type != "output_base" || candidate.Path != resolvedOutputBase || !candidate.Active {
+		t.Fatalf("unexpected process output-base candidate: %#v", candidate)
+	}
+	if candidate.Reason != "discovered from active Bazel process --output_base" {
+		t.Fatalf("unexpected reason: %q", candidate.Reason)
 	}
 }
 
@@ -249,10 +282,11 @@ func TestBazelBusyProcessReasons(t *testing.T) {
 	ps := `
 /nix/store/abc/bin/bazel bazel build //...
 /Users/test/bin/bazelisk bazelisk test //...
+/usr/bin/bazel bazel mod graph --registry=file:///tmp/registry
 /usr/bin/zsh zsh -lc echo bazel query docs
 `
 	reasons := bazelBusyProcessReasons(ps)
-	want := []string{"bazel build", "bazelisk test"}
+	want := []string{"bazel build", "bazel mod", "bazelisk test"}
 
 	if len(reasons) != len(want) {
 		t.Fatalf("got %v, want %v", reasons, want)
@@ -260,6 +294,24 @@ func TestBazelBusyProcessReasons(t *testing.T) {
 	for i := range want {
 		if reasons[i] != want[i] {
 			t.Fatalf("got %v, want %v", reasons, want)
+		}
+	}
+}
+
+func TestBazelBusyProcessInfoExtractsOutputBases(t *testing.T) {
+	ps := `
+bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --workspace_directory=/Users/test/workspace
+/nix/store/abc/bin/bazel bazel test //... --output_base /private/var/tmp/_bazel_test/hash
+/usr/bin/zsh zsh -lc echo --output_base=/not/bazel
+`
+	info := bazelBusyProcessInfo(ps)
+	want := []string{"/private/tmp/workspace-ob", "/private/var/tmp/_bazel_test/hash"}
+	if len(info.OutputBases) != len(want) {
+		t.Fatalf("got output bases %v, want %v", info.OutputBases, want)
+	}
+	for i := range want {
+		if info.OutputBases[i] != want[i] {
+			t.Fatalf("got output bases %v, want %v", info.OutputBases, want)
 		}
 	}
 }

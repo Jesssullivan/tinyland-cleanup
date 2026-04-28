@@ -14,7 +14,9 @@ tinyland-cleanup --once --dry-run --level critical --output json
 The Bazel plan includes targets for:
 
 - `output_base`: Bazel output bases under configured roots such as
-  `~/.cache/bazel/_bazel_$USER/*` or Darwin `/private/var/tmp/_bazel_$USER/*`;
+  `~/.cache/bazel/_bazel_$USER/*`, Darwin
+  `/private/var/tmp/_bazel_$USER/*`, or direct explicit output bases under
+  `/private/tmp`;
 - `repository_cache`: shared external repository artifacts;
 - `disk_cache`: local action cache entries;
 - `bazelisk`: Bazelisk download cache entries.
@@ -25,6 +27,7 @@ protected status, the planned action, and a reason. Output bases are protected
 when:
 
 - a Bazel or Bazelisk process is active;
+- an active Bazel process exposes an explicit `--output_base`;
 - an output-base lock or server PID file is visible;
 - a configured protected workspace has `bazel-*` symlinks into that output base;
 - the output base is within `keep_recent_output_bases`;
@@ -36,6 +39,10 @@ Default policy:
 bazel:
   roots:
     - ~/.cache/bazel
+    # Darwin compiled defaults also include:
+    # - /private/var/tmp/_bazel_$USER
+    # - /var/tmp/_bazel_$USER
+    # - /private/tmp
   workspace_roots:
     - ~/git
     - ~/src
@@ -63,6 +70,8 @@ Runtime boundary:
   total Bazel footprint exceeds `max_total_gb`;
 - real cleanup skips Bazel mutation if active Bazel process inspection fails;
 - cache-tier cleanup is skipped while active Bazel or Bazelisk work is visible;
+- process-visible explicit `--output_base` directories are included in the plan
+  even when they are outside configured output-user roots;
 - deletion normalizes writable permissions first, and on Darwin attempts to
   clear `uchg` file flags with `chflags -R nouchg`;
 - after an output base is deleted, workspace roots are scanned shallowly for

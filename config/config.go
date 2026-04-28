@@ -499,6 +499,7 @@ func defaultBazelRoots(home string) []string {
 				filepath.Join("/var", "tmp", "_bazel_"+user),
 			)
 		}
+		roots = append(roots, "/private/tmp")
 	}
 	return roots
 }
