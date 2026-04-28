@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,8 @@ import (
 )
 
 const devArtifactRecentOutputGrace = 2 * time.Hour
+
+var tempArtifactPathPattern = regexp.MustCompile(`(?:/private)?/tmp/[^\s"'<>]+|/var/tmp/[^\s"'<>]+`)
 
 // DevArtifactsPlugin handles stale development artifact cleanup.
 type DevArtifactsPlugin struct {
@@ -68,14 +71,16 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		WouldRun: true,
 		Steps: []string{
 			"Scan configured development workspaces for rebuildable artifact directories",
+			"Surface large top-level temporary proof/output directories for manual review without deleting them",
 			"Use project marker mtimes to classify stale node_modules, .venv, Rust target, and Zig artifact directories",
 			"Protect artifact families when matching package manager, compiler, language server, or runtime processes are active",
 			"Report large disk images and VM bundles for manual review without deleting them",
 			"Honor configured protected paths before any deletion candidate is eligible",
 		},
 		Metadata: map[string]string{
-			"scan_path_count": strconv.Itoa(len(daCfg.ScanPaths)),
-			"mutates":         strconv.FormatBool(mutates),
+			"scan_path_count":      strconv.Itoa(len(daCfg.ScanPaths)),
+			"temp_scan_path_count": strconv.Itoa(len(daCfg.TempScanPaths)),
+			"mutates":              strconv.FormatBool(mutates),
 		},
 	}
 	if !mutates {
@@ -96,6 +101,18 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 	}
 
 	var targets []CleanupTarget
+	if daCfg.TempArtifacts {
+		activeTempRoots := activeTempArtifactRoots(ctx, daCfg.TempScanPaths, home)
+		tempMinBytes := tempArtifactMinBytes(daCfg)
+		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
+		for _, scanPath := range daCfg.TempScanPaths {
+			expanded := expandHome(scanPath, home)
+			if !pathExistsAndIsDir(expanded) {
+				continue
+			}
+			p.planTemporaryArtifacts(expanded, tempMinBytes, tempStaleAfter, daCfg.ProtectPaths, activeTempRoots, &targets)
+		}
+	}
 	for _, scanPath := range daCfg.ScanPaths {
 		expanded := expandHome(scanPath, home)
 		if !pathExistsAndIsDir(expanded) {
@@ -303,6 +320,66 @@ func (p *DevArtifactsPlugin) planLargeLocalArtifacts(scanPath string, minBytes i
 	p.findLargeLocalArtifacts(scanPath, minBytes, protectPaths, mountedImages, func(target CleanupTarget) {
 		*targets = append(*targets, target)
 	})
+}
+
+func (p *DevArtifactsPlugin) planTemporaryArtifacts(scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, targets *[]CleanupTarget) {
+	entries, err := os.ReadDir(scanPath)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(scanPath, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		size := getDirAllocatedBytes(path)
+		if size < minBytes {
+			continue
+		}
+		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), activeRoots[canonicalTempArtifactPath(path)]))
+	}
+}
+
+func (p *DevArtifactsPlugin) temporaryArtifactTarget(path string, physicalBytes int64, modTime time.Time, staleAfter time.Duration, now time.Time, protected bool, activeReason string) CleanupTarget {
+	action := "review_temp_artifact"
+	reason := fmt.Sprintf("large top-level temporary artifact is older than %s; manual review required before deletion", formatDevArtifactAge(staleAfter))
+	active := activeReason != ""
+	isProtected := true
+	switch {
+	case active:
+		action = "protect"
+		reason = "active process references this temporary path: " + activeReason
+	case protected:
+		action = "protect"
+		reason = "path is covered by dev_artifacts.protect_paths"
+	case staleAfter > 0 && modTime.After(now.Add(-staleAfter)):
+		action = "protect"
+		reason = fmt.Sprintf("temporary artifact is newer than %s", formatDevArtifactAge(staleAfter))
+	}
+	target := CleanupTarget{
+		Type:      "temporary-dev-artifact",
+		Name:      filepath.Base(path),
+		Path:      path,
+		Bytes:     physicalBytes,
+		Active:    active,
+		Protected: isProtected,
+		Action:    action,
+		Reason:    reason,
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierDestructive, CleanupReclaimNone)
+	return target
+}
+
+func tempArtifactMinBytes(cfg config.DevArtifactsConfig) int64 {
+	if cfg.TempArtifactMinMB <= 0 {
+		return 256 * 1024 * 1024
+	}
+	return int64(cfg.TempArtifactMinMB) * 1024 * 1024
 }
 
 func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, callback func(CleanupTarget)) {
@@ -797,6 +874,73 @@ func devArtifactBusyProcessReasons(output string) map[string]string {
 		}
 	}
 	return active
+}
+
+func activeTempArtifactRoots(ctx context.Context, scanPaths []string, home string) map[string]string {
+	if len(scanPaths) == 0 {
+		return nil
+	}
+	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	return tempArtifactRootsFromProcessOutput(string(output), scanPaths, home)
+}
+
+func tempArtifactRootsFromProcessOutput(output string, scanPaths []string, home string) map[string]string {
+	roots := map[string]string{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		command := filepath.Base(fields[0])
+		if len(fields) > 1 {
+			command = filepath.Base(fields[1])
+		}
+		for _, rawPath := range tempArtifactPathPattern.FindAllString(line, -1) {
+			if root := tempArtifactRootForPath(rawPath, scanPaths, home); root != "" {
+				if _, ok := roots[root]; !ok {
+					roots[root] = command
+				}
+			}
+		}
+	}
+	return roots
+}
+
+func tempArtifactRootForPath(path string, scanPaths []string, home string) string {
+	path = canonicalTempArtifactPath(path)
+	for _, scanPath := range scanPaths {
+		root := canonicalTempArtifactPath(expandHome(scanPath, home))
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			continue
+		}
+		first := strings.Split(rel, string(os.PathSeparator))[0]
+		if first == "" || first == "." || first == ".." {
+			continue
+		}
+		return filepath.Join(root, first)
+	}
+	return ""
+}
+
+func canonicalTempArtifactPath(path string) string {
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	if strings.HasPrefix(path, "/tmp/") {
+		if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil {
+			return filepath.Join(resolved, strings.TrimPrefix(path, "/tmp/"))
+		}
+	}
+	return path
 }
 
 func devArtifactActivityReasons(active map[string]string) []string {

@@ -181,12 +181,16 @@ targets with their mount point so operators know to detach them before any
 manual cleanup or compaction. Sparsebundle targets also report logical size
 from `Info.plist` when available; detached APFS sparsebundles may still reject
 `hdiutil compact`, so treat them as manual migrate/delete decisions rather than
-automatic reclaim. The plan also protects matching artifact families when
-active package manager, compiler, language server, runtime, or LM Studio
-processes are visible, and it preserves any candidate artifact directory that
-contains files tracked by Git. Zig `.zig-cache` and `zig-out` targets are also
-preserved when they contain files modified within the recent-output grace
-window, even at critical pressure.
+automatic reclaim. The plan also surfaces large top-level temporary
+proof/output directories from configured `dev_artifacts.temp_scan_paths`, but
+those targets are review-only and excluded from estimated reclaim; active
+process command lines that reference the temp root mark the target active and
+protected. The plan also protects matching artifact families when active
+package manager, compiler, language server, runtime, or LM Studio processes are
+visible, and it preserves any candidate artifact directory that contains files
+tracked by Git. Zig `.zig-cache` and `zig-out` targets are also preserved when
+they contain files modified within the recent-output grace window, even at
+critical pressure.
 
 For Docker, the plan reports Docker daemon disk-usage rows from `docker system
 df`, including images, stopped containers, local volumes, and build cache when

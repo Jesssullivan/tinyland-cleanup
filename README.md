@@ -73,6 +73,12 @@ Constrain review to specific plugins before scanning broad cache surfaces:
 tinyland-cleanup --once --dry-run --level critical --plugins bazel,nix --output text
 ```
 
+For temporary proof/output pressure, keep the review bounded:
+
+```sh
+tinyland-cleanup --once --dry-run --level critical --plugins dev-artifacts --output text
+```
+
 For a one-off run, override the configured maximum used-space target without
 editing the config file:
 

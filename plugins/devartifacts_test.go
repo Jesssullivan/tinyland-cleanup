@@ -547,6 +547,7 @@ func TestPlanCleanupWarningReportsDevArtifacts(t *testing.T) {
 	cfg.DevArtifacts.ZigArtifacts = false
 	cfg.DevArtifacts.GoBuildCache = false
 	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.TempArtifacts = false
 
 	plan := p.PlanCleanup(context.Background(), LevelWarning, cfg, logger)
 	target := findDevArtifactTarget(t, plan.Targets, "node_modules", filepath.Join(project, "node_modules"))
@@ -593,6 +594,7 @@ func TestPlanCleanupModerateClassifiesDevArtifacts(t *testing.T) {
 	cfg.DevArtifacts.ZigArtifacts = false
 	cfg.DevArtifacts.GoBuildCache = false
 	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.TempArtifacts = false
 	cfg.DevArtifacts.ProtectPaths = []string{protectedProject}
 
 	plan := p.PlanCleanup(context.Background(), LevelModerate, cfg, logger)
@@ -785,6 +787,61 @@ func TestPlanLargeLocalArtifactsHonorsProtectPaths(t *testing.T) {
 	target := findDevArtifactTarget(t, targets, "large-local-artifact", imagePath)
 	if target.Action != "protect" || !target.Protected {
 		t.Fatalf("expected protected large local artifact target, got %#v", target)
+	}
+}
+
+func TestPlanTemporaryArtifactsReportsReviewOnlyTargets(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	oldPath := filepath.Join(tmpDir, "old-proof-output")
+	freshPath := filepath.Join(tmpDir, "fresh-proof-output")
+	activePath := filepath.Join(tmpDir, "active-proof-output")
+	for _, path := range []string{oldPath, freshPath, activePath} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "artifact"), []byte("artifact"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	var targets []CleanupTarget
+	p.planTemporaryArtifacts(tmpDir, 1, 6*time.Hour, nil, map[string]string{
+		canonicalTempArtifactPath(activePath): "bazel",
+	}, &targets)
+
+	oldTarget := findDevArtifactTarget(t, targets, "temporary-dev-artifact", oldPath)
+	if oldTarget.Action != "review_temp_artifact" || !oldTarget.Protected || oldTarget.Tier != CleanupTierDestructive || oldTarget.Reclaim != CleanupReclaimNone {
+		t.Fatalf("expected review-only temporary artifact target, got %#v", oldTarget)
+	}
+	if !strings.Contains(oldTarget.Reason, "manual review required") {
+		t.Fatalf("expected manual review reason, got %q", oldTarget.Reason)
+	}
+
+	freshTarget := findDevArtifactTarget(t, targets, "temporary-dev-artifact", freshPath)
+	if freshTarget.Action != "protect" || !freshTarget.Protected {
+		t.Fatalf("expected fresh temporary artifact to be protected, got %#v", freshTarget)
+	}
+
+	activeTarget := findDevArtifactTarget(t, targets, "temporary-dev-artifact", activePath)
+	if activeTarget.Action != "protect" || !activeTarget.Protected || !activeTarget.Active {
+		t.Fatalf("expected active temporary artifact to be protected, got %#v", activeTarget)
+	}
+}
+
+func TestTempArtifactRootsFromProcessOutput(t *testing.T) {
+	output := `
+bazel(workspace) bazel(workspace) --output_user_root=/tmp/crush-dots-bazel-output --output_base=/tmp/crush-dots-bazel-output/817/output
+/usr/bin/zsh zsh -lc echo /tmp/not-active
+`
+	roots := tempArtifactRootsFromProcessOutput(output, []string{"/tmp"}, "")
+	want := tempArtifactRootForPath("/tmp/crush-dots-bazel-output/817/output", []string{"/tmp"}, "")
+	if roots[want] != "bazel(workspace)" {
+		t.Fatalf("expected active root %q from bazel process, got %#v", want, roots)
 	}
 }
 

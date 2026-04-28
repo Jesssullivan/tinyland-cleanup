@@ -324,6 +324,23 @@ func TestBazelPolicyDefaults(t *testing.T) {
 	}
 }
 
+func TestDevArtifactPolicyDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if !cfg.DevArtifacts.TempArtifacts {
+		t.Error("DevArtifacts.TempArtifacts should default to true")
+	}
+	if len(cfg.DevArtifacts.TempScanPaths) == 0 {
+		t.Fatal("DevArtifacts.TempScanPaths should have defaults")
+	}
+	if cfg.DevArtifacts.TempArtifactMinMB != 256 {
+		t.Errorf("DevArtifacts.TempArtifactMinMB should default to 256, got %d", cfg.DevArtifacts.TempArtifactMinMB)
+	}
+	if cfg.DevArtifacts.TempArtifactStaleAfter != "6h" {
+		t.Errorf("DevArtifacts.TempArtifactStaleAfter should default to 6h, got %q", cfg.DevArtifacts.TempArtifactStaleAfter)
+	}
+}
+
 func TestDarwinDevCacheDefaults(t *testing.T) {
 	cfg := DefaultConfig()
 	if runtime.GOOS == "darwin" && !cfg.DarwinDevCaches.Enabled {
@@ -385,6 +402,11 @@ dev_artifacts:
   scan_paths:
     - ~/git
     - ~/src
+  temp_artifacts: false
+  temp_scan_paths:
+    - /tmp/tinyland-cleanup
+  temp_artifact_min_mb: 128
+  temp_artifact_stale_after: 2h
   node_modules: true
   python_venvs: true
   rust_targets: false
@@ -479,6 +501,18 @@ darwin_dev_caches:
 	}
 	if len(cfg.DevArtifacts.ScanPaths) != 2 {
 		t.Errorf("expected 2 scan paths, got %d", len(cfg.DevArtifacts.ScanPaths))
+	}
+	if cfg.DevArtifacts.TempArtifacts {
+		t.Error("DevArtifacts.TempArtifacts should be false per config")
+	}
+	if len(cfg.DevArtifacts.TempScanPaths) != 1 || cfg.DevArtifacts.TempScanPaths[0] != "/tmp/tinyland-cleanup" {
+		t.Errorf("unexpected DevArtifacts.TempScanPaths: %#v", cfg.DevArtifacts.TempScanPaths)
+	}
+	if cfg.DevArtifacts.TempArtifactMinMB != 128 {
+		t.Errorf("DevArtifacts.TempArtifactMinMB should be 128 per config, got %d", cfg.DevArtifacts.TempArtifactMinMB)
+	}
+	if cfg.DevArtifacts.TempArtifactStaleAfter != "2h" {
+		t.Errorf("DevArtifacts.TempArtifactStaleAfter should be 2h per config, got %q", cfg.DevArtifacts.TempArtifactStaleAfter)
 	}
 	if cfg.DevArtifacts.RustTargets {
 		t.Error("DevArtifacts.RustTargets should be false per config")

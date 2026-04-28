@@ -90,6 +90,12 @@ dev_artifacts:
     - ~/git
     - ~/src
     - ~/projects
+  temp_artifacts: true
+  temp_scan_paths:
+    - /tmp
+    - /var/tmp
+  temp_artifact_min_mb: 512
+  temp_artifact_stale_after: 12h
   node_modules: true
   python_venvs: true
   rust_targets: false

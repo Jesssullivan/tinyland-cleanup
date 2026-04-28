@@ -148,6 +148,13 @@ dev_artifacts:
     - ~/git
     - ~/src
     - ~/projects
+  # Review-only: surface large top-level temp proof/output trees without
+  # deleting them automatically. Darwin compiled defaults use /private/tmp.
+  temp_artifacts: true
+  temp_scan_paths:
+    - /private/tmp
+  temp_artifact_min_mb: 256
+  temp_artifact_stale_after: 6h
   node_modules: true
   python_venvs: true
   rust_targets: true

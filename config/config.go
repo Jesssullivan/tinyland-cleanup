@@ -246,6 +246,14 @@ type ICloudConfig struct {
 type DevArtifactsConfig struct {
 	// ScanPaths is the list of directories to scan for dev artifacts
 	ScanPaths []string `yaml:"scan_paths"`
+	// TempArtifacts enables review-only reporting for large top-level temp artifacts
+	TempArtifacts bool `yaml:"temp_artifacts"`
+	// TempScanPaths are top-level temporary directories scanned for large generated artifacts
+	TempScanPaths []string `yaml:"temp_scan_paths"`
+	// TempArtifactMinMB is the minimum physical size for review-only temporary artifact targets
+	TempArtifactMinMB int `yaml:"temp_artifact_min_mb"`
+	// TempArtifactStaleAfter is the age after which temp artifacts become review candidates
+	TempArtifactStaleAfter string `yaml:"temp_artifact_stale_after"`
 	// NodeModules enables node_modules cleanup
 	NodeModules bool `yaml:"node_modules"`
 	// PythonVenvs enables .venv cleanup
@@ -338,6 +346,10 @@ func DefaultConfig() *Config {
 		filepath.Join(home, "src"),
 		filepath.Join(home, "projects"),
 	}
+	defaultTempScanPaths := []string{"/tmp"}
+	if runtime.GOOS == "darwin" {
+		defaultTempScanPaths = []string{"/private/tmp"}
+	}
 	bazeliskCache := filepath.Join(home, ".cache", "bazelisk")
 	if runtime.GOOS == "darwin" {
 		bazeliskCache = filepath.Join(home, "Library", "Caches", "bazelisk")
@@ -423,6 +435,10 @@ func DefaultConfig() *Config {
 		},
 		DevArtifacts: DevArtifactsConfig{
 			ScanPaths:               defaultScanPaths,
+			TempArtifacts:           true,
+			TempScanPaths:           defaultTempScanPaths,
+			TempArtifactMinMB:       256,
+			TempArtifactStaleAfter:  "6h",
 			NodeModules:             true,
 			PythonVenvs:             true,
 			RustTargets:             true,
