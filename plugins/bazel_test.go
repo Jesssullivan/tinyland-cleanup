@@ -233,6 +233,47 @@ func TestBazelPlanTargetsProtectsCacheTiersWhenBazelActive(t *testing.T) {
 	}
 }
 
+func TestBazelPlanTargetsDoesNotUseIdleServerAsGlobalCacheActivity(t *testing.T) {
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	cfg := config.BazelConfig{
+		MaxTotalGB:                   1,
+		StaleAfter:                   "14d",
+		CriticalStaleAfter:           "3d",
+		AllowDeleteActiveOutputBases: false,
+		KeepRecentOutputBases:        0,
+	}
+	candidates := []bazelCandidate{
+		{
+			Type:     "output_base",
+			Name:     "idle-server-output-base",
+			Path:     "/tmp/idle-server-output-base",
+			ModTime:  now.Add(-30 * 24 * time.Hour),
+			Physical: 2 * bazelGiB,
+			Active:   true,
+		},
+		{
+			Type:     "disk_cache",
+			Name:     "disk_cache",
+			Path:     "/tmp/disk_cache",
+			ModTime:  now.Add(-30 * 24 * time.Hour),
+			Physical: 2 * bazelGiB,
+		},
+	}
+
+	targets, _ := bazelPlanTargets(candidates, cfg, LevelModerate, now, false)
+	actions := map[string]CleanupTarget{}
+	for _, target := range targets {
+		actions[target.Name] = target
+	}
+
+	if actions["idle-server-output-base"].Action != "keep" || !actions["idle-server-output-base"].Protected {
+		t.Fatalf("idle server output base should be protected: %#v", actions["idle-server-output-base"])
+	}
+	if actions["disk_cache"].Action != "delete_cache_tier" || actions["disk_cache"].Protected || actions["disk_cache"].Active {
+		t.Fatalf("idle server output base should not globally protect cache tiers: %#v", actions["disk_cache"])
+	}
+}
+
 func TestDiscoverBazeliskCandidatesPrefersSha256Downloads(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "bazelisk")
 	sha := filepath.Join(root, "downloads", "sha256", "abc123")
@@ -313,6 +354,19 @@ bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --work
 		if info.OutputBases[i] != want[i] {
 			t.Fatalf("got output bases %v, want %v", info.OutputBases, want)
 		}
+	}
+}
+
+func TestBazelBusyProcessInfoSeparatesServerOutputBasesFromClientCommands(t *testing.T) {
+	ps := `
+bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --workspace_directory=/Users/test/workspace
+`
+	info := bazelBusyProcessInfo(ps)
+	if len(info.Reasons) != 0 {
+		t.Fatalf("server process should not be reported as active client work: %v", info.Reasons)
+	}
+	if len(info.OutputBases) != 1 || info.OutputBases[0] != "/private/tmp/workspace-ob" {
+		t.Fatalf("unexpected output bases: %v", info.OutputBases)
 	}
 }
 

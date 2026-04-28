@@ -112,7 +112,7 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		}
 	}
 
-	globalActive := len(activeInfo.Reasons) > 0 || len(activeInfo.OutputBases) > 0
+	globalActive := len(activeInfo.Reasons) > 0
 	candidates := p.discoverCandidates(home, cfg.Bazel, activeInfo.OutputBases)
 	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
 	plan.Targets = targets

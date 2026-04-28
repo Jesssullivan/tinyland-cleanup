@@ -69,9 +69,12 @@ Runtime boundary:
   cache, and Bazelisk download entries as `delete_cache_tier` only when the
   total Bazel footprint exceeds `max_total_gb`;
 - real cleanup skips Bazel mutation if active Bazel process inspection fails;
-- cache-tier cleanup is skipped while active Bazel or Bazelisk work is visible;
+- cache-tier cleanup is skipped while active Bazel or Bazelisk client commands
+  are visible;
 - process-visible explicit `--output_base` directories are included in the plan
-  even when they are outside configured output-user roots;
+  even when they are outside configured output-user roots; idle/server-only
+  output-base visibility protects that output base but does not globally block
+  unrelated cache-tier cleanup;
 - deletion normalizes writable permissions first, and on Darwin attempts to
   clear `uchg` file flags with `chflags -R nouchg`;
 - after an output base is deleted, workspace roots are scanned shallowly for
