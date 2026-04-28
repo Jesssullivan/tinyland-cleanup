@@ -22,6 +22,10 @@
 //	                 Override target maximum used-space percentage after cleanup
 //	-verbose          Enable verbose logging
 //	-version          Print version and exit
+//	-probe-volume-path string    Darwin-only: probe direct volume access and exit
+//	-probe-result-path string    Path to write the key=value probe result summary
+//	-probe-name string           Probe label used for the temporary write-test file
+//	-probe-timeout-seconds int   Timeout per direct probe operation
 package main
 
 import (
@@ -54,23 +58,45 @@ var (
 func main() {
 	// Parse command line flags
 	var (
-		configPath  = flag.String("config", "", "Path to configuration file")
-		runDaemon   = flag.Bool("daemon", false, "Run as a daemon")
-		once        = flag.Bool("once", false, "Run cleanup once and exit")
-		level       = flag.String("level", "", "Force cleanup level")
-		dryRun      = flag.Bool("dry-run", false, "Show what would be cleaned")
-		output      = flag.String("output", "text", "Output format: text, json")
-		listPlugins = flag.Bool("list-plugins", false, "List registered plugin names and exit")
-		pluginNames = flag.String("plugins", "", "Comma-separated plugin names to run or plan")
-		targetUsed  = flag.Int("target-used-percent", 0, "Override target maximum used-space percentage after cleanup")
-		verbose     = flag.Bool("verbose", false, "Enable verbose logging")
-		showVersion = flag.Bool("version", false, "Print version and exit")
+		configPath          = flag.String("config", "", "Path to configuration file")
+		runDaemon           = flag.Bool("daemon", false, "Run as a daemon")
+		once                = flag.Bool("once", false, "Run cleanup once and exit")
+		level               = flag.String("level", "", "Force cleanup level")
+		dryRun              = flag.Bool("dry-run", false, "Show what would be cleaned")
+		output              = flag.String("output", "text", "Output format: text, json")
+		listPlugins         = flag.Bool("list-plugins", false, "List registered plugin names and exit")
+		pluginNames         = flag.String("plugins", "", "Comma-separated plugin names to run or plan")
+		targetUsed          = flag.Int("target-used-percent", 0, "Override target maximum used-space percentage after cleanup")
+		verbose             = flag.Bool("verbose", false, "Enable verbose logging")
+		showVersion         = flag.Bool("version", false, "Print version and exit")
+		probeVolumePath     = flag.String("probe-volume-path", "", "Darwin-only: probe direct volume access and exit")
+		probeResultPath     = flag.String("probe-result-path", "", "Path to write the key=value probe result summary")
+		probeName           = flag.String("probe-name", "tinyland-cleanup-probe", "Probe label used for the temporary write-test file")
+		probeTimeoutSeconds = flag.Int("probe-timeout-seconds", 5, "Timeout per direct probe operation")
+
+		// Internal child-operation flags used by the direct volume probe mode.
+		probeVolumeOp  = flag.String("probe-volume-op", "", "internal volume probe operation")
+		probePath      = flag.String("probe-path", "", "internal volume probe path")
+		probeFile      = flag.String("probe-file", "", "internal volume probe file path")
+		probeErrorPath = flag.String("probe-error-path", "", "internal volume probe error path")
 	)
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Printf("tinyland-cleanup %s (%s) built %s\n", version, commit, date)
 		os.Exit(0)
+	}
+
+	if *probeVolumeOp != "" {
+		os.Exit(runVolumeProbeChildOperation(*probeVolumeOp, *probePath, *probeFile, *probeErrorPath))
+	}
+
+	if *probeVolumePath != "" {
+		if err := runVolumeAccessProbe(*probeVolumePath, *probeResultPath, *probeName, *probeTimeoutSeconds); err != nil {
+			fmt.Fprintf(os.Stderr, "volume probe failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if *output != "text" && *output != "json" {

@@ -80,6 +80,16 @@ editing the config file:
 tinyland-cleanup --once --dry-run --level critical --target-used-percent 82
 ```
 
+For Darwin removable-volume or TCC diagnosis, use direct probe mode. It only
+lists the target path, reads xattrs, writes one temporary dotfile, and removes
+that file; it does not run cleanup plugins:
+
+```sh
+tinyland-cleanup \
+  --probe-volume-path /Volumes/TinylandSSD/tinyland \
+  --probe-result-path /tmp/tinyland-cleanup-probe.result
+```
+
 See [docs/operator-workflow.md](docs/operator-workflow.md) for the current
 dry-run, candidate policy tier, and host free-space accounting workflow.
 

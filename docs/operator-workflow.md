@@ -84,6 +84,27 @@ Structured plugin targets may include policy metadata:
 Use this metadata to separate cheap cache cleanup from expensive rebuilds,
 privileged actions, and review-only evidence before applying a real cleanup.
 
+## Probe Darwin Volumes
+
+When a Darwin machine has a mounted external volume but a daemon or LaunchAgent
+cannot prove access, run direct probe mode before changing cleanup policy. This
+mode does not load config and does not run cleanup plugins. It lists the target
+path, reads xattrs, writes one temporary dotfile, removes that file, and writes
+key-value result codes for wrapper scripts.
+
+```sh
+tinyland-cleanup \
+  --probe-volume-path /Volumes/TinylandSSD/tinyland \
+  --probe-result-path /tmp/tinyland-cleanup-probe.result \
+  --probe-name tinyland-cleanup \
+  --probe-timeout-seconds 10
+```
+
+Result files use `ls_rc`, `xattr_rc`, `touch_rc`, and `rm_rc`. Exit code `0`
+for each operation means that the same binary path can perform that operation
+from the current execution context. Exit code `124` means the bounded child
+operation timed out.
+
 ## Apply
 
 After reviewing the plan, run the same level without `--dry-run`:

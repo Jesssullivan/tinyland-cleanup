@@ -29,6 +29,7 @@ go_library(
         "main.go",
         "report_text.go",
         "state.go",
+        "volume_probe.go",
     ] + select({
         "@platforms//os:macos": ["plugins_darwin.go"],
         "//conditions:default": ["plugins_other.go"],
@@ -47,6 +48,7 @@ go_test(
     srcs = [
         "main_test.go",
         "state_test.go",
+        "volume_probe_test.go",
     ],
     embed = [":tinyland-cleanup_lib"],
     deps = [
