@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -48,7 +49,10 @@ func TestDiscoverBazelCandidatesIncludesProcessOutputBases(t *testing.T) {
 	outputBase := filepath.Join(root, "process-ob")
 	makeBazelOutputBase(t, outputBase)
 
-	candidates := NewBazelPlugin().discoverCandidates(root, config.BazelConfig{}, []string{outputBase})
+	candidates := NewBazelPlugin().discoverCandidates(root, config.BazelConfig{}, bazelProcessInfo{
+		OutputBases:       []string{outputBase},
+		ClientOutputBases: []string{outputBase},
+	})
 	if len(candidates) != 1 {
 		t.Fatalf("got %d candidates, want 1: %#v", len(candidates), candidates)
 	}
@@ -57,10 +61,10 @@ func TestDiscoverBazelCandidatesIncludesProcessOutputBases(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidate := candidates[0]
-	if candidate.Type != "output_base" || candidate.Path != resolvedOutputBase || !candidate.Active {
+	if candidate.Type != "output_base" || candidate.Path != resolvedOutputBase || !candidate.Active || !candidate.ActiveClient {
 		t.Fatalf("unexpected process output-base candidate: %#v", candidate)
 	}
-	if candidate.Reason != "discovered from active Bazel process --output_base" {
+	if candidate.Reason != "discovered from active Bazel client --output_base" {
 		t.Fatalf("unexpected reason: %q", candidate.Reason)
 	}
 }
@@ -274,6 +278,62 @@ func TestBazelPlanTargetsDoesNotUseIdleServerAsGlobalCacheActivity(t *testing.T)
 	}
 }
 
+func TestBazelPlanTargetsCanStopIdleServerBeforeDeletingStaleOutputBase(t *testing.T) {
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	cfg := config.BazelConfig{
+		StaleAfter:                   "14d",
+		CriticalStaleAfter:           "3d",
+		AllowStopIdleServers:         true,
+		AllowDeleteActiveOutputBases: false,
+		KeepRecentOutputBases:        0,
+	}
+	candidates := []bazelCandidate{
+		{
+			Type:          "output_base",
+			Name:          "idle-server-output-base",
+			Path:          "/tmp/idle-server-output-base",
+			ModTime:       now.Add(-30 * 24 * time.Hour),
+			Physical:      2 * bazelGiB,
+			Active:        true,
+			IdleServer:    true,
+			ProcessServer: true,
+		},
+	}
+
+	targets, _ := bazelPlanTargets(candidates, cfg, LevelAggressive, now, false)
+	if len(targets) != 1 {
+		t.Fatalf("expected one target, got %d", len(targets))
+	}
+	target := targets[0]
+	if target.Action != "stop_idle_server_then_delete_output_base" || target.Protected || !target.Active {
+		t.Fatalf("idle server output base should be a guarded shutdown/delete candidate: %#v", target)
+	}
+	if target.Reclaim != CleanupReclaimHost || target.HostReclaimsSpace == nil || !*target.HostReclaimsSpace {
+		t.Fatalf("idle server shutdown/delete should advertise host reclaim: %#v", target)
+	}
+	if got := bazelEstimatedCandidateBytes(targets); got != 2*bazelGiB {
+		t.Fatalf("estimated reclaim = %d, want %d", got, 2*bazelGiB)
+	}
+
+	targets, _ = bazelPlanTargets(candidates, cfg, LevelModerate, now, false)
+	if targets[0].Action != "keep" || !targets[0].Protected {
+		t.Fatalf("moderate level should not stop idle Bazel servers: %#v", targets[0])
+	}
+
+	cfg.AllowStopIdleServers = false
+	targets, _ = bazelPlanTargets(candidates, cfg, LevelAggressive, now, false)
+	if targets[0].Action != "keep" || !targets[0].Protected {
+		t.Fatalf("disabled idle-server stop should keep target protected: %#v", targets[0])
+	}
+
+	cfg.AllowStopIdleServers = true
+	candidates[0].ProcessServer = false
+	targets, _ = bazelPlanTargets(candidates, cfg, LevelAggressive, now, false)
+	if targets[0].Action != "keep" || !targets[0].Protected {
+		t.Fatalf("pid-only server evidence should keep target protected: %#v", targets[0])
+	}
+}
+
 func TestDiscoverBazeliskCandidatesPrefersSha256Downloads(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "bazelisk")
 	sha := filepath.Join(root, "downloads", "sha256", "abc123")
@@ -355,6 +415,12 @@ bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --work
 			t.Fatalf("got output bases %v, want %v", info.OutputBases, want)
 		}
 	}
+	if len(info.ClientOutputBases) != 1 || info.ClientOutputBases[0] != "/private/var/tmp/_bazel_test/hash" {
+		t.Fatalf("unexpected client output bases: %v", info.ClientOutputBases)
+	}
+	if len(info.ServerOutputBases) != 1 || info.ServerOutputBases[0] != "/private/tmp/workspace-ob" {
+		t.Fatalf("unexpected server output bases: %v", info.ServerOutputBases)
+	}
 }
 
 func TestBazelBusyProcessInfoSeparatesServerOutputBasesFromClientCommands(t *testing.T) {
@@ -367,6 +433,12 @@ bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --work
 	}
 	if len(info.OutputBases) != 1 || info.OutputBases[0] != "/private/tmp/workspace-ob" {
 		t.Fatalf("unexpected output bases: %v", info.OutputBases)
+	}
+	if len(info.ClientOutputBases) != 0 {
+		t.Fatalf("server process should not report client output bases: %v", info.ClientOutputBases)
+	}
+	if len(info.ServerOutputBases) != 1 || info.ServerOutputBases[0] != "/private/tmp/workspace-ob" {
+		t.Fatalf("unexpected server output bases: %v", info.ServerOutputBases)
 	}
 }
 
@@ -416,6 +488,55 @@ func TestApplyBazelCleanupTargetsDeletesEligibleOutputBase(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(workspace, "bazel-bin")); !os.IsNotExist(err) {
 		t.Fatalf("expected repo-local bazel-bin symlink to be removed, stat err=%v", err)
+	}
+}
+
+func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake bazel shell script is Unix-only")
+	}
+	root := t.TempDir()
+	outputBase := filepath.Join(root, "_bazel_jess", "stale-idle")
+	makeBazelOutputBase(t, outputBase)
+
+	binDir := filepath.Join(root, "bin")
+	mustMkdir(t, binDir)
+	argsPath := filepath.Join(root, "bazel-args")
+	fakeBazel := filepath.Join(binDir, "bazel")
+	if err := os.WriteFile(fakeBazel, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BAZEL_SHUTDOWN_ARGS\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BAZEL_SHUTDOWN_ARGS", argsPath)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := applyBazelCleanupTargets(context.Background(), "bazel", LevelAggressive, []CleanupTarget{
+		{
+			Type:   "output_base",
+			Name:   "stale-idle",
+			Path:   outputBase,
+			Bytes:  123,
+			Active: true,
+			Action: "stop_idle_server_then_delete_output_base",
+		},
+	}, nil, root, logger)
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("items cleaned = %d, want 1", result.ItemsCleaned)
+	}
+	if _, err := os.Stat(outputBase); !os.IsNotExist(err) {
+		t.Fatalf("expected output base to be deleted, stat err=%v", err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArgs := "--output_base=" + outputBase + "\nshutdown\n"
+	if string(args) != wantArgs {
+		t.Fatalf("shutdown args = %q, want %q", string(args), wantArgs)
 	}
 }
 

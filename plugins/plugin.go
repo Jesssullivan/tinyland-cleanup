@@ -159,6 +159,7 @@ func hostReclaimExpectation(reclaim string) *bool {
 func hostReclaimForAction(action string) string {
 	switch {
 	case strings.HasPrefix(action, "delete"),
+		action == "stop_idle_server_then_delete_output_base",
 		action == "clean-cache",
 		action == "clean-stale-files",
 		action == "thin_local_snapshots":

@@ -26,21 +26,26 @@ var bazelCommandPattern = regexp.MustCompile(`\b(bazel|bazelisk)\s+(build|test|r
 type BazelPlugin struct{}
 
 type bazelCandidate struct {
-	Type      string
-	Name      string
-	Path      string
-	ModTime   time.Time
-	Logical   int64
-	Physical  int64
-	Active    bool
-	Protected bool
-	Action    string
-	Reason    string
+	Type          string
+	Name          string
+	Path          string
+	ModTime       time.Time
+	Logical       int64
+	Physical      int64
+	Active        bool
+	ActiveClient  bool
+	IdleServer    bool
+	ProcessServer bool
+	Protected     bool
+	Action        string
+	Reason        string
 }
 
 type bazelProcessInfo struct {
-	Reasons     []string
-	OutputBases []string
+	Reasons           []string
+	OutputBases       []string
+	ClientOutputBases []string
+	ServerOutputBases []string
 }
 
 // NewBazelPlugin creates a new Bazel cleanup plugin.
@@ -110,10 +115,16 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		if len(activeInfo.OutputBases) > 0 {
 			plan.Metadata["process_output_base_count"] = strconv.Itoa(len(activeInfo.OutputBases))
 		}
+		if len(activeInfo.ClientOutputBases) > 0 {
+			plan.Metadata["client_output_base_count"] = strconv.Itoa(len(activeInfo.ClientOutputBases))
+		}
+		if len(activeInfo.ServerOutputBases) > 0 {
+			plan.Metadata["idle_server_output_base_count"] = strconv.Itoa(len(activeInfo.ServerOutputBases))
+		}
 	}
 
 	globalActive := len(activeInfo.Reasons) > 0
-	candidates := p.discoverCandidates(home, cfg.Bazel, activeInfo.OutputBases)
+	candidates := p.discoverCandidates(home, cfg.Bazel, activeInfo)
 	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
 	plan.Targets = targets
 	plan.EstimatedBytesFreed = bazelEstimatedCandidateBytes(targets)
@@ -169,15 +180,19 @@ func (p *BazelPlugin) activeBazelProcessInfo(ctx context.Context) (bazelProcessI
 	return bazelBusyProcessInfo(string(output)), nil
 }
 
-func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, processOutputBases []string) []bazelCandidate {
+func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, activeInfo bazelProcessInfo) []bazelCandidate {
 	var candidates []bazelCandidate
-	seen := map[string]bool{}
+	seen := map[string]int{}
 
 	add := func(candidate bazelCandidate) {
-		if candidate.Path == "" || seen[candidate.Path] {
+		if candidate.Path == "" {
 			return
 		}
-		seen[candidate.Path] = true
+		if idx, ok := seen[candidate.Path]; ok {
+			mergeBazelCandidate(&candidates[idx], candidate)
+			return
+		}
+		seen[candidate.Path] = len(candidates)
 		candidates = append(candidates, candidate)
 	}
 
@@ -188,8 +203,9 @@ func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, pr
 		}
 	}
 
-	for _, outputBase := range processOutputBases {
-		for _, candidate := range discoverBazelProcessOutputBase(outputBase) {
+	processOutputBaseKinds := bazelProcessOutputBaseKinds(activeInfo)
+	for _, outputBase := range activeInfo.OutputBases {
+		for _, candidate := range discoverBazelProcessOutputBase(outputBase, processOutputBaseKinds[filepath.Clean(outputBase)]) {
 			add(candidate)
 		}
 	}
@@ -206,15 +222,53 @@ func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, pr
 			candidates[i].Protected = true
 			candidates[i].Reason = "reachable from configured protected workspace"
 		}
-		if candidates[i].Type == "output_base" && bazelOutputBaseHasActiveLock(candidates[i].Path) {
-			candidates[i].Active = true
+		if candidates[i].Type == "output_base" {
+			activity := bazelOutputBaseActivity(candidates[i].Path)
+			if activity.Active {
+				mergeBazelCandidate(&candidates[i], bazelCandidate{
+					Active:        true,
+					ActiveClient:  activity.ActiveClient,
+					IdleServer:    activity.IdleServer,
+					ProcessServer: activity.ProcessServer,
+					Reason:        activity.Reason,
+				})
+			}
 		}
 	}
 
 	return candidates
 }
 
-func discoverBazelProcessOutputBase(path string) []bazelCandidate {
+func mergeBazelCandidate(existing *bazelCandidate, incoming bazelCandidate) {
+	if incoming.Active {
+		existing.Active = true
+	}
+	if incoming.ActiveClient {
+		existing.ActiveClient = true
+		existing.IdleServer = false
+		if incoming.Reason != "" && !existing.Protected {
+			existing.Reason = incoming.Reason
+		}
+	} else if incoming.IdleServer && !existing.ActiveClient {
+		existing.IdleServer = true
+		if incoming.ProcessServer {
+			existing.ProcessServer = true
+		}
+		if !existing.Protected && (existing.Reason == "" || !strings.Contains(existing.Reason, "idle Bazel server")) {
+			existing.Reason = incoming.Reason
+		}
+	} else if incoming.Active && !existing.Protected && existing.Reason == "" {
+		existing.Reason = incoming.Reason
+	}
+	if incoming.Protected {
+		existing.Protected = true
+		if incoming.Reason != "" {
+			existing.Reason = incoming.Reason
+		}
+	}
+}
+
+func discoverBazelProcessOutputBase(path string, kind string) []bazelCandidate {
 	path = filepath.Clean(path)
 	info, err := os.Stat(path)
 	if err != nil || !info.IsDir() || !isBazelOutputBase(path) {
@@ -222,7 +276,17 @@ func discoverBazelProcessOutputBase(path string) []bazelCandidate {
 	}
 	candidate := newBazelCandidate("output_base", filepath.Base(path), path, info.ModTime())
 	candidate.Active = true
-	candidate.Reason = "discovered from active Bazel process --output_base"
+	switch kind {
+	case "client":
+		candidate.ActiveClient = true
+		candidate.Reason = "discovered from active Bazel client --output_base"
+	case "server":
+		candidate.IdleServer = true
+		candidate.ProcessServer = true
+		candidate.Reason = "discovered from idle Bazel server --output_base"
+	default:
+		candidate.Reason = "discovered from Bazel process --output_base"
+	}
 	return []bazelCandidate{candidate}
 }
 
@@ -394,14 +458,31 @@ func isBazelOutputBase(path string) bool {
 	return true
 }
 
-func bazelOutputBaseHasActiveLock(path string) bool {
+type bazelOutputBaseActivityInfo struct {
+	Active        bool
+	ActiveClient  bool
+	IdleServer    bool
+	ProcessServer bool
+	Reason        string
+}
+
+func bazelOutputBaseActivity(path string) bazelOutputBaseActivityInfo {
 	if bazelServerPIDIsAlive(filepath.Join(path, "server", "server.pid")) {
-		return true
+		return bazelOutputBaseActivityInfo{
+			Active:     true,
+			IdleServer: true,
+			Reason:     "idle Bazel server pid is alive",
+		}
 	}
 	if info, err := os.Stat(filepath.Join(path, "lock")); err == nil {
-		return time.Since(info.ModTime()) < 15*time.Minute
+		if time.Since(info.ModTime()) < 15*time.Minute {
+			return bazelOutputBaseActivityInfo{
+				Active: true,
+				Reason: "recent Bazel output-base lock detected",
+			}
+		}
 	}
-	return false
+	return bazelOutputBaseActivityInfo{}
 }
 
 func bazelServerPIDIsAlive(path string) bool {
@@ -515,6 +596,14 @@ func newestBazelOutputBases(candidates []bazelCandidate, keep int) map[string]bo
 
 func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration, now time.Time, protectedByRecent bool, globalActive bool, budgetExceeded bool, level CleanupLevel, cfg config.BazelConfig) CleanupTarget {
 	active := candidate.Active || globalActive
+	idleServerOnly := candidate.IdleServer && !candidate.ActiveClient && !globalActive
+	stale := !candidate.ModTime.After(now.Add(-staleAfter))
+	idleServerStopEligible := candidate.Type == "output_base" &&
+		idleServerOnly &&
+		candidate.ProcessServer &&
+		cfg.AllowStopIdleServers &&
+		level >= LevelAggressive &&
+		stale
 	protected := candidate.Protected || protectedByRecent || (active && !cfg.AllowDeleteActiveOutputBases)
 	action := "review"
 	reason := "Bazel cache candidate requires operator review"
@@ -526,9 +615,17 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 	case protectedByRecent:
 		action = "keep"
 		reason = "within configured newest output-base retention"
+	case idleServerStopEligible:
+		action = "stop_idle_server_then_delete_output_base"
+		protected = false
+		reason = "stale output base has only an idle Bazel server; allow_stop_idle_servers permits shutdown before deletion"
 	case active && !cfg.AllowDeleteActiveOutputBases:
 		action = "keep"
-		reason = "active Bazel process or output-base lock detected"
+		if candidate.Reason != "" {
+			reason = candidate.Reason
+		} else {
+			reason = "active Bazel process or output-base lock detected"
+		}
 	case level == LevelWarning:
 		action = "review"
 		reason = "warning level reports Bazel cache footprint only"
@@ -544,7 +641,7 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 			action = "delete_cache_tier"
 			reason = "cache tier exceeds budget and is older than configured Bazel stale threshold"
 		}
-	case candidate.ModTime.After(now.Add(-staleAfter)):
+	case !stale:
 		action = "keep"
 		protected = true
 		reason = "newer than configured Bazel stale threshold"
@@ -584,11 +681,21 @@ func bazelCandidateTier(candidateType string) string {
 func bazelEstimatedCandidateBytes(targets []CleanupTarget) int64 {
 	var total int64
 	for _, target := range targets {
-		if strings.HasPrefix(target.Action, "delete_") && !target.Protected && !target.Active {
+		if bazelTargetReclaimsHost(target) {
 			total += target.Bytes
 		}
 	}
 	return total
+}
+
+func bazelTargetReclaimsHost(target CleanupTarget) bool {
+	if target.Protected {
+		return false
+	}
+	if target.Action == "stop_idle_server_then_delete_output_base" {
+		return target.Type == "output_base"
+	}
+	return strings.HasPrefix(target.Action, "delete_") && !target.Active
 }
 
 func applyBazelCleanupTargets(ctx context.Context, plugin string, level CleanupLevel, targets []CleanupTarget, workspaceRoots []string, home string, logger *slog.Logger) CleanupResult {
@@ -601,7 +708,7 @@ func applyBazelCleanupTargets(ctx context.Context, plugin string, level CleanupL
 			result.Error = err
 			return result
 		}
-		if err := deleteBazelTarget(target, logger); err != nil {
+		if err := deleteBazelTarget(ctx, target, logger); err != nil {
 			logger.Warn("failed to delete Bazel target", "type", target.Type, "path", target.Path, "error", err)
 			continue
 		}
@@ -620,11 +727,16 @@ func applyBazelCleanupTargets(ctx context.Context, plugin string, level CleanupL
 }
 
 func bazelTargetEligibleForDeletion(target CleanupTarget) bool {
-	if target.Path == "" || target.Active || target.Protected {
+	if target.Path == "" || target.Protected {
+		return false
+	}
+	if target.Active && target.Action != "stop_idle_server_then_delete_output_base" {
 		return false
 	}
 	switch target.Action {
 	case "delete_output_base":
+		return target.Type == "output_base"
+	case "stop_idle_server_then_delete_output_base":
 		return target.Type == "output_base"
 	case "delete_cache_tier":
 		return target.Type == "repository_cache" || target.Type == "disk_cache" || target.Type == "bazelisk"
@@ -633,7 +745,10 @@ func bazelTargetEligibleForDeletion(target CleanupTarget) bool {
 	}
 }
 
-func deleteBazelTarget(target CleanupTarget, logger *slog.Logger) error {
+func deleteBazelTarget(ctx context.Context, target CleanupTarget, logger *slog.Logger) error {
+	if target.Action == "stop_idle_server_then_delete_output_base" {
+		return stopIdleBazelServerThenDeleteOutputBase(ctx, target.Path, logger)
+	}
 	switch target.Type {
 	case "output_base":
 		return deleteBazelOutputBase(target.Path, logger)
@@ -642,6 +757,37 @@ func deleteBazelTarget(target CleanupTarget, logger *slog.Logger) error {
 	default:
 		return fmt.Errorf("refusing to delete unsupported Bazel target type %q", target.Type)
 	}
+}
+
+func stopIdleBazelServerThenDeleteOutputBase(ctx context.Context, path string, logger *slog.Logger) error {
+	if err := shutdownBazelOutputBase(ctx, path, logger); err != nil {
+		return err
+	}
+	if activity := bazelOutputBaseActivity(path); activity.Active {
+		return fmt.Errorf("refusing to delete output base after shutdown because it is still active: %s", activity.Reason)
+	}
+	return deleteBazelOutputBase(path, logger)
+}
+
+func shutdownBazelOutputBase(ctx context.Context, path string, logger *slog.Logger) error {
+	bin, err := exec.LookPath("bazel")
+	if err != nil {
+		bin, err = exec.LookPath("bazelisk")
+	}
+	if err != nil {
+		return fmt.Errorf("cannot stop idle Bazel server because neither bazel nor bazelisk is on PATH")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(shutdownCtx, bin, "--output_base="+path, "shutdown")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("bazel shutdown failed for %s: %w: %s", path, err, strings.TrimSpace(string(output)))
+	}
+	logger.Info("stopped idle Bazel server", "output_base", path)
+	return nil
 }
 
 func deleteBazelOutputBase(path string, logger *slog.Logger) error {
@@ -807,6 +953,8 @@ func bazelBusyProcessReasons(output string) []string {
 func bazelBusyProcessInfo(output string) bazelProcessInfo {
 	reasonSeen := map[string]bool{}
 	outputBaseSeen := map[string]bool{}
+	clientOutputBaseSeen := map[string]bool{}
+	serverOutputBaseSeen := map[string]bool{}
 	var info bazelProcessInfo
 	for _, line := range strings.Split(output, "\n") {
 		originalFields := strings.Fields(line)
@@ -815,8 +963,10 @@ func bazelBusyProcessInfo(output string) bazelProcessInfo {
 			continue
 		}
 
+		var outputBases []string
 		if bazelProcessLineHasBazel(originalFields) {
-			for _, outputBase := range bazelOutputBaseArgs(originalFields) {
+			outputBases = bazelOutputBaseArgs(originalFields)
+			for _, outputBase := range outputBases {
 				if !outputBaseSeen[outputBase] {
 					outputBaseSeen[outputBase] = true
 					info.OutputBases = append(info.OutputBases, outputBase)
@@ -831,7 +981,14 @@ func bazelBusyProcessInfo(output string) bazelProcessInfo {
 		}
 		normalized := strings.Join(lowerFields[1:], " ")
 		matches := bazelCommandPattern.FindStringSubmatch(normalized)
+		activeClient := false
 		if len(matches) < 3 {
+			for _, outputBase := range outputBases {
+				if !serverOutputBaseSeen[outputBase] {
+					serverOutputBaseSeen[outputBase] = true
+					info.ServerOutputBases = append(info.ServerOutputBases, outputBase)
+				}
+			}
 			continue
 		}
 		reason := matches[1] + " " + matches[2]
@@ -839,10 +996,38 @@ func bazelBusyProcessInfo(output string) bazelProcessInfo {
 			reasonSeen[reason] = true
 			info.Reasons = append(info.Reasons, reason)
 		}
+		activeClient = true
+		if activeClient {
+			for _, outputBase := range outputBases {
+				if !clientOutputBaseSeen[outputBase] {
+					clientOutputBaseSeen[outputBase] = true
+					info.ClientOutputBases = append(info.ClientOutputBases, outputBase)
+				}
+			}
+		}
 	}
 	sort.Strings(info.Reasons)
 	sort.Strings(info.OutputBases)
+	sort.Strings(info.ClientOutputBases)
+	sort.Strings(info.ServerOutputBases)
 	return info
+}
+
+func bazelProcessOutputBaseKinds(info bazelProcessInfo) map[string]string {
+	kinds := map[string]string{}
+	for _, outputBase := range info.ServerOutputBases {
+		kinds[filepath.Clean(outputBase)] = "server"
+	}
+	for _, outputBase := range info.ClientOutputBases {
+		kinds[filepath.Clean(outputBase)] = "client"
+	}
+	for _, outputBase := range info.OutputBases {
+		cleaned := filepath.Clean(outputBase)
+		if _, ok := kinds[cleaned]; !ok {
+			kinds[cleaned] = "unknown"
+		}
+	}
+	return kinds
 }
 
 func bazelProcessLineHasBazel(fields []string) bool {

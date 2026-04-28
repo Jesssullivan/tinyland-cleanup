@@ -75,6 +75,11 @@ Runtime boundary:
   even when they are outside configured output-user roots; idle/server-only
   output-base visibility protects that output base but does not globally block
   unrelated cache-tier cleanup;
+- aggressive and critical cleanup may classify stale idle-server-only output
+  bases as `stop_idle_server_then_delete_output_base` when
+  `allow_stop_idle_servers` is enabled; real cleanup runs
+  `bazel --output_base=<path> shutdown`, re-checks the output base, and deletes
+  it only if it is no longer active;
 - deletion normalizes writable permissions first, and on Darwin attempts to
   clear `uchg` file flags with `chflags -R nouchg`;
 - after an output base is deleted, workspace roots are scanned shallowly for
@@ -85,11 +90,10 @@ Runtime boundary:
 - Bazel output bases, repository caches, and disk caches are `warm` targets
   because they are rebuildable but expensive; Bazelisk downloads are `safe`
   targets;
-- `delete_output_base` and `delete_cache_tier` targets advertise
-  `reclaim=host` and `host_reclaims_space=true`; review and protected targets
-  advertise `reclaim=none`;
-- idle Bazel server stop remains a follow-up guarded by
-  `allow_stop_idle_servers`.
+- `delete_output_base`, `delete_cache_tier`, and
+  `stop_idle_server_then_delete_output_base` targets advertise `reclaim=host`
+  and `host_reclaims_space=true`; review and protected targets advertise
+  `reclaim=none`.
 
 Do not disable active-output-base protection on developer machines or shared
 runners unless an operator has already drained the relevant jobs and accepted

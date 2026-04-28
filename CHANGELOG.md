@@ -74,6 +74,10 @@ All notable changes to this project will be documented in this file.
 - Human-readable text reports now include target paths when a target has both a
   label and filesystem path, making review-only Nix GC roots and large artifact
   targets actionable without switching to JSON.
+- Bazel cleanup now distinguishes active client output bases from idle
+  server-only output bases, and aggressive/critical cleanup can stop stale idle
+  servers before deleting their output bases when `allow_stop_idle_servers` is
+  enabled.
 
 ### Changed
 
