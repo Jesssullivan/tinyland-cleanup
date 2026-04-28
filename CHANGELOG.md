@@ -61,6 +61,9 @@ All notable changes to this project will be documented in this file.
 - Dry-run cleanup targets now carry policy tier, logical byte, reclaim kind,
   and host-space reclaim expectation metadata where planner evidence is
   available.
+- Review-only sparsebundle targets now report logical size from `Info.plist`
+  when available, making APFS bundle physical-vs-logical accounting visible in
+  dry-run plans.
 - Darwin JetBrains cache planning now uses the configured `max_gb` budget to
   mark oldest inactive cache versions as opt-in aggressive cleanup candidates.
 - Nix dry-run GC lock and SQLite contention now surfaces as

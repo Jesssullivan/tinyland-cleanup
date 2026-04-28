@@ -176,8 +176,11 @@ preserving configured protected paths. Large local disk/image artifacts are
 always protected and excluded from estimated reclaim because they can be
 developer-owned state. Mounted disk images are reported as active protected
 targets with their mount point so operators know to detach them before any
-manual cleanup or compaction. The plan also protects matching artifact families
-when active package manager, compiler, language server, runtime, or LM Studio
+manual cleanup or compaction. Sparsebundle targets also report logical size
+from `Info.plist` when available; detached APFS sparsebundles may still reject
+`hdiutil compact`, so treat them as manual migrate/delete decisions rather than
+automatic reclaim. The plan also protects matching artifact families when
+active package manager, compiler, language server, runtime, or LM Studio
 processes are visible, and it preserves any candidate artifact directory that
 contains files tracked by Git. Zig `.zig-cache` and `zig-out` targets are also
 preserved when they contain files modified within the recent-output grace

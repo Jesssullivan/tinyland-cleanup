@@ -6,8 +6,10 @@ package plugins
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -327,10 +329,11 @@ func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes i
 			if strings.HasPrefix(baseName, ".") {
 				return filepath.SkipDir
 			}
-			if kind, ok := dirKinds[filepath.Ext(lowerBase)]; ok {
+			ext := filepath.Ext(lowerBase)
+			if kind, ok := dirKinds[ext]; ok {
 				size := getDirAllocatedBytes(path)
 				if size >= minBytes {
-					callback(p.largeLocalArtifactTarget(kind, path, size, 0, p.isProtected(path, protectPaths), mountedImages[filepath.Clean(path)]))
+					callback(p.largeLocalArtifactTarget(kind, path, size, largeLocalArtifactDirLogicalBytes(ext, path), p.isProtected(path, protectPaths), mountedImages[filepath.Clean(path)]))
 				}
 				return filepath.SkipDir
 			}
@@ -358,7 +361,7 @@ func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes i
 
 func (p *DevArtifactsPlugin) largeLocalArtifactTarget(kind, path string, physicalBytes, logicalBytes int64, protected bool, mountPoint string) CleanupTarget {
 	action := "review"
-	reason := "large local disk/image artifact requires manual review before removal"
+	reason := largeLocalArtifactReviewReason(kind)
 	active := mountPoint != ""
 	if active {
 		action = "protect"
@@ -380,6 +383,82 @@ func (p *DevArtifactsPlugin) largeLocalArtifactTarget(kind, path string, physica
 	}
 	annotateCleanupTargetPolicy(&target, CleanupTierDestructive, CleanupReclaimNone)
 	return target
+}
+
+func largeLocalArtifactReviewReason(kind string) string {
+	if kind == "sparse bundle disk image" {
+		return "sparsebundle requires manual review; automatic compaction is not assumed to reclaim host space"
+	}
+	return "large local disk/image artifact requires manual review before removal"
+}
+
+func largeLocalArtifactDirLogicalBytes(ext string, path string) int64 {
+	if ext != ".sparsebundle" {
+		return 0
+	}
+	return sparseBundleLogicalBytes(path)
+}
+
+func sparseBundleLogicalBytes(path string) int64 {
+	value, err := plistIntegerValue(filepath.Join(path, "Info.plist"), "size")
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
+}
+
+func plistIntegerValue(path string, key string) (int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	decoder := xml.NewDecoder(file)
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return 0, io.EOF
+		}
+		if err != nil {
+			return 0, err
+		}
+
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "key" {
+			continue
+		}
+
+		var foundKey string
+		if err := decoder.DecodeElement(&foundKey, &start); err != nil {
+			return 0, err
+		}
+		if strings.TrimSpace(foundKey) != key {
+			continue
+		}
+
+		for {
+			token, err := decoder.Token()
+			if errors.Is(err, io.EOF) {
+				return 0, io.EOF
+			}
+			if err != nil {
+				return 0, err
+			}
+			start, ok := token.(xml.StartElement)
+			if !ok {
+				continue
+			}
+			if start.Name.Local != "integer" {
+				return 0, fmt.Errorf("plist key %q is %s, not integer", key, start.Name.Local)
+			}
+			var rawValue string
+			if err := decoder.DecodeElement(&rawValue, &start); err != nil {
+				return 0, err
+			}
+			return strconv.ParseInt(strings.TrimSpace(rawValue), 10, 64)
+		}
+	}
 }
 
 func largeLocalMountedDiskImages(ctx context.Context) map[string]string {

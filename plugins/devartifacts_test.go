@@ -692,6 +692,20 @@ func TestPlanLargeLocalArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(bundlePath, "bands"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(bundlePath, "Info.plist"), []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>band-size</key>
+	<integer>8388608</integer>
+	<key>diskimage-bundle-type</key>
+	<string>com.apple.diskimage.sparsebundle</string>
+	<key>size</key>
+	<integer>34359738368</integer>
+</dict>
+</plist>
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(bundlePath, "bands", "0"), []byte("bundle data"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -704,8 +718,11 @@ func TestPlanLargeLocalArtifactsReportsReviewOnlyTargets(t *testing.T) {
 		t.Fatalf("expected review-only destructive/no-reclaim image target, got %#v", image)
 	}
 	bundle := findDevArtifactTarget(t, targets, "large-local-artifact", bundlePath)
-	if bundle.Action != "review" || !bundle.Protected || bundle.Bytes <= 0 {
-		t.Fatalf("expected review-only sparsebundle target with bytes, got %#v", bundle)
+	if bundle.Action != "review" || !bundle.Protected || bundle.Bytes <= 0 || bundle.LogicalBytes != 34359738368 {
+		t.Fatalf("expected review-only sparsebundle target with physical and logical bytes, got %#v", bundle)
+	}
+	if !strings.Contains(bundle.Reason, "automatic compaction is not assumed") {
+		t.Fatalf("expected sparsebundle compaction caveat, got %q", bundle.Reason)
 	}
 }
 
