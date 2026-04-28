@@ -6,6 +6,7 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
+
+const devArtifactRecentOutputGrace = 2 * time.Hour
 
 // DevArtifactsPlugin handles stale development artifact cleanup.
 type DevArtifactsPlugin struct {
@@ -250,7 +253,7 @@ func (p *DevArtifactsPlugin) planNodeModules(scanPath string, maxAge time.Durati
 	p.findArtifactDirs(scanPath, "node_modules", "package.json", func(dir string, size int64) {
 		marker := filepath.Join(filepath.Dir(dir), "package.json")
 		stale := maxAge == 0 || p.isFileStale(marker, maxAge)
-		*targets = append(*targets, p.devArtifactTarget("node_modules", "node_modules", dir, size, stale, mutates, p.isProtected(dir, protectPaths), devArtifactContainsTrackedFiles(dir), "package.json", maxAge, active))
+		*targets = append(*targets, p.devArtifactTarget("node_modules", "node_modules", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", devArtifactContainsTrackedFiles(dir), "package.json", maxAge, active))
 	})
 }
 
@@ -258,7 +261,7 @@ func (p *DevArtifactsPlugin) planPythonVenvs(scanPath string, maxAge time.Durati
 	markers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
 	p.findArtifactDirs(scanPath, ".venv", "", func(dir string, size int64) {
 		stale := maxAge == 0 || p.pythonProjectStale(filepath.Dir(dir), markers, maxAge)
-		*targets = append(*targets, p.devArtifactTarget("python-venv", ".venv", dir, size, stale, mutates, p.isProtected(dir, protectPaths), devArtifactContainsTrackedFiles(dir), strings.Join(markers, ", "), maxAge, active))
+		*targets = append(*targets, p.devArtifactTarget("python-venv", ".venv", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", devArtifactContainsTrackedFiles(dir), strings.Join(markers, ", "), maxAge, active))
 	})
 }
 
@@ -266,7 +269,7 @@ func (p *DevArtifactsPlugin) planRustTargets(scanPath string, maxAge time.Durati
 	p.findArtifactDirs(scanPath, "target", "Cargo.toml", func(dir string, size int64) {
 		marker := filepath.Join(filepath.Dir(dir), "Cargo.toml")
 		stale := maxAge == 0 || p.isFileStale(marker, maxAge)
-		*targets = append(*targets, p.devArtifactTarget("rust-target", "target", dir, size, stale, mutates, p.isProtected(dir, protectPaths), devArtifactContainsTrackedFiles(dir), "Cargo.toml", maxAge, active))
+		*targets = append(*targets, p.devArtifactTarget("rust-target", "target", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", devArtifactContainsTrackedFiles(dir), "Cargo.toml", maxAge, active))
 	})
 }
 
@@ -275,7 +278,13 @@ func (p *DevArtifactsPlugin) planZigArtifacts(scanPath string, maxAge time.Durat
 		p.findArtifactDirs(scanPath, artifactName, "build.zig", func(dir string, size int64) {
 			marker := filepath.Join(filepath.Dir(dir), "build.zig")
 			stale := maxAge == 0 || p.isFileStale(marker, maxAge)
-			*targets = append(*targets, p.devArtifactTarget("zig-artifact", artifactName, dir, size, stale, mutates, p.isProtected(dir, protectPaths), devArtifactContainsTrackedFiles(dir), "build.zig", maxAge, active))
+			protected := p.isProtected(dir, protectPaths)
+			tracked := devArtifactContainsTrackedFiles(dir)
+			recentReason := ""
+			if !protected && !tracked {
+				recentReason = devArtifactRecentOutputProtectReason(dir)
+			}
+			*targets = append(*targets, p.devArtifactTarget("zig-artifact", artifactName, dir, size, stale, mutates, protected || recentReason != "", recentReason, tracked, "build.zig", maxAge, active))
 		})
 	}
 }
@@ -388,7 +397,7 @@ func largeLocalArtifactDirKinds() map[string]string {
 	}
 }
 
-func (p *DevArtifactsPlugin) devArtifactTarget(targetType, name, path string, bytes int64, stale, mutates, protected, tracked bool, marker string, maxAge time.Duration, active map[string]string) CleanupTarget {
+func (p *DevArtifactsPlugin) devArtifactTarget(targetType, name, path string, bytes int64, stale, mutates, protected bool, protectReason string, tracked bool, marker string, maxAge time.Duration, active map[string]string) CleanupTarget {
 	activeReason, isActive := active[targetType]
 	target := CleanupTarget{
 		Type:      targetType,
@@ -403,8 +412,11 @@ func (p *DevArtifactsPlugin) devArtifactTarget(targetType, name, path string, by
 		target.Action = "protect"
 		target.Reason = "active development process detected: " + activeReason
 	case protected:
+		if protectReason == "" {
+			protectReason = "path is covered by dev_artifacts.protect_paths"
+		}
 		target.Action = "protect"
-		target.Reason = "path is covered by dev_artifacts.protect_paths"
+		target.Reason = protectReason
 	case tracked:
 		target.Action = "protect"
 		target.Reason = "artifact directory contains files tracked by Git"
@@ -690,6 +702,32 @@ func devArtifactContainsTrackedFiles(path string) bool {
 	return listCmd.Run() == nil
 }
 
+var errRecentDevArtifactContent = errors.New("recent dev artifact content")
+
+func devArtifactRecentOutputProtectReason(path string) string {
+	if !devArtifactHasRecentContent(path, devArtifactRecentOutputGrace) {
+		return ""
+	}
+	return fmt.Sprintf("artifact directory contains files modified within recent output grace %s", formatDevArtifactAge(devArtifactRecentOutputGrace))
+}
+
+func devArtifactHasRecentContent(path string, grace time.Duration) bool {
+	cutoff := time.Now().Add(-grace)
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if info.ModTime().After(cutoff) {
+			return errRecentDevArtifactContent
+		}
+		return nil
+	})
+	return errors.Is(err, errRecentDevArtifactContent)
+}
+
 // reportArtifacts reports sizes of all detected dev artifacts without cleaning.
 func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.DevArtifactsConfig, home string, logger *slog.Logger) {
 	for _, scanPath := range daCfg.ScanPaths {
@@ -912,6 +950,10 @@ func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath str
 			}
 			if devArtifactContainsTrackedFiles(dir) {
 				logger.Debug("preserving Zig artifact containing tracked files", "path", dir)
+				return
+			}
+			if reason := devArtifactRecentOutputProtectReason(dir); reason != "" {
+				logger.Debug("preserving recent Zig artifact", "path", dir, "reason", reason)
 				return
 			}
 

@@ -177,7 +177,9 @@ always protected and excluded from estimated reclaim because they can be
 developer-owned state. The plan also protects matching artifact families when
 active package manager, compiler, language server, runtime, or LM Studio
 processes are visible, and it preserves any candidate artifact directory that
-contains files tracked by Git.
+contains files tracked by Git. Zig `.zig-cache` and `zig-out` targets are also
+preserved when they contain files modified within the recent-output grace
+window, even at critical pressure.
 
 For Docker, the plan reports Docker daemon disk-usage rows from `docker system
 df`, including images, stopped containers, local volumes, and build cache when
