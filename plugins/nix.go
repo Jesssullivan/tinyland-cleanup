@@ -752,12 +752,34 @@ func parseNixGCRoots(output string) []nixGCRoot {
 	}
 
 	sort.Slice(roots, func(i, j int) bool {
-		if roots[i].Class == roots[j].Class {
+		iRank := nixGCRootClassRank(roots[i].Class)
+		jRank := nixGCRootClassRank(roots[j].Class)
+		if iRank == jRank {
+			if roots[i].Class != roots[j].Class {
+				return roots[i].Class < roots[j].Class
+			}
 			return roots[i].Root < roots[j].Root
 		}
-		return roots[i].Class < roots[j].Class
+		return iRank < jRank
 	})
 	return roots
+}
+
+func nixGCRootClassRank(class string) int {
+	switch class {
+	case "process_root":
+		return 0
+	case "temporary_root":
+		return 1
+	case "workspace_result":
+		return 2
+	case "auto_gcroot", "gcroot":
+		return 3
+	case "profile_root":
+		return 4
+	default:
+		return 5
+	}
 }
 
 func classifyNixGCRoot(root string) (string, bool) {
@@ -798,8 +820,10 @@ func nixGCRootTargets(roots []nixGCRoot, limit int) []CleanupTarget {
 	targets := make([]CleanupTarget, 0, limit)
 	for _, root := range roots[:limit] {
 		reason := "visible Nix GC root retaining store path"
+		version := ""
 		if root.StorePath != "" {
-			reason = fmt.Sprintf("%s %s", reason, filepath.Base(root.StorePath))
+			version = filepath.Base(root.StorePath)
+			reason = fmt.Sprintf("%s %s", reason, version)
 		}
 		name := fmt.Sprintf("%s %s", root.Class, filepath.Base(root.Root))
 		if root.Active {
@@ -809,16 +833,50 @@ func nixGCRootTargets(roots []nixGCRoot, limit int) []CleanupTarget {
 		target := CleanupTarget{
 			Type:      "nix_gc_root",
 			Name:      name,
+			Version:   version,
 			Path:      root.Root,
 			Active:    root.Active,
 			Protected: true,
-			Action:    "review_gc_root",
+			Action:    nixGCRootReviewAction(root.Class),
 			Reason:    reason,
 		}
-		annotateCleanupTargetPolicy(&target, CleanupTierSafe, CleanupReclaimNone)
+		annotateCleanupTargetPolicy(&target, nixGCRootTier(root.Class), nixGCRootReclaim(root.Class))
 		targets = append(targets, target)
 	}
 	return targets
+}
+
+func nixGCRootReviewAction(class string) string {
+	switch class {
+	case "process_root":
+		return "review_active_gc_root"
+	case "temporary_root":
+		return "review_temporary_gc_root"
+	case "workspace_result":
+		return "review_workspace_result_root"
+	default:
+		return "review_gc_root"
+	}
+}
+
+func nixGCRootTier(class string) string {
+	switch class {
+	case "process_root":
+		return CleanupTierDisruptive
+	case "workspace_result", "gcroot", "auto_gcroot", "unknown_root":
+		return CleanupTierWarm
+	default:
+		return CleanupTierSafe
+	}
+}
+
+func nixGCRootReclaim(class string) string {
+	switch class {
+	case "temporary_root", "workspace_result", "gcroot", "auto_gcroot":
+		return CleanupReclaimDeferred
+	default:
+		return CleanupReclaimNone
+	}
 }
 
 func nixGCRootClassSummary(roots []nixGCRoot) string {

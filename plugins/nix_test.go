@@ -267,6 +267,9 @@ func TestParseNixGCRoots(t *testing.T) {
 	if active != 1 {
 		t.Fatalf("expected one active root, got %d", active)
 	}
+	if roots[0].Class != "process_root" || roots[1].Class != "workspace_result" {
+		t.Fatalf("roots should be sorted by operator-actionable class, got %#v", roots)
+	}
 }
 
 func TestNixGCRootTargetsAreProtectedAndLimited(t *testing.T) {
@@ -288,11 +291,42 @@ func TestNixGCRootTargetsAreProtectedAndLimited(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("got %d targets, want 1", len(targets))
 	}
-	if targets[0].Action != "review_gc_root" || !targets[0].Protected {
+	if targets[0].Action != "review_active_gc_root" || !targets[0].Protected {
 		t.Fatalf("GC root target should be protected review-only: %+v", targets[0])
 	}
 	if !targets[0].Active {
 		t.Fatalf("process GC root should be marked active: %+v", targets[0])
+	}
+}
+
+func TestNixGCRootTargetsUseSpecificReviewActions(t *testing.T) {
+	roots := []nixGCRoot{
+		{
+			Root:      "/tmp/dev-env-profile-1-link",
+			StorePath: "/nix/store/222-dev-env",
+			Class:     "temporary_root",
+		},
+		{
+			Root:      "/Users/jess/git/kernel/result",
+			StorePath: "/nix/store/333-kernel",
+			Class:     "workspace_result",
+		},
+	}
+
+	targets := nixGCRootTargets(roots, 2)
+	actions := map[string]CleanupTarget{}
+	for _, target := range targets {
+		actions[target.Path] = target
+	}
+
+	temporary := actions["/tmp/dev-env-profile-1-link"]
+	if temporary.Action != "review_temporary_gc_root" || temporary.Reclaim != CleanupReclaimDeferred || temporary.Version != "222-dev-env" {
+		t.Fatalf("temporary root target should carry specific review action and store path evidence: %+v", temporary)
+	}
+
+	workspace := actions["/Users/jess/git/kernel/result"]
+	if workspace.Action != "review_workspace_result_root" || workspace.Tier != CleanupTierWarm || workspace.Reclaim != CleanupReclaimDeferred {
+		t.Fatalf("workspace result target should carry warm deferred review policy: %+v", workspace)
 	}
 }
 
