@@ -251,6 +251,9 @@ func writeTextTarget(w io.Writer, target plugins.CleanupTarget) error {
 	if name == "" {
 		name = target.Type
 	}
+	if target.Path != "" && target.Path != name {
+		name = fmt.Sprintf("%s (%s)", name, target.Path)
+	}
 
 	if _, err := fmt.Fprintf(w, "  - %s [%s]: %s", name, target.Type, status); err != nil {
 		return err

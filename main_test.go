@@ -125,6 +125,7 @@ func TestRunOnceDryRunTextReportExplainsPlan(t *testing.T) {
 					Type:              "cache",
 					Tier:              plugins.CleanupTierWarm,
 					Name:              "example-cache",
+					Path:              "/tmp/example-cache",
 					Bytes:             1024,
 					Reclaim:           plugins.CleanupReclaimNone,
 					HostReclaimsSpace: &hostReclaims,
@@ -151,7 +152,7 @@ func TestRunOnceDryRunTextReportExplainsPlan(t *testing.T) {
 		"plan: estimated reclaim 1.0 MiB",
 		"- reporting: would run (dry_run)",
 		"reporting dry-run plan",
-		"example-cache [cache]: review, protected, tier=warm, reclaim=none, 1.0 KiB - operator review required",
+		"example-cache (/tmp/example-cache) [cache]: review, protected, tier=warm, reclaim=none, 1.0 KiB - operator review required",
 		"review before cleanup",
 	} {
 		if !strings.Contains(text, want) {

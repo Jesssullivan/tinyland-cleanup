@@ -71,6 +71,9 @@ All notable changes to this project will be documented in this file.
 - Nix generation deletion and GC commands now treat the same contention
   signatures as skipped cleanup rather than hard failures when daemon-busy
   skipping is enabled.
+- Human-readable text reports now include target paths when a target has both a
+  label and filesystem path, making review-only Nix GC roots and large artifact
+  targets actionable without switching to JSON.
 
 ### Changed
 

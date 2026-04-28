@@ -12,7 +12,9 @@ tinyland-cleanup --once --dry-run --level critical --output text
 
 The text report is the operator explain view. It summarizes the selected level,
 monitored mounts, host free-space accounting, target free-space deficit, plugin
-plans, warnings, and the first few cleanup targets for review.
+plans, warnings, and the first few cleanup targets for review. Target rows show
+the filesystem path when a target has both a short label and a path, so
+review-only roots and artifacts can be acted on without switching formats.
 
 Use JSON when another tool needs the stable report schema:
 
