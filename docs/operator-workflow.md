@@ -176,7 +176,8 @@ preserving configured protected paths. Large local disk/image artifacts are
 always protected and excluded from estimated reclaim because they can be
 developer-owned state. The plan also protects matching artifact families when
 active package manager, compiler, language server, runtime, or LM Studio
-processes are visible.
+processes are visible, and it preserves any candidate artifact directory that
+contains files tracked by Git.
 
 For Docker, the plan reports Docker daemon disk-usage rows from `docker system
 df`, including images, stopped containers, local volumes, and build cache when

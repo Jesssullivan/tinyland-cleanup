@@ -4,12 +4,31 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
+
+func requireGit(t *testing.T) string {
+	t.Helper()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git is required for tracked-artifact protection tests")
+	}
+	return git
+}
+
+func runGit(t *testing.T, git string, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(git, args...)
+	cmd.Dir = dir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
+}
 
 func TestDevArtifactsPluginInterface(t *testing.T) {
 	p := NewDevArtifactsPlugin()
@@ -317,6 +336,76 @@ func TestCleanZigArtifactsFresh(t *testing.T) {
 	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
 	if freed != 0 {
 		t.Fatal("expected fresh Zig artifacts to be preserved")
+	}
+	if !pathExists(filepath.Join(project, ".zig-cache")) {
+		t.Error(".zig-cache should still exist")
+	}
+}
+
+func TestPlanZigArtifactsProtectsTrackedCache(t *testing.T) {
+	git := requireGit(t)
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+
+	project := filepath.Join(tmpDir, "tracked-zig")
+	if err := os.MkdirAll(filepath.Join(project, ".zig-cache", "o"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".zig-cache", "o", "artifact"), []byte("cache"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	buildZig := filepath.Join(project, "build.zig")
+	if err := os.WriteFile(buildZig, []byte("const std = @import(\"std\");"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	if err := os.Chtimes(buildZig, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	runGit(t, git, project, "init")
+	runGit(t, git, project, "add", "build.zig", ".zig-cache/o/artifact")
+
+	var targets []CleanupTarget
+	p.planZigArtifacts(tmpDir, 30*24*time.Hour, true, nil, nil, &targets)
+
+	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
+	if target.Action != "protect" || !target.Protected {
+		t.Fatalf("expected tracked Zig cache to be protected, got %#v", target)
+	}
+	if target.Reason != "artifact directory contains files tracked by Git" {
+		t.Fatalf("expected tracked-files protection reason, got %q", target.Reason)
+	}
+}
+
+func TestCleanZigArtifactsPreservesTrackedCache(t *testing.T) {
+	git := requireGit(t)
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	project := filepath.Join(tmpDir, "tracked-zig")
+	if err := os.MkdirAll(filepath.Join(project, ".zig-cache", "o"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".zig-cache", "o", "artifact"), []byte("cache"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	buildZig := filepath.Join(project, "build.zig")
+	if err := os.WriteFile(buildZig, []byte("const std = @import(\"std\");"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	if err := os.Chtimes(buildZig, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	runGit(t, git, project, "init")
+	runGit(t, git, project, "add", "build.zig", ".zig-cache/o/artifact")
+
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, logger)
+	if freed != 0 {
+		t.Fatalf("expected tracked Zig cache to be preserved, freed %d bytes", freed)
 	}
 	if !pathExists(filepath.Join(project, ".zig-cache")) {
 		t.Error(".zig-cache should still exist")
