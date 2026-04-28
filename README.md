@@ -79,6 +79,10 @@ For temporary proof/output pressure, keep the review bounded:
 tinyland-cleanup --once --dry-run --level critical --plugins dev-artifacts --output text
 ```
 
+Large top-level temp roots remain review-only, but stale inactive roots may
+also expose narrower generated-output targets such as Rust `target/`
+directories for safe pruning without deleting the worktree.
+
 For a one-off run, override the configured maximum used-space target without
 editing the config file:
 

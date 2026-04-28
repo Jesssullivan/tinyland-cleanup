@@ -833,6 +833,99 @@ func TestPlanTemporaryArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	}
 }
 
+func TestPlanCleanupReportsGeneratedArtifactsInsideStaleTemporaryRoots(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "temp-rust-worktree")
+	targetDir := filepath.Join(root, "target", "debug")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cargoToml := filepath.Join(root, "Cargo.toml")
+	if err := os.WriteFile(cargoToml, []byte("[package]\nname = \"temp-rust-worktree\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "artifact"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(cargoToml, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := tempGeneratedArtifactConfig(tmpDir)
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, logger)
+
+	rootTarget := findDevArtifactTarget(t, plan.Targets, "temporary-dev-artifact", root)
+	if rootTarget.Action != "review_temp_artifact" || !rootTarget.Protected {
+		t.Fatalf("expected top-level temporary root to remain review-only, got %#v", rootTarget)
+	}
+	rustTarget := findDevArtifactTarget(t, plan.Targets, "rust-target", filepath.Join(root, "target"))
+	if rustTarget.Action != "delete" || rustTarget.Protected {
+		t.Fatalf("expected nested Rust target to be deletable, got %#v", rustTarget)
+	}
+	if plan.EstimatedBytesFreed <= 0 {
+		t.Fatal("expected nested generated artifact to contribute to reclaim estimate")
+	}
+}
+
+func TestCleanupPrunesGeneratedArtifactsInsideStaleTemporaryRoots(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "temp-rust-worktree")
+	targetDir := filepath.Join(root, "target", "debug")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cargoToml := filepath.Join(root, "Cargo.toml")
+	if err := os.WriteFile(cargoToml, []byte("[package]\nname = \"temp-rust-worktree\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "artifact"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(cargoToml, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	result := p.Cleanup(context.Background(), LevelCritical, tempGeneratedArtifactConfig(tmpDir), logger)
+	if pathExists(filepath.Join(root, "target")) {
+		t.Fatal("expected generated Rust target inside stale temporary root to be removed")
+	}
+	if !pathExists(cargoToml) {
+		t.Fatal("temporary worktree source file should be preserved")
+	}
+	if result.BytesFreed <= 0 {
+		t.Fatalf("expected cleanup to report freed bytes, got %#v", result)
+	}
+}
+
+func tempGeneratedArtifactConfig(tmpDir string) *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DevArtifacts.ScanPaths = nil
+	cfg.DevArtifacts.TempScanPaths = []string{tmpDir}
+	cfg.DevArtifacts.TempArtifactMinMB = 1
+	cfg.DevArtifacts.TempArtifactStaleAfter = "6h"
+	cfg.DevArtifacts.NodeModules = false
+	cfg.DevArtifacts.PythonVenvs = false
+	cfg.DevArtifacts.RustTargets = true
+	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.GoBuildCache = false
+	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.LargeLocalArtifacts = false
+	cfg.DevArtifacts.LMStudioModels = false
+	return cfg
+}
+
 func TestTempArtifactRootsFromProcessOutput(t *testing.T) {
 	output := `
 bazel(workspace) bazel(workspace) --output_user_root=/tmp/crush-dots-bazel-output --output_base=/tmp/crush-dots-bazel-output/817/output

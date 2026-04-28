@@ -111,6 +111,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 				continue
 			}
 			p.planTemporaryArtifacts(expanded, tempMinBytes, tempStaleAfter, daCfg.ProtectPaths, activeTempRoots, &targets)
+			p.planTemporaryGeneratedArtifacts(expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets)
 		}
 	}
 	for _, scanPath := range daCfg.ScanPaths {
@@ -233,6 +234,23 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 	}
 
+	if daCfg.TempArtifacts {
+		activeTempRoots := activeTempArtifactRoots(ctx, daCfg.TempScanPaths, home)
+		tempMinBytes := tempArtifactMinBytes(daCfg)
+		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
+		for _, scanPath := range daCfg.TempScanPaths {
+			expanded := expandHome(scanPath, home)
+			if !pathExistsAndIsDir(expanded) {
+				continue
+			}
+			freed := p.cleanTemporaryGeneratedArtifacts(ctx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, daCfg, active, activeTempRoots, tracker, logger)
+			result.BytesFreed += freed
+			if freed > 0 {
+				result.ItemsCleaned++
+			}
+		}
+	}
+
 	// Go build cache (not path-dependent - it's a global cache)
 	if daCfg.GoBuildCache && !devArtifactFamilyActive(active, "go-build-cache") {
 		freed := p.cleanGoBuildCache(ctx, level, logger)
@@ -342,6 +360,74 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(scanPath string, minBytes in
 			continue
 		}
 		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), activeRoots[canonicalTempArtifactPath(path)]))
+	}
+}
+
+func (p *DevArtifactsPlugin) planTemporaryGeneratedArtifacts(scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active, activeRoots map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
+	p.forEachStaleTemporaryRoot(scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
+		if daCfg.NodeModules {
+			p.planNodeModules(root, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
+		}
+		if daCfg.PythonVenvs {
+			p.planPythonVenvs(root, venvAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
+		}
+		if daCfg.RustTargets {
+			p.planRustTargets(root, rustAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
+		}
+		if daCfg.ZigArtifacts {
+			p.planZigArtifacts(root, zigAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
+		}
+	})
+}
+
+func (p *DevArtifactsPlugin) cleanTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, daCfg config.DevArtifactsConfig, active, activeRoots map[string]string, tracker *devArtifactGitTracker, logger *slog.Logger) int64 {
+	var totalFreed int64
+	p.forEachStaleTemporaryRoot(scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
+		logger.Debug("scanning stale temporary root for generated artifacts", "path", root)
+		if daCfg.NodeModules && !devArtifactFamilyActive(active, "node_modules") {
+			totalFreed += p.cleanNodeModules(ctx, root, nodeAge, daCfg.ProtectPaths, tracker, logger)
+		}
+		if daCfg.PythonVenvs && !devArtifactFamilyActive(active, "python-venv") {
+			totalFreed += p.cleanPythonVenvs(ctx, root, venvAge, daCfg.ProtectPaths, tracker, logger)
+		}
+		if daCfg.RustTargets && !devArtifactFamilyActive(active, "rust-target") {
+			totalFreed += p.cleanRustTargets(ctx, root, rustAge, daCfg.ProtectPaths, tracker, logger)
+		}
+		if daCfg.ZigArtifacts && !devArtifactFamilyActive(active, "zig-artifact") {
+			totalFreed += p.cleanZigArtifacts(ctx, root, zigAge, daCfg.ProtectPaths, tracker, logger)
+		}
+	})
+	return totalFreed
+}
+
+func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, callback func(root string)) {
+	entries, err := os.ReadDir(scanPath)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		root := filepath.Join(scanPath, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if p.isProtected(root, protectPaths) {
+			continue
+		}
+		if activeRoots[canonicalTempArtifactPath(root)] != "" {
+			continue
+		}
+		if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+			continue
+		}
+		if minBytes > 0 && getDirAllocatedBytes(root) < minBytes {
+			continue
+		}
+		callback(root)
 	}
 }
 

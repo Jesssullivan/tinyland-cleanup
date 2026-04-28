@@ -78,6 +78,9 @@ All notable changes to this project will be documented in this file.
   server-only output bases, and aggressive/critical cleanup can stop stale idle
   servers before deleting their output bases when `allow_stop_idle_servers` is
   enabled.
+- Dev-artifact cleanup now scans stale inactive temporary roots for narrower
+  generated-output targets, allowing Rust `target/`, `node_modules`, Python
+  virtualenv, and Zig output pruning without deleting the top-level temp root.
 - Dev-artifacts dry-runs now surface large top-level temporary proof/output
   directories as protected review-only targets with active process path
   evidence.

@@ -183,9 +183,13 @@ from `Info.plist` when available; detached APFS sparsebundles may still reject
 `hdiutil compact`, so treat them as manual migrate/delete decisions rather than
 automatic reclaim. The plan also surfaces large top-level temporary
 proof/output directories from configured `dev_artifacts.temp_scan_paths`, but
-those targets are review-only and excluded from estimated reclaim; active
-process command lines that reference the temp root mark the target active and
-protected. The plan also protects matching artifact families when active
+those root targets are review-only and excluded from estimated reclaim. For
+stale inactive temporary roots, known generated subdirectories such as Rust
+`target/`, `node_modules`, Python virtualenvs, and Zig outputs can still appear
+as narrower reclaim candidates so cleanup can preserve the worktree or proof
+root while pruning rebuildable output. Active process command lines that
+reference the temp root mark the root active and suppress nested generated
+cleanup. The plan also protects matching artifact families when active
 package manager, compiler, language server, runtime, or LM Studio processes are
 visible, and it preserves any candidate artifact directory that contains files
 tracked by Git. Zig `.zig-cache` and `zig-out` targets are also preserved when
