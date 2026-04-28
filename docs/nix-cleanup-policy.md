@@ -25,6 +25,9 @@ The Nix plan includes:
 - visible GC roots when dry-run GC reports no reclaimable store space;
 - generation targets with `keep_generation`, `delete_generation`, or
   `review_privileged_generation` actions;
+- lock-free Home Manager generation targets discovered from
+  `~/.local/state/nix/profiles/home-manager-*-link`, reported as protected
+  `review_home_manager_generation` items when they fall outside policy;
 - configured minimum user and system generation retention;
 - whether critical `nix-store --optimize` is allowed.
 
@@ -60,6 +63,12 @@ Runtime behavior:
   enabled;
 - system or nix-darwin generations are reported for operator review but are not
   deleted by the unprivileged plugin path;
+- Home Manager generations are discovered from profile symlinks without taking a
+  `nix-env` profile lock; stale Home Manager generations are review-only until
+  an explicit profile deletion workflow is implemented;
+- user profile generations fall back to the same lock-free profile-link scan
+  when `nix-env --list-generations` is unavailable or cannot inspect the
+  profile;
 - low-reclaim dry-runs run `nix-store --gc --print-roots` and emit protected
   `nix_gc_root` targets so operators can see whether profiles, gcroots,
   workspace `result` links, temporary roots, or active processes are pinning the

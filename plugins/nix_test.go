@@ -1,6 +1,8 @@
 package plugins
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -198,6 +200,35 @@ func TestParseNixGenerations(t *testing.T) {
 	}
 }
 
+func TestDiscoverNixProfileLinkGenerations(t *testing.T) {
+	profileDir := t.TempDir()
+	for _, name := range []string{"home-manager-41-link", "home-manager-42-link"} {
+		if err := os.Symlink("/nix/store/"+name, filepath.Join(profileDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("home-manager-42-link", filepath.Join(profileDir, "home-manager")); err != nil {
+		t.Fatal(err)
+	}
+
+	generations, err := discoverNixProfileLinkGenerations(profileDir, "home-manager", "home-manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(generations) != 2 {
+		t.Fatalf("got %d generations, want 2: %+v", len(generations), generations)
+	}
+	if generations[0].Number != 41 || generations[0].Current {
+		t.Fatalf("unexpected first generation: %+v", generations[0])
+	}
+	if generations[1].Number != 42 || !generations[1].Current {
+		t.Fatalf("current Home Manager generation not detected: %+v", generations[1])
+	}
+	if generations[1].Scope != "home-manager" || generations[1].Profile != filepath.Join(profileDir, "home-manager-42-link") {
+		t.Fatalf("generation metadata not populated: %+v", generations[1])
+	}
+}
+
 func TestParseNixGCRoots(t *testing.T) {
 	output := `
 /proc/1234/fd/5 -> /nix/store/111-source
@@ -262,6 +293,35 @@ func TestNixGCRootTargetsAreProtectedAndLimited(t *testing.T) {
 	}
 	if !targets[0].Active {
 		t.Fatalf("process GC root should be marked active: %+v", targets[0])
+	}
+}
+
+func TestNixReviewOnlyGenerationTargetsProtectsSelectedGenerations(t *testing.T) {
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	generations := []nixGeneration{
+		{Number: 1, CreatedAt: now.Add(-30 * 24 * time.Hour), Scope: "home-manager"},
+		{Number: 2, CreatedAt: now.Add(-1 * 24 * time.Hour), Scope: "home-manager", Current: true},
+	}
+
+	targets := nixReviewOnlyGenerationTargets(
+		nixGenerationTargets(generations, now, 1, 7*24*time.Hour),
+		"review_home_manager_generation",
+		"outside retention policy, but Home Manager generation deletion requires an explicit profile workflow",
+		CleanupTierWarm,
+	)
+
+	actions := map[string]CleanupTarget{}
+	for _, target := range targets {
+		actions[target.Version] = target
+	}
+	if actions["1"].Action != "review_home_manager_generation" || !actions["1"].Protected {
+		t.Fatalf("old Home Manager generation should be review-only and protected: %+v", actions["1"])
+	}
+	if actions["1"].Tier != CleanupTierWarm || actions["1"].Reclaim != CleanupReclaimDeferred {
+		t.Fatalf("old Home Manager generation policy mismatch: %+v", actions["1"])
+	}
+	if actions["2"].Action != "keep_generation" || !actions["2"].Protected {
+		t.Fatalf("current Home Manager generation should remain kept: %+v", actions["2"])
 	}
 }
 

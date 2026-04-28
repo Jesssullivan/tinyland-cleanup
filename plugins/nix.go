@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -401,10 +402,6 @@ func (p *NixPlugin) deleteUserGenerationsByPolicy(ctx context.Context, level Cle
 func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLevel, cfg config.NixConfig, logger *slog.Logger) ([]CleanupTarget, []string) {
 	_ = logger
 
-	if _, err := exec.LookPath("nix-env"); err != nil {
-		return nil, []string{"nix-env is not available; generation retention targets could not be inspected"}
-	}
-
 	olderThan := parseNixPolicyDuration(nixGenerationPolicyAge(level, cfg), 0)
 	if olderThan <= 0 {
 		return nil, nil
@@ -413,28 +410,62 @@ func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLeve
 	var targets []CleanupTarget
 	var warnings []string
 
-	userGenerations, err := p.listGenerations(ctx, "user", "", cfg)
-	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("could not inspect user Nix generations: %v", err))
+	_, nixEnvErr := exec.LookPath("nix-env")
+	userGenerationsPlanned := false
+	if nixEnvErr != nil {
+		warnings = append(warnings, "nix-env is not available; falling back to lock-free profile link inspection where possible")
 	} else {
-		targets = append(targets, nixGenerationTargets(userGenerations, time.Now(), cfg.MinUserGenerations, olderThan)...)
+		userGenerations, err := p.listGenerations(ctx, "user", "", cfg)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("could not inspect user Nix generations with nix-env: %v", err))
+		} else {
+			targets = append(targets, nixGenerationTargets(userGenerations, time.Now(), cfg.MinUserGenerations, olderThan)...)
+			userGenerationsPlanned = true
+		}
 	}
 
-	systemProfile := "/nix/var/nix/profiles/system"
-	systemGenerations, err := p.listGenerations(ctx, "system", systemProfile, cfg)
-	if err != nil {
-		warnings = append(warnings, fmt.Sprintf("could not inspect system Nix generations: %v", err))
+	if home, err := os.UserHomeDir(); err != nil {
+		warnings = append(warnings, fmt.Sprintf("could not locate user home for lock-free Nix profile inspection: %v", err))
 	} else {
-		systemTargets := nixGenerationTargets(systemGenerations, time.Now(), cfg.MinSystemGenerations, olderThan)
-		for i := range systemTargets {
-			if systemTargets[i].Action == "delete_generation" {
-				systemTargets[i].Protected = true
-				systemTargets[i].Action = "review_privileged_generation"
-				systemTargets[i].Reason = "outside retention policy, but system generation deletion requires explicit privileged workflow"
-				annotateCleanupTargetPolicy(&systemTargets[i], CleanupTierPrivileged, CleanupReclaimDeferred)
+		stateProfilesDir := filepath.Join(home, ".local", "state", "nix", "profiles")
+		if !userGenerationsPlanned {
+			userLinkGenerations, err := discoverNixProfileLinkGenerations(stateProfilesDir, "profile", "user")
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("could not inspect user Nix profile links: %v", err))
+			} else if len(userLinkGenerations) > 0 {
+				targets = append(targets, nixGenerationTargets(userLinkGenerations, time.Now(), cfg.MinUserGenerations, olderThan)...)
+				warnings = append(warnings, "using lock-free user Nix profile link inspection after nix-env generation inspection was unavailable")
 			}
 		}
-		targets = append(targets, systemTargets...)
+
+		homeManagerGenerations, err := discoverNixProfileLinkGenerations(stateProfilesDir, "home-manager", "home-manager")
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("could not inspect Home Manager profile links: %v", err))
+		} else if len(homeManagerGenerations) > 0 {
+			homeManagerTargets := nixReviewOnlyGenerationTargets(
+				nixGenerationTargets(homeManagerGenerations, time.Now(), cfg.MinUserGenerations, olderThan),
+				"review_home_manager_generation",
+				"outside retention policy, but Home Manager generation deletion requires an explicit profile workflow",
+				CleanupTierWarm,
+			)
+			targets = append(targets, homeManagerTargets...)
+		}
+	}
+
+	if nixEnvErr == nil {
+		systemProfile := "/nix/var/nix/profiles/system"
+		systemGenerations, err := p.listGenerations(ctx, "system", systemProfile, cfg)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("could not inspect system Nix generations: %v", err))
+		} else {
+			systemTargets := nixReviewOnlyGenerationTargets(
+				nixGenerationTargets(systemGenerations, time.Now(), cfg.MinSystemGenerations, olderThan),
+				"review_privileged_generation",
+				"outside retention policy, but system generation deletion requires explicit privileged workflow",
+				CleanupTierPrivileged,
+			)
+			targets = append(targets, systemTargets...)
+		}
 	}
 
 	return targets, warnings
@@ -459,6 +490,55 @@ func (p *NixPlugin) listGenerations(ctx context.Context, scope, profile string, 
 	return parseNixGenerations(string(output), scope, profile)
 }
 
+func discoverNixProfileLinkGenerations(profileDir, profileName, scope string) ([]nixGeneration, error) {
+	entries, err := os.ReadDir(profileDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	currentLink := filepath.Join(profileDir, profileName)
+	currentTarget := ""
+	if target, err := os.Readlink(currentLink); err == nil {
+		currentTarget = filepath.Base(target)
+	}
+
+	pattern := regexp.MustCompile(`^` + regexp.QuoteMeta(profileName) + `-(\d+)-link$`)
+	var generations []nixGeneration
+	for _, entry := range entries {
+		matches := pattern.FindStringSubmatch(entry.Name())
+		if len(matches) != 2 {
+			continue
+		}
+
+		number, err := strconv.Atoi(matches[1])
+		if err != nil {
+			continue
+		}
+
+		path := filepath.Join(profileDir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+
+		generations = append(generations, nixGeneration{
+			Number:    number,
+			CreatedAt: info.ModTime(),
+			Current:   entry.Name() == currentTarget,
+			Scope:     scope,
+			Profile:   path,
+		})
+	}
+
+	sort.Slice(generations, func(i, j int) bool {
+		return generations[i].Number < generations[j].Number
+	})
+	return generations, nil
+}
+
 func (p *NixPlugin) activeNixProcesses(ctx context.Context) ([]string, error) {
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -469,6 +549,19 @@ func (p *NixPlugin) activeNixProcesses(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	return nixBusyProcessReasons(string(output)), nil
+}
+
+func nixReviewOnlyGenerationTargets(targets []CleanupTarget, action string, deleteReason string, tier string) []CleanupTarget {
+	for i := range targets {
+		if targets[i].Action != "delete_generation" {
+			continue
+		}
+		targets[i].Protected = true
+		targets[i].Action = action
+		targets[i].Reason = deleteReason
+		annotateCleanupTargetPolicy(&targets[i], tier, CleanupReclaimDeferred)
+	}
+	return targets
 }
 
 func nixActiveWorkTargets(reasons []string, backoff string) []CleanupTarget {
