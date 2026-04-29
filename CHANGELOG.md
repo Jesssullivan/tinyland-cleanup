@@ -84,6 +84,10 @@ All notable changes to this project will be documented in this file.
 - Darwin cache cleanup now treats the typed `darwin_dev_caches` plan as the
   real-cleanup authority when enabled, so `enforce: false` prevents legacy
   generic cache deletion paths from mutating developer machines.
+- Nix real cleanup now dry-run preflights garbage collection and skips the
+  actual GC command when there are zero reclaimable store paths and no user
+  generation deletion happened, or fails closed when that preflight fails,
+  avoiding pointless store-lock contention and unsafe fallback GC.
 - Dev-artifacts dry-runs now surface large top-level temporary proof/output
   directories as protected review-only targets with active process path
   evidence.

@@ -201,13 +201,31 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		}
 	}
 
+	generationsDeleted := 0
 	if level >= LevelModerate {
 		generationResult := p.deleteUserGenerationsByPolicy(ctx, level, cfg.Nix, logger)
 		result.ItemsCleaned += generationResult.ItemsCleaned
+		generationsDeleted = generationResult.ItemsCleaned
 		if generationResult.Error != nil {
 			result.Error = generationResult.Error
 			return result
 		}
+	}
+
+	dryRunOutput, dryRunErr := p.collectGarbageDryRun(ctx, cfg.Nix)
+	if dryRunErr != nil {
+		if reason, ok := nixContentionReason(dryRunOutput); ok && cfg.Nix.SkipWhenDaemonBusy {
+			logger.Warn("skipping Nix garbage collection because dry-run preflight reported store contention", "reason", reason)
+			return result
+		}
+		logger.Warn("skipping Nix garbage collection because dry-run preflight failed",
+			"error", dryRunErr,
+			"output", strings.TrimSpace(dryRunOutput))
+		result.Error = fmt.Errorf("nix garbage collection preflight failed: %w", dryRunErr)
+		return result
+	} else if p.nixDryRunHasNoGCWork(dryRunOutput) && generationsDeleted == 0 && !(level == LevelCritical && cfg.Nix.AllowStoreOptimize) {
+		logger.Info("skipping Nix garbage collection because dry-run reported no reclaimable store paths")
+		return result
 	}
 
 	switch level {
@@ -1070,6 +1088,10 @@ func (p *NixPlugin) parseDryRunStorePaths(output string) int {
 		}
 	}
 	return p.parseDeletedPaths(output)
+}
+
+func (p *NixPlugin) nixDryRunHasNoGCWork(output string) bool {
+	return strings.TrimSpace(output) != "" && p.parseDryRunFreedSpace(output) == 0 && p.parseDryRunStorePaths(output) == 0
 }
 
 func (p *NixPlugin) parseFreedSpace(output string) int64 {

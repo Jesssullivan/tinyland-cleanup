@@ -1,6 +1,9 @@
 package plugins
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +54,72 @@ func TestNixPluginParseDryRunStorePaths(t *testing.T) {
 		if got := p.parseDryRunStorePaths(tt.output); got != tt.expected {
 			t.Fatalf("parseDryRunStorePaths(%q) = %d, want %d", tt.output, got, tt.expected)
 		}
+	}
+}
+
+func TestNixDryRunHasNoGCWork(t *testing.T) {
+	p := NewNixPlugin()
+
+	tests := []struct {
+		name     string
+		output   string
+		expected bool
+	}{
+		{"zero store paths", "0 store paths deleted, 0 B freed", true},
+		{"would delete nothing", "would delete 0 store paths\nwould free 0 B", true},
+		{"empty output", "", false},
+		{"store paths available", "would delete 2 store paths\nwould free 4.0 MiB", false},
+		{"bytes available", "1.0 GiB would be freed", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.nixDryRunHasNoGCWork(tt.output); got != tt.expected {
+				t.Fatalf("nixDryRunHasNoGCWork(%q) = %t, want %t", tt.output, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestNixCleanupFailsClosedWhenDryRunPreflightFails(t *testing.T) {
+	binDir := t.TempDir()
+	callsPath := filepath.Join(t.TempDir(), "nix-gc-calls")
+	fakeGC := filepath.Join(binDir, "nix-collect-garbage")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$NIX_GC_CALLS"
+if [ "$1" = "--dry-run" ]; then
+  printf '%s\n' "error: dry-run preflight failed" >&2
+  exit 1
+fi
+printf '%s\n' "mutating GC should not run" >&2
+exit 0
+`
+	if err := os.WriteFile(fakeGC, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("NIX_GC_CALLS", callsPath)
+
+	cfg := config.DefaultConfig()
+	cfg.Nix.SkipWhenDaemonBusy = false
+
+	p := NewNixPlugin()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := p.Cleanup(context.Background(), LevelWarning, cfg, logger)
+	if result.Error == nil || !strings.Contains(result.Error.Error(), "preflight failed") {
+		t.Fatalf("expected dry-run preflight failure, got %+v", result)
+	}
+	if result.ItemsCleaned != 0 || result.BytesFreed != 0 || result.CommandBytesFreed != 0 {
+		t.Fatalf("failed preflight should not report cleanup: %+v", result)
+	}
+
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(calls), "--dry-run\n"; got != want {
+		t.Fatalf("unexpected nix-collect-garbage calls %q, want %q", got, want)
 	}
 }
 

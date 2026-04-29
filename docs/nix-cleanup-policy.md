@@ -61,6 +61,12 @@ Runtime behavior:
 - real generation deletion and GC commands also treat those contention
   signatures as deferred no-op cleanup steps when `skip_when_daemon_busy` is
   enabled;
+- real cleanup runs a dry-run GC preflight before mutation and skips the actual
+  GC command when the preflight reports zero reclaimable store paths and no
+  user generation deletion happened in the same cycle;
+- real cleanup fails closed when the dry-run GC preflight itself fails for an
+  unknown reason, so the plugin does not fall through into a mutating GC command
+  without a successful preflight;
 - system or nix-darwin generations are reported for operator review but are not
   deleted by the unprivileged plugin path;
 - Home Manager generations are discovered from profile symlinks without taking a
