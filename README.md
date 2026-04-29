@@ -81,7 +81,9 @@ tinyland-cleanup --once --dry-run --level critical --plugins dev-artifacts --out
 
 Large top-level temp roots remain review-only, but stale inactive roots may
 also expose narrower generated-output targets such as Rust `target/`
-directories for safe pruning without deleting the worktree.
+directories for safe pruning without deleting the worktree. If scan budgets are
+hit, dry-run output marks the evidence partial with `scan_budget_exhausted` and
+lists `scan_truncated_paths`.
 
 For a one-off run, override the configured maximum used-space target without
 editing the config file:

@@ -950,6 +950,91 @@ func TestFindArtifactDirsHonorsCanceledContext(t *testing.T) {
 	})
 }
 
+func TestPlanCleanupReportsDevArtifactScanBudgetExhaustion(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	p.activeProcesses = func(context.Context) (map[string]string, error) {
+		return nil, nil
+	}
+	tmpDir := t.TempDir()
+	project := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(filepath.Join(project, "node_modules", "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "package.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "node_modules", "pkg", "index.js"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := budgetedDevArtifactConfig(tmpDir)
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, slog.Default())
+
+	if plan.Metadata["scan_budget_exhausted"] != "true" {
+		t.Fatalf("expected exhausted scan budget metadata, got %#v", plan.Metadata)
+	}
+	if !strings.Contains(plan.Metadata["scan_truncated_paths"], project) {
+		t.Fatalf("expected truncated path metadata to include %q, got %q", project, plan.Metadata["scan_truncated_paths"])
+	}
+	if len(plan.Warnings) == 0 {
+		t.Fatal("expected scan budget warning")
+	}
+	if len(plan.Targets) != 0 {
+		t.Fatalf("budgeted scan should not report candidates from incomplete evidence, got %#v", plan.Targets)
+	}
+}
+
+func TestCleanupDoesNotDeleteAfterDevArtifactScanBudgetExhaustion(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	p.activeProcesses = func(context.Context) (map[string]string, error) {
+		return nil, nil
+	}
+	tmpDir := t.TempDir()
+	project := filepath.Join(tmpDir, "project")
+	nodeModules := filepath.Join(project, "node_modules")
+	if err := os.MkdirAll(filepath.Join(nodeModules, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	packageJSON := filepath.Join(project, "package.json")
+	if err := os.WriteFile(packageJSON, []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nodeModules, "pkg", "index.js"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	if err := os.Chtimes(packageJSON, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	result := p.Cleanup(context.Background(), LevelCritical, budgetedDevArtifactConfig(tmpDir), logger)
+
+	if !pathExists(nodeModules) {
+		t.Fatal("node_modules should be preserved when scan budget is exhausted before complete evidence")
+	}
+	if result.BytesFreed != 0 || result.ItemsCleaned != 0 {
+		t.Fatalf("budgeted cleanup should not report mutation, got %#v", result)
+	}
+}
+
+func budgetedDevArtifactConfig(scanPath string) *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DevArtifacts.ScanPaths = []string{scanPath}
+	cfg.DevArtifacts.ScanMaxDuration = "30s"
+	cfg.DevArtifacts.ScanMaxEntries = 1
+	cfg.DevArtifacts.TempArtifacts = false
+	cfg.DevArtifacts.NodeModules = true
+	cfg.DevArtifacts.PythonVenvs = false
+	cfg.DevArtifacts.RustTargets = false
+	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.GoBuildCache = false
+	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.LargeLocalArtifacts = false
+	cfg.DevArtifacts.LMStudioModels = false
+	return cfg
+}
+
 func TestTempArtifactRootsFromProcessOutput(t *testing.T) {
 	output := `
 bazel(workspace) bazel(workspace) --output_user_root=/tmp/crush-dots-bazel-output --output_base=/tmp/crush-dots-bazel-output/817/output

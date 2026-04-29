@@ -195,7 +195,11 @@ package manager, compiler, language server, runtime, or LM Studio processes are
 visible, and it preserves any candidate artifact directory that contains files
 tracked by Git. Zig `.zig-cache` and `zig-out` targets are also preserved when
 they contain files modified within the recent-output grace window, even at
-critical pressure.
+critical pressure. Dev-artifact filesystem walking is bounded by
+`dev_artifacts.scan_max_duration`, `dev_artifacts.scan_max_entries`, and
+`dev_artifacts.temp_scan_max_roots`; when a budget is hit, dry-run metadata sets
+`scan_budget_exhausted: true`, reports `scan_truncated_paths`, and treats the
+omitted evidence as non-actionable.
 
 For Docker, the plan reports Docker daemon disk-usage rows from `docker system
 df`, including images, stopped containers, local volumes, and build cache when

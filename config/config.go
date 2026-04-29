@@ -246,10 +246,16 @@ type ICloudConfig struct {
 type DevArtifactsConfig struct {
 	// ScanPaths is the list of directories to scan for dev artifacts
 	ScanPaths []string `yaml:"scan_paths"`
+	// ScanMaxDuration bounds filesystem walking for incident dry-runs
+	ScanMaxDuration string `yaml:"scan_max_duration"`
+	// ScanMaxEntries bounds recursive filesystem entries visited per dev-artifact scan
+	ScanMaxEntries int `yaml:"scan_max_entries"`
 	// TempArtifacts enables review-only reporting for large top-level temp artifacts
 	TempArtifacts bool `yaml:"temp_artifacts"`
 	// TempScanPaths are top-level temporary directories scanned for large generated artifacts
 	TempScanPaths []string `yaml:"temp_scan_paths"`
+	// TempScanMaxRoots bounds top-level temp roots inspected per temp scan path
+	TempScanMaxRoots int `yaml:"temp_scan_max_roots"`
 	// TempArtifactMinMB is the minimum physical size for review-only temporary artifact targets
 	TempArtifactMinMB int `yaml:"temp_artifact_min_mb"`
 	// TempArtifactStaleAfter is the age after which temp artifacts become review candidates
@@ -435,8 +441,11 @@ func DefaultConfig() *Config {
 		},
 		DevArtifacts: DevArtifactsConfig{
 			ScanPaths:               defaultScanPaths,
+			ScanMaxDuration:         "30s",
+			ScanMaxEntries:          250000,
 			TempArtifacts:           true,
 			TempScanPaths:           defaultTempScanPaths,
+			TempScanMaxRoots:        128,
 			TempArtifactMinMB:       256,
 			TempArtifactStaleAfter:  "6h",
 			NodeModules:             true,

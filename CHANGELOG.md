@@ -94,6 +94,9 @@ All notable changes to this project will be documented in this file.
 - Dev-artifacts dry-runs now surface large top-level temporary proof/output
   directories as protected review-only targets with active process path
   evidence.
+- Dev-artifacts planning now has explicit scan budgets for duration, recursive
+  entry count, and top-level temporary roots, with dry-run warnings and metadata
+  when evidence is partial.
 
 ### Changed
 

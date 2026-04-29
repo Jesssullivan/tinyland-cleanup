@@ -192,6 +192,15 @@ func TestDevArtifactsConfigDefaults(t *testing.T) {
 	if cfg.DevArtifacts.LargeLocalArtifactMinMB <= 0 {
 		t.Error("DevArtifacts.LargeLocalArtifactMinMB should be positive by default")
 	}
+	if cfg.DevArtifacts.ScanMaxDuration != "30s" {
+		t.Errorf("DevArtifacts.ScanMaxDuration should default to 30s, got %q", cfg.DevArtifacts.ScanMaxDuration)
+	}
+	if cfg.DevArtifacts.ScanMaxEntries != 250000 {
+		t.Errorf("DevArtifacts.ScanMaxEntries should default to 250000, got %d", cfg.DevArtifacts.ScanMaxEntries)
+	}
+	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
+		t.Errorf("DevArtifacts.TempScanMaxRoots should default to 128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
+	}
 }
 
 func TestAPFSConfigDefaults(t *testing.T) {
@@ -339,6 +348,9 @@ func TestDevArtifactPolicyDefaults(t *testing.T) {
 	if cfg.DevArtifacts.TempArtifactStaleAfter != "6h" {
 		t.Errorf("DevArtifacts.TempArtifactStaleAfter should default to 6h, got %q", cfg.DevArtifacts.TempArtifactStaleAfter)
 	}
+	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
+		t.Errorf("DevArtifacts.TempScanMaxRoots should default to 128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
+	}
 }
 
 func TestDarwinDevCacheDefaults(t *testing.T) {
@@ -402,9 +414,12 @@ dev_artifacts:
   scan_paths:
     - ~/git
     - ~/src
+  scan_max_duration: 5s
+  scan_max_entries: 42
   temp_artifacts: false
   temp_scan_paths:
     - /tmp/tinyland-cleanup
+  temp_scan_max_roots: 3
   temp_artifact_min_mb: 128
   temp_artifact_stale_after: 2h
   node_modules: true
@@ -513,6 +528,15 @@ darwin_dev_caches:
 	}
 	if cfg.DevArtifacts.TempArtifactStaleAfter != "2h" {
 		t.Errorf("DevArtifacts.TempArtifactStaleAfter should be 2h per config, got %q", cfg.DevArtifacts.TempArtifactStaleAfter)
+	}
+	if cfg.DevArtifacts.ScanMaxDuration != "5s" {
+		t.Errorf("DevArtifacts.ScanMaxDuration should be 5s per config, got %q", cfg.DevArtifacts.ScanMaxDuration)
+	}
+	if cfg.DevArtifacts.ScanMaxEntries != 42 {
+		t.Errorf("DevArtifacts.ScanMaxEntries should be 42 per config, got %d", cfg.DevArtifacts.ScanMaxEntries)
+	}
+	if cfg.DevArtifacts.TempScanMaxRoots != 3 {
+		t.Errorf("DevArtifacts.TempScanMaxRoots should be 3 per config, got %d", cfg.DevArtifacts.TempScanMaxRoots)
 	}
 	if cfg.DevArtifacts.RustTargets {
 		t.Error("DevArtifacts.RustTargets should be false per config")
