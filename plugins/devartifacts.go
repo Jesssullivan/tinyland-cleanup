@@ -110,8 +110,8 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			if !pathExistsAndIsDir(expanded) {
 				continue
 			}
-			p.planTemporaryArtifacts(expanded, tempMinBytes, tempStaleAfter, daCfg.ProtectPaths, activeTempRoots, &targets)
-			p.planTemporaryGeneratedArtifacts(expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets)
+			p.planTemporaryArtifacts(ctx, expanded, tempMinBytes, tempStaleAfter, daCfg.ProtectPaths, activeTempRoots, &targets)
+			p.planTemporaryGeneratedArtifacts(ctx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets)
 		}
 	}
 	for _, scanPath := range daCfg.ScanPaths {
@@ -120,19 +120,19 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			continue
 		}
 		if daCfg.NodeModules {
-			p.planNodeModules(expanded, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
+			p.planNodeModules(ctx, expanded, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.PythonVenvs {
-			p.planPythonVenvs(expanded, venvAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
+			p.planPythonVenvs(ctx, expanded, venvAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.RustTargets {
-			p.planRustTargets(expanded, rustAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
+			p.planRustTargets(ctx, expanded, rustAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.ZigArtifacts {
-			p.planZigArtifacts(expanded, zigAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
+			p.planZigArtifacts(ctx, expanded, zigAge, mutates, daCfg.ProtectPaths, active, tracker, &targets)
 		}
 		if daCfg.LargeLocalArtifacts {
-			p.planLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, mountedImages, &targets)
+			p.planLargeLocalArtifacts(ctx, expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, mountedImages, &targets)
 		}
 	}
 
@@ -140,10 +140,10 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		p.planGoBuildCache(ctx, level, active, &targets)
 	}
 	if daCfg.HaskellCache {
-		p.planHaskellCaches(home, level, active, &targets)
+		p.planHaskellCaches(ctx, home, level, active, &targets)
 	}
 	if daCfg.LMStudioModels {
-		p.planLMStudioModels(home, level, active, &targets)
+		p.planLMStudioModels(ctx, home, level, active, &targets)
 	}
 
 	sort.Slice(targets, func(i, j int) bool {
@@ -294,59 +294,62 @@ func devArtifactThresholds(level CleanupLevel) (nodeAge, venvAge, rustAge, zigAg
 	}
 }
 
-func (p *DevArtifactsPlugin) planNodeModules(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
-	p.findArtifactDirs(scanPath, "node_modules", "package.json", func(dir string, size int64) {
+func (p *DevArtifactsPlugin) planNodeModules(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
+	p.findArtifactDirs(ctx, scanPath, "node_modules", "package.json", func(dir string, size int64) {
 		marker := filepath.Join(filepath.Dir(dir), "package.json")
 		stale := maxAge == 0 || p.isFileStale(marker, maxAge)
 		*targets = append(*targets, p.devArtifactTarget("node_modules", "node_modules", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", tracker.ContainsTrackedFiles(dir), "package.json", maxAge, active))
 	})
 }
 
-func (p *DevArtifactsPlugin) planPythonVenvs(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planPythonVenvs(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
 	markers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
-	p.findArtifactDirs(scanPath, ".venv", "", func(dir string, size int64) {
+	p.findArtifactDirs(ctx, scanPath, ".venv", "", func(dir string, size int64) {
 		stale := maxAge == 0 || p.pythonProjectStale(filepath.Dir(dir), markers, maxAge)
 		*targets = append(*targets, p.devArtifactTarget("python-venv", ".venv", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", tracker.ContainsTrackedFiles(dir), strings.Join(markers, ", "), maxAge, active))
 	})
 }
 
-func (p *DevArtifactsPlugin) planRustTargets(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
-	p.findArtifactDirs(scanPath, "target", "Cargo.toml", func(dir string, size int64) {
+func (p *DevArtifactsPlugin) planRustTargets(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
+	p.findArtifactDirs(ctx, scanPath, "target", "Cargo.toml", func(dir string, size int64) {
 		marker := filepath.Join(filepath.Dir(dir), "Cargo.toml")
 		stale := maxAge == 0 || p.isFileStale(marker, maxAge)
 		*targets = append(*targets, p.devArtifactTarget("rust-target", "target", dir, size, stale, mutates, p.isProtected(dir, protectPaths), "", tracker.ContainsTrackedFiles(dir), "Cargo.toml", maxAge, active))
 	})
 }
 
-func (p *DevArtifactsPlugin) planZigArtifacts(scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planZigArtifacts(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
 	for _, artifactName := range []string{".zig-cache", "zig-out"} {
-		p.findArtifactDirs(scanPath, artifactName, "build.zig", func(dir string, size int64) {
+		p.findArtifactDirs(ctx, scanPath, artifactName, "build.zig", func(dir string, size int64) {
 			marker := filepath.Join(filepath.Dir(dir), "build.zig")
 			stale := maxAge == 0 || p.isFileStale(marker, maxAge)
 			protected := p.isProtected(dir, protectPaths)
 			tracked := tracker.ContainsTrackedFiles(dir)
 			recentReason := ""
 			if !protected && !tracked {
-				recentReason = devArtifactRecentOutputProtectReason(dir)
+				recentReason = devArtifactRecentOutputProtectReasonContext(ctx, dir)
 			}
 			*targets = append(*targets, p.devArtifactTarget("zig-artifact", artifactName, dir, size, stale, mutates, protected || recentReason != "", recentReason, tracked, "build.zig", maxAge, active))
 		})
 	}
 }
 
-func (p *DevArtifactsPlugin) planLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, targets *[]CleanupTarget) {
-	p.findLargeLocalArtifacts(scanPath, minBytes, protectPaths, mountedImages, func(target CleanupTarget) {
+func (p *DevArtifactsPlugin) planLargeLocalArtifacts(ctx context.Context, scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, targets *[]CleanupTarget) {
+	p.findLargeLocalArtifacts(ctx, scanPath, minBytes, protectPaths, mountedImages, func(target CleanupTarget) {
 		*targets = append(*targets, target)
 	})
 }
 
-func (p *DevArtifactsPlugin) planTemporaryArtifacts(scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, targets *[]CleanupTarget) {
 	entries, err := os.ReadDir(scanPath)
 	if err != nil {
 		return
 	}
 	now := time.Now()
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
 		if !entry.IsDir() {
 			continue
 		}
@@ -355,34 +358,42 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(scanPath string, minBytes in
 		if err != nil {
 			continue
 		}
-		size := getDirAllocatedBytes(path)
+		activeReason := activeRoots[canonicalTempArtifactPath(path)]
+		if activeReason != "" {
+			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), activeReason))
+			continue
+		}
+		size, err := getDirAllocatedBytesContext(ctx, path)
+		if err != nil {
+			return
+		}
 		if size < minBytes {
 			continue
 		}
-		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), activeRoots[canonicalTempArtifactPath(path)]))
+		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), ""))
 	}
 }
 
-func (p *DevArtifactsPlugin) planTemporaryGeneratedArtifacts(scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active, activeRoots map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
-	p.forEachStaleTemporaryRoot(scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
+func (p *DevArtifactsPlugin) planTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active, activeRoots map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget) {
+	p.forEachStaleTemporaryRoot(ctx, scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
 		if daCfg.NodeModules {
-			p.planNodeModules(root, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
+			p.planNodeModules(ctx, root, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
 		}
 		if daCfg.PythonVenvs {
-			p.planPythonVenvs(root, venvAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
+			p.planPythonVenvs(ctx, root, venvAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
 		}
 		if daCfg.RustTargets {
-			p.planRustTargets(root, rustAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
+			p.planRustTargets(ctx, root, rustAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
 		}
 		if daCfg.ZigArtifacts {
-			p.planZigArtifacts(root, zigAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
+			p.planZigArtifacts(ctx, root, zigAge, mutates, daCfg.ProtectPaths, active, tracker, targets)
 		}
 	})
 }
 
 func (p *DevArtifactsPlugin) cleanTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, daCfg config.DevArtifactsConfig, active, activeRoots map[string]string, tracker *devArtifactGitTracker, logger *slog.Logger) int64 {
 	var totalFreed int64
-	p.forEachStaleTemporaryRoot(scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
+	p.forEachStaleTemporaryRoot(ctx, scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
 		logger.Debug("scanning stale temporary root for generated artifacts", "path", root)
 		if daCfg.NodeModules && !devArtifactFamilyActive(active, "node_modules") {
 			totalFreed += p.cleanNodeModules(ctx, root, nodeAge, daCfg.ProtectPaths, tracker, logger)
@@ -400,13 +411,16 @@ func (p *DevArtifactsPlugin) cleanTemporaryGeneratedArtifacts(ctx context.Contex
 	return totalFreed
 }
 
-func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, callback func(root string)) {
+func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, callback func(root string)) {
 	entries, err := os.ReadDir(scanPath)
 	if err != nil {
 		return
 	}
 	now := time.Now()
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
 		if !entry.IsDir() {
 			continue
 		}
@@ -424,8 +438,14 @@ func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(scanPath string, minBytes
 		if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
 			continue
 		}
-		if minBytes > 0 && getDirAllocatedBytes(root) < minBytes {
-			continue
+		if minBytes > 0 {
+			size, err := getDirAllocatedBytesContext(ctx, root)
+			if err != nil {
+				return
+			}
+			if size < minBytes {
+				continue
+			}
 		}
 		callback(root)
 	}
@@ -468,12 +488,15 @@ func tempArtifactMinBytes(cfg config.DevArtifactsConfig) int64 {
 	return int64(cfg.TempArtifactMinMB) * 1024 * 1024
 }
 
-func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, callback func(CleanupTarget)) {
+func (p *DevArtifactsPlugin) findLargeLocalArtifacts(ctx context.Context, scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, callback func(CleanupTarget)) {
 	scanDepth := strings.Count(scanPath, string(os.PathSeparator))
 	fileKinds := largeLocalArtifactFileKinds()
 	dirKinds := largeLocalArtifactDirKinds()
 
 	filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -494,7 +517,10 @@ func (p *DevArtifactsPlugin) findLargeLocalArtifacts(scanPath string, minBytes i
 			}
 			ext := filepath.Ext(lowerBase)
 			if kind, ok := dirKinds[ext]; ok {
-				size := getDirAllocatedBytes(path)
+				size, err := getDirAllocatedBytesContext(ctx, path)
+				if err != nil {
+					return err
+				}
 				if size >= minBytes {
 					callback(p.largeLocalArtifactTarget(kind, path, size, largeLocalArtifactDirLogicalBytes(ext, path), p.isProtected(path, protectPaths), mountedImages[filepath.Clean(path)]))
 				}
@@ -766,7 +792,10 @@ func (p *DevArtifactsPlugin) planGoBuildCache(ctx context.Context, level Cleanup
 	if dir == "" || !pathExistsAndIsDir(dir) {
 		return
 	}
-	size := getDirAllocatedBytes(dir)
+	size, err := getDirAllocatedBytesContext(ctx, dir)
+	if err != nil {
+		return
+	}
 	if size == 0 {
 		return
 	}
@@ -802,14 +831,18 @@ func (p *DevArtifactsPlugin) planGoBuildCache(ctx context.Context, level Cleanup
 	*targets = append(*targets, target)
 }
 
-func (p *DevArtifactsPlugin) planHaskellCaches(home string, level CleanupLevel, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planHaskellCaches(ctx context.Context, home string, level CleanupLevel, active map[string]string, targets *[]CleanupTarget) {
 	ghcupCache := filepath.Join(home, ".ghcup", "cache")
 	if pathExistsAndIsDir(ghcupCache) {
+		bytes, err := getDirAllocatedBytesContext(ctx, ghcupCache)
+		if err != nil {
+			return
+		}
 		target := CleanupTarget{
 			Type:  "haskell-ghcup-cache",
 			Name:  ".ghcup/cache",
 			Path:  ghcupCache,
-			Bytes: getDirAllocatedBytes(ghcupCache),
+			Bytes: bytes,
 		}
 		if activeReason, ok := active["haskell-cache"]; ok {
 			target.Action = "protect"
@@ -830,11 +863,15 @@ func (p *DevArtifactsPlugin) planHaskellCaches(home string, level CleanupLevel, 
 
 	cabalStore := filepath.Join(home, ".cabal", "store")
 	if pathExistsAndIsDir(cabalStore) {
+		bytes, err := getDirAllocatedBytesContext(ctx, cabalStore)
+		if err != nil {
+			return
+		}
 		target := CleanupTarget{
 			Type:  "haskell-cabal-store",
 			Name:  ".cabal/store",
 			Path:  cabalStore,
-			Bytes: getDirAllocatedBytes(cabalStore),
+			Bytes: bytes,
 		}
 		if activeReason, ok := active["haskell-cache"]; ok {
 			target.Action = "protect"
@@ -858,16 +895,20 @@ func (p *DevArtifactsPlugin) planHaskellCaches(home string, level CleanupLevel, 
 	}
 }
 
-func (p *DevArtifactsPlugin) planLMStudioModels(home string, level CleanupLevel, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planLMStudioModels(ctx context.Context, home string, level CleanupLevel, active map[string]string, targets *[]CleanupTarget) {
 	dir := filepath.Join(home, ".lmstudio", "models")
 	if !pathExistsAndIsDir(dir) {
+		return
+	}
+	bytes, err := getDirAllocatedBytesContext(ctx, dir)
+	if err != nil {
 		return
 	}
 	target := CleanupTarget{
 		Type:  "lmstudio-models",
 		Name:  ".lmstudio/models",
 		Path:  dir,
-		Bytes: getDirAllocatedBytes(dir),
+		Bytes: bytes,
 	}
 	if activeReason, ok := active["lmstudio-models"]; ok {
 		target.Action = "protect"
@@ -1179,15 +1220,22 @@ func devArtifactTrackedFilesContain(files []string, rel string) bool {
 var errRecentDevArtifactContent = errors.New("recent dev artifact content")
 
 func devArtifactRecentOutputProtectReason(path string) string {
-	if !devArtifactHasRecentContent(path, devArtifactRecentOutputGrace) {
+	return devArtifactRecentOutputProtectReasonContext(context.Background(), path)
+}
+
+func devArtifactRecentOutputProtectReasonContext(ctx context.Context, path string) string {
+	if !devArtifactHasRecentContent(ctx, path, devArtifactRecentOutputGrace) {
 		return ""
 	}
 	return fmt.Sprintf("artifact directory contains files modified within recent output grace %s", formatDevArtifactAge(devArtifactRecentOutputGrace))
 }
 
-func devArtifactHasRecentContent(path string, grace time.Duration) bool {
+func devArtifactHasRecentContent(ctx context.Context, path string, grace time.Duration) bool {
 	cutoff := time.Now().Add(-grace)
 	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -1212,21 +1260,21 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 
 		// Find and report node_modules
 		if daCfg.NodeModules {
-			p.findArtifactDirs(expanded, "node_modules", "package.json", func(dir string, size int64) {
+			p.findArtifactDirs(ctx, expanded, "node_modules", "package.json", func(dir string, size int64) {
 				logger.Info("found node_modules", "path", dir, "size_mb", size/(1024*1024))
 			})
 		}
 
 		// Find and report .venv
 		if daCfg.PythonVenvs {
-			p.findArtifactDirs(expanded, ".venv", "", func(dir string, size int64) {
+			p.findArtifactDirs(ctx, expanded, ".venv", "", func(dir string, size int64) {
 				logger.Info("found .venv", "path", dir, "size_mb", size/(1024*1024))
 			})
 		}
 
 		// Find and report target/
 		if daCfg.RustTargets {
-			p.findArtifactDirs(expanded, "target", "Cargo.toml", func(dir string, size int64) {
+			p.findArtifactDirs(ctx, expanded, "target", "Cargo.toml", func(dir string, size int64) {
 				logger.Info("found Rust target", "path", dir, "size_mb", size/(1024*1024))
 			})
 		}
@@ -1234,7 +1282,7 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 		// Find and report Zig artifacts
 		if daCfg.ZigArtifacts {
 			for _, artifactName := range []string{".zig-cache", "zig-out"} {
-				p.findArtifactDirs(expanded, artifactName, "build.zig", func(dir string, size int64) {
+				p.findArtifactDirs(ctx, expanded, artifactName, "build.zig", func(dir string, size int64) {
 					logger.Info("found Zig artifact", "path", dir, "size_mb", size/(1024*1024))
 				})
 			}
@@ -1242,7 +1290,7 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 
 		// Find and report large local artifacts for manual review.
 		if daCfg.LargeLocalArtifacts {
-			p.findLargeLocalArtifacts(expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, nil, func(target CleanupTarget) {
+			p.findLargeLocalArtifacts(ctx, expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, nil, func(target CleanupTarget) {
 				logger.Info("found large local artifact", "path", target.Path, "size_mb", target.Bytes/(1024*1024), "type", target.Name)
 			})
 		}
@@ -1252,7 +1300,7 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 	if daCfg.GoBuildCache {
 		goCacheDir := p.getGoCacheDir(ctx)
 		if goCacheDir != "" {
-			size := getDirSize(goCacheDir)
+			size, _ := getDirSizeContext(ctx, goCacheDir)
 			if size > 0 {
 				logger.Info("found Go build cache", "path", goCacheDir, "size_mb", size/(1024*1024))
 			}
@@ -1263,10 +1311,10 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 	if daCfg.HaskellCache {
 		ghcupCache := filepath.Join(home, ".ghcup", "cache")
 		cabalStore := filepath.Join(home, ".cabal", "store")
-		if size := getDirSize(ghcupCache); size > 0 {
+		if size, _ := getDirSizeContext(ctx, ghcupCache); size > 0 {
 			logger.Info("found .ghcup/cache", "size_mb", size/(1024*1024))
 		}
-		if size := getDirSize(cabalStore); size > 0 {
+		if size, _ := getDirSizeContext(ctx, cabalStore); size > 0 {
 			logger.Info("found .cabal/store", "size_mb", size/(1024*1024))
 		}
 	}
@@ -1274,7 +1322,7 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 	// Report LM Studio models
 	if daCfg.LMStudioModels {
 		lmStudioDir := filepath.Join(home, ".lmstudio", "models")
-		if size := getDirSize(lmStudioDir); size > 0 {
+		if size, _ := getDirSizeContext(ctx, lmStudioDir); size > 0 {
 			logger.Info("found .lmstudio/models", "size_mb", size/(1024*1024))
 		}
 	}
@@ -1286,7 +1334,7 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger) int64 {
 	var totalFreed int64
 
-	p.findArtifactDirs(scanPath, "node_modules", "package.json", func(dir string, size int64) {
+	p.findArtifactDirs(ctx, scanPath, "node_modules", "package.json", func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
@@ -1323,7 +1371,7 @@ func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath stri
 	var totalFreed int64
 	pythonMarkers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
 
-	p.findArtifactDirs(scanPath, ".venv", "", func(dir string, size int64) {
+	p.findArtifactDirs(ctx, scanPath, ".venv", "", func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
@@ -1383,7 +1431,7 @@ func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath stri
 func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger) int64 {
 	var totalFreed int64
 
-	p.findArtifactDirs(scanPath, "target", "Cargo.toml", func(dir string, size int64) {
+	p.findArtifactDirs(ctx, scanPath, "target", "Cargo.toml", func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
@@ -1418,7 +1466,7 @@ func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath str
 	var totalFreed int64
 
 	for _, artifactName := range []string{".zig-cache", "zig-out"} {
-		p.findArtifactDirs(scanPath, artifactName, "build.zig", func(dir string, size int64) {
+		p.findArtifactDirs(ctx, scanPath, artifactName, "build.zig", func(dir string, size int64) {
 			if p.isProtected(dir, protectPaths) {
 				return
 			}
@@ -1426,7 +1474,7 @@ func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath str
 				logger.Debug("preserving Zig artifact containing tracked files", "path", dir)
 				return
 			}
-			if reason := devArtifactRecentOutputProtectReason(dir); reason != "" {
+			if reason := devArtifactRecentOutputProtectReasonContext(ctx, dir); reason != "" {
 				logger.Debug("preserving recent Zig artifact", "path", dir, "reason", reason)
 				return
 			}
@@ -1591,10 +1639,13 @@ func (p *DevArtifactsPlugin) cleanLMStudioModels(ctx context.Context, level Clea
 // If markerFile is set, only reports dirs that have a sibling marker file.
 // Callback receives the artifact dir path and its size.
 // Limits directory depth to 4 levels to avoid excessive scanning.
-func (p *DevArtifactsPlugin) findArtifactDirs(scanPath string, targetName string, markerFile string, callback func(dir string, size int64)) {
+func (p *DevArtifactsPlugin) findArtifactDirs(ctx context.Context, scanPath string, targetName string, markerFile string, callback func(dir string, size int64)) {
 	scanDepth := strings.Count(scanPath, string(os.PathSeparator))
 
 	filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -1627,7 +1678,10 @@ func (p *DevArtifactsPlugin) findArtifactDirs(scanPath string, targetName string
 			}
 		}
 
-		size := getDirSize(path)
+		size, err := getDirSizeContext(ctx, path)
+		if err != nil {
+			return err
+		}
 		if size > 0 {
 			callback(path, size)
 		}

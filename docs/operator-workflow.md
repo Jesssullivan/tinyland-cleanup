@@ -188,8 +188,9 @@ stale inactive temporary roots, known generated subdirectories such as Rust
 `target/`, `node_modules`, Python virtualenvs, and Zig outputs can still appear
 as narrower reclaim candidates so cleanup can preserve the worktree or proof
 root while pruning rebuildable output. Active process command lines that
-reference the temp root mark the root active and suppress nested generated
-cleanup. The plan also protects matching artifact families when active
+reference the temp root mark the root active, suppress nested generated
+cleanup, and avoid full size walks of that root during dry-run planning. The
+plan also protects matching artifact families when active
 package manager, compiler, language server, runtime, or LM Studio processes are
 visible, and it preserves any candidate artifact directory that contains files
 tracked by Git. Zig `.zig-cache` and `zig-out` targets are also preserved when

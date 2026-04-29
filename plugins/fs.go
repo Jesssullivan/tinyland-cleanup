@@ -3,6 +3,7 @@
 package plugins
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -165,8 +166,16 @@ func getFileAllocatedBytes(path string) (int64, error) {
 }
 
 func getDirAllocatedBytes(path string) int64 {
+	size, _ := getDirAllocatedBytesContext(context.Background(), path)
+	return size
+}
+
+func getDirAllocatedBytesContext(ctx context.Context, path string) (int64, error) {
 	var size int64
-	filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+	err := filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -181,7 +190,10 @@ func getDirAllocatedBytes(path string) int64 {
 		size += allocated
 		return nil
 	})
-	return size
+	if err != nil {
+		return size, err
+	}
+	return size, ctx.Err()
 }
 
 // safeBytesDiff returns the difference between two sizes, floored at 0.

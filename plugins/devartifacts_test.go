@@ -173,7 +173,7 @@ func TestFindArtifactDirs(t *testing.T) {
 
 	// Find node_modules with marker
 	var foundNodeModules []string
-	p.findArtifactDirs(tmpDir, "node_modules", "package.json", func(dir string, size int64) {
+	p.findArtifactDirs(context.Background(), tmpDir, "node_modules", "package.json", func(dir string, size int64) {
 		foundNodeModules = append(foundNodeModules, dir)
 	})
 
@@ -183,7 +183,7 @@ func TestFindArtifactDirs(t *testing.T) {
 
 	// Find target with Cargo.toml marker
 	var foundTargets []string
-	p.findArtifactDirs(tmpDir, "target", "Cargo.toml", func(dir string, size int64) {
+	p.findArtifactDirs(context.Background(), tmpDir, "target", "Cargo.toml", func(dir string, size int64) {
 		foundTargets = append(foundTargets, dir)
 	})
 
@@ -193,7 +193,7 @@ func TestFindArtifactDirs(t *testing.T) {
 
 	// Find Zig .zig-cache with build.zig marker
 	var foundZigCaches []string
-	p.findArtifactDirs(tmpDir, ".zig-cache", "build.zig", func(dir string, size int64) {
+	p.findArtifactDirs(context.Background(), tmpDir, ".zig-cache", "build.zig", func(dir string, size int64) {
 		foundZigCaches = append(foundZigCaches, dir)
 	})
 
@@ -211,7 +211,7 @@ func TestFindArtifactDirsNoMarker(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "orphan", "node_modules", "pkg", "index.js"), []byte("x"), 0644)
 
 	var found []string
-	p.findArtifactDirs(tmpDir, "node_modules", "package.json", func(dir string, size int64) {
+	p.findArtifactDirs(context.Background(), tmpDir, "node_modules", "package.json", func(dir string, size int64) {
 		found = append(found, dir)
 	})
 
@@ -368,7 +368,7 @@ func TestPlanZigArtifactsProtectsRecentOutputAtCritical(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planZigArtifacts(tmpDir, 0, true, nil, nil, newDevArtifactGitTracker(), &targets)
+	p.planZigArtifacts(context.Background(), tmpDir, 0, true, nil, nil, newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
 	if target.Action != "protect" || !target.Protected {
@@ -434,7 +434,7 @@ func TestPlanZigArtifactsProtectsTrackedCache(t *testing.T) {
 	runGit(t, git, project, "add", "build.zig", ".zig-cache/o/artifact")
 
 	var targets []CleanupTarget
-	p.planZigArtifacts(tmpDir, 30*24*time.Hour, true, nil, nil, newDevArtifactGitTracker(), &targets)
+	p.planZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, true, nil, nil, newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
 	if target.Action != "protect" || !target.Protected {
@@ -638,7 +638,7 @@ func TestPlanNodeModulesProtectsActiveDevelopmentProcess(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planNodeModules(tmpDir, 30*24*time.Hour, true, nil, map[string]string{
+	p.planNodeModules(context.Background(), tmpDir, 30*24*time.Hour, true, nil, map[string]string{
 		"node_modules": "Node.js package manager or runtime",
 	}, newDevArtifactGitTracker(), &targets)
 
@@ -668,7 +668,7 @@ func TestPlanZigArtifactsProtectsActiveDevelopmentProcess(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planZigArtifacts(tmpDir, 30*24*time.Hour, true, nil, map[string]string{
+	p.planZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, true, nil, map[string]string{
 		"zig-artifact": "Zig toolchain process",
 	}, newDevArtifactGitTracker(), &targets)
 
@@ -713,7 +713,7 @@ func TestPlanLargeLocalArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planLargeLocalArtifacts(tmpDir, 1, nil, nil, &targets)
+	p.planLargeLocalArtifacts(context.Background(), tmpDir, 1, nil, nil, &targets)
 
 	image := findDevArtifactTarget(t, targets, "large-local-artifact", imagePath)
 	if image.Action != "review" || !image.Protected || image.Tier != CleanupTierDestructive || image.Reclaim != CleanupReclaimNone {
@@ -740,7 +740,7 @@ func TestPlanLargeLocalArtifactsReportsMountedImagesAsActive(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planLargeLocalArtifacts(tmpDir, 1, nil, map[string]string{
+	p.planLargeLocalArtifacts(context.Background(), tmpDir, 1, nil, map[string]string{
 		filepath.Clean(bundlePath): "/Volumes/linux-xr-cs",
 	}, &targets)
 
@@ -782,7 +782,7 @@ func TestPlanLargeLocalArtifactsHonorsProtectPaths(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planLargeLocalArtifacts(tmpDir, 1, []string{filepath.Dir(imagePath)}, nil, &targets)
+	p.planLargeLocalArtifacts(context.Background(), tmpDir, 1, []string{filepath.Dir(imagePath)}, nil, &targets)
 
 	target := findDevArtifactTarget(t, targets, "large-local-artifact", imagePath)
 	if target.Action != "protect" || !target.Protected {
@@ -810,7 +810,7 @@ func TestPlanTemporaryArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planTemporaryArtifacts(tmpDir, 1, 6*time.Hour, nil, map[string]string{
+	p.planTemporaryArtifacts(context.Background(), tmpDir, 1, 6*time.Hour, nil, map[string]string{
 		canonicalTempArtifactPath(activePath): "bazel",
 	}, &targets)
 
@@ -830,6 +830,9 @@ func TestPlanTemporaryArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	activeTarget := findDevArtifactTarget(t, targets, "temporary-dev-artifact", activePath)
 	if activeTarget.Action != "protect" || !activeTarget.Protected || !activeTarget.Active {
 		t.Fatalf("expected active temporary artifact to be protected, got %#v", activeTarget)
+	}
+	if activeTarget.Bytes != 0 {
+		t.Fatalf("active temporary roots should avoid expensive sizing, got %d bytes", activeTarget.Bytes)
 	}
 }
 
@@ -924,6 +927,27 @@ func tempGeneratedArtifactConfig(tmpDir string) *config.Config {
 	cfg.DevArtifacts.LargeLocalArtifacts = false
 	cfg.DevArtifacts.LMStudioModels = false
 	return cfg
+}
+
+func TestFindArtifactDirsHonorsCanceledContext(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	project := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(filepath.Join(project, "node_modules", "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "package.json"), []byte(`{"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "node_modules", "pkg", "index.js"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.findArtifactDirs(ctx, tmpDir, "node_modules", "package.json", func(dir string, size int64) {
+		t.Fatalf("canceled scan should not report %s", dir)
+	})
 }
 
 func TestTempArtifactRootsFromProcessOutput(t *testing.T) {

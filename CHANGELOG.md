@@ -81,6 +81,9 @@ All notable changes to this project will be documented in this file.
 - Dev-artifact cleanup now scans stale inactive temporary roots for narrower
   generated-output targets, allowing Rust `target/`, `node_modules`, Python
   virtualenv, and Zig output pruning without deleting the top-level temp root.
+- Dev-artifact dry-run and cleanup filesystem walkers now observe cancellation,
+  and active temporary roots are protected without expensive size walks so
+  operator probes do not compete with active lab or Bazel scratch work.
 - Darwin cache cleanup now treats the typed `darwin_dev_caches` plan as the
   real-cleanup authority when enabled, so `enforce: false` prevents legacy
   generic cache deletion paths from mutating developer machines.

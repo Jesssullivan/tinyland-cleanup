@@ -1489,8 +1489,16 @@ func darwinAnyProcessActive(active map[string]bool, names ...string) bool {
 // Helper functions
 
 func getDirSize(path string) int64 {
+	size, _ := getDirSizeContext(context.Background(), path)
+	return size
+}
+
+func getDirSizeContext(ctx context.Context, path string) (int64, error) {
 	var size int64
-	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err != nil {
 			return nil
 		}
@@ -1499,7 +1507,10 @@ func getDirSize(path string) int64 {
 		}
 		return nil
 	})
-	return size
+	if err != nil {
+		return size, err
+	}
+	return size, ctx.Err()
 }
 
 func deleteOldFiles(dir string, maxAge time.Duration) {
