@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -72,6 +73,26 @@ type GitHubRunnerConfig struct {
 	Home string `yaml:"home"`
 	// WorkDir is the work directory (default: <home>/_work)
 	WorkDir string `yaml:"work_dir"`
+	// CacheDir is the cache directory (default: <home>/cache)
+	CacheDir string `yaml:"cache_dir"`
+	// TempDir is the temp directory (default: <home>/tmp)
+	TempDir string `yaml:"temp_dir"`
+	// Instances describes multiple runner homes managed by the same host.
+	Instances []GitHubRunnerInstanceConfig `yaml:"instances"`
+}
+
+// GitHubRunnerInstanceConfig holds cleanup settings for one GitHub Actions runner instance.
+type GitHubRunnerInstanceConfig struct {
+	// Name is a human-readable instance name for logs.
+	Name string `yaml:"name"`
+	// Home directory for this runner.
+	Home string `yaml:"home"`
+	// WorkDir is the work directory (default: <home>/_work)
+	WorkDir string `yaml:"work_dir"`
+	// CacheDir is the cache directory (default: <home>/cache)
+	CacheDir string `yaml:"cache_dir"`
+	// TempDir is the temp directory (default: <home>/tmp)
+	TempDir string `yaml:"temp_dir"`
 }
 
 // MountConfig defines a mount point to monitor with optional custom thresholds.
@@ -563,7 +584,14 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	if err := yaml.Unmarshal(data, config); err != nil {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return config, nil
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(trimmed))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(config); err != nil {
 		return nil, err
 	}
 

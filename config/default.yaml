@@ -41,6 +41,18 @@ enable:
 github_runner:
   home: "/home/github-runner"
   work_dir: ""  # Default: <home>/_work
+  cache_dir: "" # Default: <home>/cache
+  temp_dir: ""  # Default: <home>/tmp
+  # For hosts with several runner services, set instances and include the
+  # primary runner here too. When instances is non-empty, instance paths are
+  # authoritative and the top-level home/work_dir pair is treated as legacy
+  # compatibility config.
+  instances: []
+  # - name: honey-2
+  #   home: /home/github-runner/instances/honey-2
+  #   work_dir: /home/github-runner/instances/honey-2/_work
+  #   cache_dir: /home/github-runner/instances/honey-2/cache
+  #   temp_dir: /home/github-runner/instances/honey-2/tmp
 
 # Monitored mount points (multi-volume support)
 # When configured, all listed mounts are checked and the highest cleanup

@@ -72,6 +72,7 @@ go_test(
         "config/config_pbt_test.go",
         "config/config_test.go",
     ],
+    data = ["config/testdata/home-manager-honey.yaml"],
     embed = [":config"],
     deps = ["@net_pgregory_rapid//:rapid"],
 )
@@ -133,17 +134,17 @@ go_test(
         "plugins/bazel_test.go",
         "plugins/devartifacts_test.go",
         "plugins/nix_test.go",
-        "plugins/podman_buildkit_test.go",
-        "plugins/podman_compaction_test.go",
         "plugins/plugin_pbt_test.go",
         "plugins/plugin_test.go",
+        "plugins/podman_buildkit_test.go",
+        "plugins/podman_compaction_test.go",
         "plugins/sudo_test.go",
     ] + select({
         "@platforms//os:macos": [
             "plugins/apfs_darwin_test.go",
             "plugins/darwin_dev_cache_test.go",
         ],
-        "//conditions:default": [],
+        "//conditions:default": ["plugins/github_runner_linux_test.go"],
     }),
     embed = [":plugins"],
     deps = [
@@ -157,7 +158,7 @@ test_suite(
     tests = [
         ":config_test",
         ":monitor_test",
-        ":tinyland-cleanup_test",
         ":plugins_test",
+        ":tinyland-cleanup_test",
     ],
 )
