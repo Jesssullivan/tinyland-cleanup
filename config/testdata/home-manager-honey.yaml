@@ -1,0 +1,165 @@
+poll_interval: 180
+thresholds:
+  warning: 75
+  moderate: 80
+  aggressive: 85
+  critical: 90
+target_free: 70
+policy:
+  cooldown: 30m
+  state_file: /home/jess/.local/state/tinyland-cleanup/state.json
+log_file: /home/jess/.local/log/disk-cleanup.log
+enable:
+  cache: true
+  nix_gc: true
+  docker: true
+  lima: false
+  homebrew: false
+  ios_simulator: false
+  gitlab_runner: true
+  github_runner: true
+  yum: true
+  podman: true
+  icloud: false
+  photos: false
+  dev_artifacts: true
+  bazel: true
+  apfs_snapshots: false
+dev_artifacts:
+  scan_paths:
+    - ~/git
+    - ~/src
+  scan_max_duration: 30s
+  scan_max_entries: 250000
+  temp_artifacts: true
+  temp_scan_paths:
+    - /tmp
+  temp_scan_max_roots: 128
+  temp_artifact_min_mb: 256
+  temp_artifact_stale_after: 6h
+  node_modules: true
+  python_venvs: true
+  rust_targets: true
+  zig_artifacts: true
+  go_build_cache: true
+  haskell_cache: true
+  lmstudio_models: false
+  large_local_artifacts: true
+  large_local_artifact_min_mb: 1024
+  protect_paths: []
+apfs:
+  thin_enabled: false
+  max_thin_gb: 50
+  keep_recent_days: 1
+  delete_os_updates: false
+docker:
+  socket: unix:///var/run/docker.sock
+  prune_images_age: 24h
+  protect_running_containers: true
+lima:
+  vm_names: []
+  compact_offline: false
+podman:
+  prune_images_age: 24h
+  protect_running_containers: true
+  machine_names: []
+  buildkit_prune: true
+  buildkit_prune_keep_duration: 24h
+  buildkit_prune_keep_storage_mb: 8192
+  buildkit_prune_min_reclaim_gb: 4
+  critical_system_prune: false
+  clean_inside_vm: true
+  trim_vm_disk: true
+  compact_disk_offline: false
+  compact_min_reclaim_gb: 8
+  compact_require_no_active_containers: true
+  compact_keep_backup_until_restart: true
+  compact_provider_allowlist:
+    - qemu
+nix:
+  min_user_generations: 5
+  min_system_generations: 3
+  host_measure_path: /nix
+  delete_generations_older_than: 14d
+  critical_delete_generations_older_than: 3d
+  allow_store_optimize: false
+  skip_when_daemon_busy: true
+  daemon_busy_backoff: 30m
+  max_gc_duration: 20m
+  root_attribution_limit: 20
+bazel:
+  roots:
+    - ~/.cache/bazel
+  workspace_roots:
+    - ~/git
+    - ~/src
+  bazelisk_cache: ~/.cache/bazelisk
+  max_total_gb: 20
+  keep_recent_output_bases: 5
+  stale_after: 14d
+  critical_stale_after: 3d
+  protect_workspaces:
+    - ~/git/lab
+  allow_stop_idle_servers: true
+  allow_delete_active_output_bases: false
+github_runner:
+  home: /home/github-runner
+  work_dir: /home/github-runner/_work
+  instances:
+    - name: honey
+      home: /home/github-runner
+      work_dir: /home/github-runner/_work
+    - name: honey-2
+      home: /home/github-runner/instances/honey-2
+      work_dir: /home/github-runner/instances/honey-2/_work
+    - name: honey-capped-1
+      home: /home/github-runner/instances/honey-capped-1
+      work_dir: /home/github-runner/instances/honey-capped-1/_work
+      cache_dir: /home/github-runner/instances/honey-capped-1/cache
+      temp_dir: /home/github-runner/instances/honey-capped-1/tmp
+darwin_dev_caches:
+  enabled: false
+  enforce: false
+  max_total_gb: 15
+  jetbrains:
+    enabled: true
+    max_gb: 8
+    stale_after_days: 14
+    keep_active_versions: true
+  playwright:
+    enabled: true
+    keep_latest_per_family: true
+  bazelisk:
+    enabled: true
+    keep_latest: 2
+  pip:
+    enabled: true
+    stale_after_days: 14
+  vscode:
+    enabled: true
+    max_gb: 4
+    stale_after_days: 14
+    keep_active_versions: true
+  cursor:
+    enabled: true
+    max_gb: 4
+    stale_after_days: 14
+    keep_active_versions: true
+monitored_mounts:
+  - path: /
+    label: root
+  - path: /var/lib/docker
+    label: docker
+    threshold_warning: 70
+    threshold_critical: 85
+  - path: /nix
+    label: data-home-nix
+    threshold_warning: 70
+    threshold_critical: 85
+  - path: /srv/data-home
+    label: data-home
+    threshold_warning: 70
+    threshold_critical: 85
+notify:
+  enabled: false
+  webhook_url: ""

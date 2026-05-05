@@ -16,6 +16,14 @@ import (
 // GitHubRunnerPlugin handles GitHub Actions runner cleanup operations.
 type GitHubRunnerPlugin struct{}
 
+type githubRunnerTarget struct {
+	name     string
+	home     string
+	workDir  string
+	cacheDir string
+	tempDir  string
+}
+
 // NewGitHubRunnerPlugin creates a new GitHub runner cleanup plugin.
 func NewGitHubRunnerPlugin() *GitHubRunnerPlugin {
 	return &GitHubRunnerPlugin{}
@@ -41,20 +49,58 @@ func (p *GitHubRunnerPlugin) Enabled(cfg *config.Config) bool {
 	return cfg.Enable.GitHubRunner
 }
 
-// githubRunnerPaths returns the set of directories to clean.
+// githubRunnerTargets returns the configured runner directories to clean.
 // Uses config if available, falls back to well-known defaults.
-func (p *GitHubRunnerPlugin) githubRunnerPaths(cfg *config.Config) (runnerHome, workDir, cacheDir, tempDir string) {
-	runnerHome = cfg.GitHubRunner.Home
-	if runnerHome == "" {
-		runnerHome = "/home/github-runner"
+func (p *GitHubRunnerPlugin) githubRunnerTargets(cfg *config.Config) []githubRunnerTarget {
+	if len(cfg.GitHubRunner.Instances) > 0 {
+		targets := make([]githubRunnerTarget, 0, len(cfg.GitHubRunner.Instances))
+		for _, instance := range cfg.GitHubRunner.Instances {
+			targets = append(targets, normalizeGitHubRunnerTarget(
+				instance.Name,
+				instance.Home,
+				instance.WorkDir,
+				instance.CacheDir,
+				instance.TempDir,
+			))
+		}
+		return targets
 	}
-	workDir = cfg.GitHubRunner.WorkDir
+
+	return []githubRunnerTarget{
+		normalizeGitHubRunnerTarget(
+			"default",
+			cfg.GitHubRunner.Home,
+			cfg.GitHubRunner.WorkDir,
+			cfg.GitHubRunner.CacheDir,
+			cfg.GitHubRunner.TempDir,
+		),
+	}
+}
+
+func normalizeGitHubRunnerTarget(name, home, workDir, cacheDir, tempDir string) githubRunnerTarget {
+	if home == "" {
+		home = "/home/github-runner"
+	}
+	if name == "" {
+		name = filepath.Base(home)
+	}
 	if workDir == "" {
-		workDir = filepath.Join(runnerHome, "_work")
+		workDir = filepath.Join(home, "_work")
 	}
-	cacheDir = filepath.Join(runnerHome, "cache")
-	tempDir = filepath.Join(runnerHome, "tmp")
-	return
+	if cacheDir == "" {
+		cacheDir = filepath.Join(home, "cache")
+	}
+	if tempDir == "" {
+		tempDir = filepath.Join(home, "tmp")
+	}
+
+	return githubRunnerTarget{
+		name:     name,
+		home:     home,
+		workDir:  workDir,
+		cacheDir: cacheDir,
+		tempDir:  tempDir,
+	}
 }
 
 // Cleanup performs GitHub runner cleanup at the specified level.
@@ -64,21 +110,29 @@ func (p *GitHubRunnerPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		Level:  level,
 	}
 
-	runnerHome, workDir, cacheDir, tempDir := p.githubRunnerPaths(cfg)
+	for _, target := range p.githubRunnerTargets(cfg) {
+		result.BytesFreed += p.cleanupTarget(ctx, level, target, logger)
+	}
+
+	return result
+}
+
+func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLevel, target githubRunnerTarget, logger *slog.Logger) int64 {
+	var bytesFreed int64
 
 	// Validate that the runner home actually exists before cleaning
-	if !pathExistsAndIsDir(runnerHome) {
-		logger.Debug("github runner home not found, skipping", "path", runnerHome)
-		return result
+	if !pathExistsAndIsDir(target.home) {
+		logger.Debug("github runner home not found, skipping", "instance", target.name, "path", target.home)
+		return bytesFreed
 	}
 
 	// Warning level: Clean temp directory only
 	if level >= LevelWarning {
-		if pathExistsAndIsDir(tempDir) {
-			freed := deleteOldFilesSameDevice(tempDir, 24*time.Hour)
-			result.BytesFreed += freed
+		if pathExistsAndIsDir(target.tempDir) {
+			freed := deleteOldFilesSameDevice(target.tempDir, 24*time.Hour)
+			bytesFreed += freed
 			if freed > 0 {
-				logger.Debug("cleaned github runner temp", "freed_mb", freed/(1024*1024))
+				logger.Debug("cleaned github runner temp", "instance", target.name, "freed_mb", freed/(1024*1024))
 			}
 		}
 
@@ -94,7 +148,7 @@ func (p *GitHubRunnerPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 				if info, err := os.Stat(path); err == nil && info.ModTime().Before(time.Now().Add(-24*time.Hour)) {
 					size := getDirSizeSameDevice(path)
 					os.RemoveAll(path)
-					result.BytesFreed += size
+					bytesFreed += size
 				}
 			}
 		}
@@ -103,29 +157,29 @@ func (p *GitHubRunnerPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	// Moderate level: Clean cache and old work directories
 	if level >= LevelModerate {
 		// Clean cache older than 3 days
-		if pathExistsAndIsDir(cacheDir) {
-			sizeBefore := getDirSizeSameDevice(cacheDir)
-			deleteOldFilesSameDevice(cacheDir, 3*24*time.Hour)
-			sizeAfter := getDirSizeSameDevice(cacheDir)
+		if pathExistsAndIsDir(target.cacheDir) {
+			sizeBefore := getDirSizeSameDevice(target.cacheDir)
+			deleteOldFilesSameDevice(target.cacheDir, 3*24*time.Hour)
+			sizeAfter := getDirSizeSameDevice(target.cacheDir)
 			freed := safeBytesDiff(sizeBefore, sizeAfter)
-			result.BytesFreed += freed
+			bytesFreed += freed
 			if freed > 0 {
-				logger.Debug("cleaned github runner cache", "freed_mb", freed/(1024*1024))
+				logger.Debug("cleaned github runner cache", "instance", target.name, "freed_mb", freed/(1024*1024))
 			}
 		}
 
 		// Clean work directories older than 1 day
-		if pathExistsAndIsDir(workDir) {
-			entries, _ := os.ReadDir(workDir)
+		if pathExistsAndIsDir(target.workDir) {
+			entries, _ := os.ReadDir(target.workDir)
 			for _, entry := range entries {
 				if entry.IsDir() {
-					dirPath := filepath.Join(workDir, entry.Name())
+					dirPath := filepath.Join(target.workDir, entry.Name())
 					info, err := entry.Info()
 					if err == nil && info.ModTime().Before(time.Now().Add(-24*time.Hour)) {
 						size := getDirSizeSameDevice(dirPath)
 						os.RemoveAll(dirPath)
-						result.BytesFreed += size
-						logger.Debug("removed old work dir", "dir", entry.Name(), "freed_mb", size/(1024*1024))
+						bytesFreed += size
+						logger.Debug("removed old work dir", "instance", target.name, "dir", entry.Name(), "freed_mb", size/(1024*1024))
 					}
 				}
 			}
@@ -135,13 +189,13 @@ func (p *GitHubRunnerPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	// Aggressive level: Clean all work directories and Docker resources
 	if level >= LevelAggressive {
 		// Remove all work directories
-		if pathExistsAndIsDir(workDir) {
-			size := getDirSizeSameDevice(workDir)
+		if pathExistsAndIsDir(target.workDir) {
+			size := getDirSizeSameDevice(target.workDir)
 			if size > 0 {
-				os.RemoveAll(workDir)
-				os.MkdirAll(workDir, 0755)
-				result.BytesFreed += size
-				logger.Debug("cleaned all github runner work dirs", "freed_mb", size/(1024*1024))
+				os.RemoveAll(target.workDir)
+				os.MkdirAll(target.workDir, 0755)
+				bytesFreed += size
+				logger.Debug("cleaned all github runner work dirs", "instance", target.name, "freed_mb", size/(1024*1024))
 			}
 		}
 
@@ -156,16 +210,16 @@ func (p *GitHubRunnerPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	// Critical level: Nuclear cleanup
 	if level >= LevelCritical {
 		// Remove entire cache
-		if pathExistsAndIsDir(cacheDir) {
-			size := getDirSizeSameDevice(cacheDir)
+		if pathExistsAndIsDir(target.cacheDir) {
+			size := getDirSizeSameDevice(target.cacheDir)
 			if size > 0 {
-				os.RemoveAll(cacheDir)
-				os.MkdirAll(cacheDir, 0755)
-				result.BytesFreed += size
-				logger.Debug("removed all github runner cache", "freed_mb", size/(1024*1024))
+				os.RemoveAll(target.cacheDir)
+				os.MkdirAll(target.cacheDir, 0755)
+				bytesFreed += size
+				logger.Debug("removed all github runner cache", "instance", target.name, "freed_mb", size/(1024*1024))
 			}
 		}
 	}
 
-	return result
+	return bytesFreed
 }

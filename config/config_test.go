@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -157,6 +158,79 @@ poll_interval: "not a number"
 	if err == nil {
 		t.Error("expected error for invalid config")
 	}
+}
+
+func TestLoadConfigRejectsUnknownFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := `
+poll_interval: 30
+future_only_setting: true
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadConfig(configPath)
+	if err == nil {
+		t.Fatal("expected unknown field error")
+	}
+	if !strings.Contains(err.Error(), "field future_only_setting not found") {
+		t.Fatalf("expected unknown field error, got %v", err)
+	}
+}
+
+func TestLoadHomeManagerContract(t *testing.T) {
+	cfg, err := LoadConfig(homeManagerContractPath(t))
+	if err != nil {
+		t.Fatalf("home-manager contract fixture should load: %v", err)
+	}
+
+	if cfg.PollInterval != 180 {
+		t.Errorf("expected poll_interval=180, got %d", cfg.PollInterval)
+	}
+	if cfg.Policy.Cooldown != "30m" {
+		t.Errorf("expected policy.cooldown=30m, got %q", cfg.Policy.Cooldown)
+	}
+	if !cfg.Enable.GitHubRunner {
+		t.Error("expected github runner cleanup enabled")
+	}
+	if got := len(cfg.GitHubRunner.Instances); got != 3 {
+		t.Fatalf("expected 3 github runner instances, got %d", got)
+	}
+	if cfg.GitHubRunner.Instances[1].Name != "honey-2" {
+		t.Errorf("unexpected second instance: %#v", cfg.GitHubRunner.Instances[1])
+	}
+	if cfg.GitHubRunner.Instances[2].CacheDir != "/home/github-runner/instances/honey-capped-1/cache" {
+		t.Errorf("expected custom cache_dir to parse, got %q", cfg.GitHubRunner.Instances[2].CacheDir)
+	}
+	if len(cfg.MonitoredMounts) != 4 {
+		t.Errorf("expected 4 monitored mounts, got %d", len(cfg.MonitoredMounts))
+	}
+	if cfg.Nix.HostMeasurePath != "/nix" {
+		t.Errorf("expected nix.host_measure_path=/nix, got %q", cfg.Nix.HostMeasurePath)
+	}
+	if len(cfg.Bazel.WorkspaceRoots) != 2 {
+		t.Errorf("expected 2 bazel workspace roots, got %d", len(cfg.Bazel.WorkspaceRoots))
+	}
+	if !cfg.DarwinDevCaches.JetBrains.KeepActiveVersions {
+		t.Error("expected darwin_dev_caches.jetbrains.keep_active_versions to parse")
+	}
+}
+
+func homeManagerContractPath(t *testing.T) string {
+	t.Helper()
+
+	candidates := []string{
+		filepath.Join("testdata", "home-manager-honey.yaml"),
+		filepath.Join("config", "testdata", "home-manager-honey.yaml"),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return candidates[0]
 }
 
 func TestDevArtifactsConfigDefaults(t *testing.T) {
