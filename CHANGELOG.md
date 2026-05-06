@@ -117,6 +117,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Active Bazel client processes no longer globally protect unrelated stale
+  output bases; active clients still protect their own output base, and shared
+  cache-tier cleanup remains deferred while Bazel client work is visible.
 - Pass BuildKit `--keep-storage` as the numeric MB value expected by `buildctl`
   during targeted Podman cache pruning.
 

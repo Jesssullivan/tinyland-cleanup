@@ -26,7 +26,6 @@ estimates when different, host-reclaim expectation, active-use evidence,
 protected status, the planned action, and a reason. Output bases are protected
 when:
 
-- a Bazel or Bazelisk process is active;
 - an active Bazel process exposes an explicit `--output_base`;
 - an output-base lock or server PID file is visible;
 - a configured protected workspace has `bazel-*` symlinks into that output base;
@@ -72,9 +71,9 @@ Runtime boundary:
 - cache-tier cleanup is skipped while active Bazel or Bazelisk client commands
   are visible;
 - process-visible explicit `--output_base` directories are included in the plan
-  even when they are outside configured output-user roots; idle/server-only
-  output-base visibility protects that output base but does not globally block
-  unrelated cache-tier cleanup;
+  even when they are outside configured output-user roots; active clients and
+  idle/server-only output-base visibility protect only their own output base and
+  do not globally block stale unrelated output-base cleanup;
 - aggressive and critical cleanup may classify stale idle-server-only output
   bases as `stop_idle_server_then_delete_output_base` when
   `allow_stop_idle_servers` is enabled; real cleanup runs

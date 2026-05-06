@@ -278,6 +278,59 @@ func TestBazelPlanTargetsDoesNotUseIdleServerAsGlobalCacheActivity(t *testing.T)
 	}
 }
 
+func TestBazelPlanTargetsDoesNotUseActiveClientAsGlobalOutputBaseActivity(t *testing.T) {
+	now := time.Date(2026, 5, 6, 18, 0, 0, 0, time.UTC)
+	cfg := config.BazelConfig{
+		MaxTotalGB:                   1,
+		StaleAfter:                   "14d",
+		CriticalStaleAfter:           "3d",
+		AllowDeleteActiveOutputBases: false,
+		KeepRecentOutputBases:        0,
+	}
+	candidates := []bazelCandidate{
+		{
+			Type:         "output_base",
+			Name:         "active-client-output-base",
+			Path:         "/private/var/tmp/_bazel_jess/active-client",
+			ModTime:      now.Add(-1 * time.Hour),
+			Physical:     2 * bazelGiB,
+			Active:       true,
+			ActiveClient: true,
+			Reason:       "discovered from active Bazel client --output_base",
+		},
+		{
+			Type:     "output_base",
+			Name:     "stale-inactive-output-base",
+			Path:     "/private/var/tmp/_bazel_jess/stale-inactive",
+			ModTime:  now.Add(-30 * 24 * time.Hour),
+			Physical: 4 * bazelGiB,
+		},
+		{
+			Type:     "disk_cache",
+			Name:     "disk_cache",
+			Path:     "/private/var/tmp/_bazel_jess/disk_cache",
+			ModTime:  now.Add(-30 * 24 * time.Hour),
+			Physical: 2 * bazelGiB,
+		},
+	}
+
+	targets, _ := bazelPlanTargets(candidates, cfg, LevelCritical, now, true)
+	actions := map[string]CleanupTarget{}
+	for _, target := range targets {
+		actions[target.Name] = target
+	}
+
+	if actions["active-client-output-base"].Action != "keep" || !actions["active-client-output-base"].Protected || !actions["active-client-output-base"].Active {
+		t.Fatalf("active client output base should remain protected: %#v", actions["active-client-output-base"])
+	}
+	if actions["stale-inactive-output-base"].Action != "delete_output_base" || actions["stale-inactive-output-base"].Protected || actions["stale-inactive-output-base"].Active {
+		t.Fatalf("unrelated stale output base should remain eligible despite active Bazel client elsewhere: %#v", actions["stale-inactive-output-base"])
+	}
+	if actions["disk_cache"].Action != "keep" || !actions["disk_cache"].Protected || !actions["disk_cache"].Active {
+		t.Fatalf("shared cache tier should stay protected while Bazel client work is active: %#v", actions["disk_cache"])
+	}
+}
+
 func TestBazelPlanTargetsCanStopIdleServerBeforeDeletingStaleOutputBase(t *testing.T) {
 	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 	cfg := config.BazelConfig{
