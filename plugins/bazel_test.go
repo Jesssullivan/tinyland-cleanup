@@ -141,6 +141,55 @@ func TestBazelPlanTargetsProtectsRecentActiveAndWorkspaces(t *testing.T) {
 	}
 }
 
+func TestRefineBazelReclaimTargetBytesUsesRecursiveAllocation(t *testing.T) {
+	outputBase := filepath.Join(t.TempDir(), "output-base")
+	makeBazelOutputBase(t, outputBase)
+	nested := filepath.Join(outputBase, "execroot", "repo", "bazel-out", "darwin-fastbuild", "bin")
+	mustMkdir(t, nested)
+	payload := filepath.Join(nested, "large.o")
+	if err := os.WriteFile(payload, bytesOfSize(2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	targets := []CleanupTarget{
+		{
+			Type:      "output_base",
+			Name:      "output-base",
+			Path:      outputBase,
+			Bytes:     1,
+			Action:    "delete_output_base",
+			Protected: false,
+			Active:    false,
+		},
+		{
+			Type:      "output_base",
+			Name:      "protected",
+			Path:      outputBase,
+			Bytes:     1,
+			Action:    "keep",
+			Protected: true,
+			Active:    false,
+		},
+	}
+
+	refined, changed, err := refineBazelReclaimTargetBytes(context.Background(), targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected reclaim target bytes to be refined")
+	}
+	if refined[0].Bytes < 2*1024*1024 {
+		t.Fatalf("delete target bytes = %d, want at least payload size", refined[0].Bytes)
+	}
+	if refined[0].LogicalBytes < 2*1024*1024 {
+		t.Fatalf("delete target logical bytes = %d, want at least payload size", refined[0].LogicalBytes)
+	}
+	if refined[1].Bytes != 1 {
+		t.Fatalf("protected target should not be recursively measured: %#v", refined[1])
+	}
+}
+
 func TestBazelPlanTargetsDeletesCacheTiersOnlyWhenBudgetExceeded(t *testing.T) {
 	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 	cfg := config.BazelConfig{
@@ -756,4 +805,12 @@ func mustMkdir(t *testing.T, path string) {
 	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func bytesOfSize(size int) []byte {
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	return data
 }

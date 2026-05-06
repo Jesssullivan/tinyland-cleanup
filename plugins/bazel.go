@@ -19,6 +19,7 @@ import (
 )
 
 const bazelGiB = int64(1024 * 1024 * 1024)
+const bazelReclaimEstimateTimeout = 30 * time.Second
 
 var bazelCommandPattern = regexp.MustCompile(`\b(bazel|bazelisk)\s+(build|test|run|coverage|query|sync|fetch|clean|mobile-install|aquery|cquery|mod)\b`)
 
@@ -126,6 +127,15 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 	globalActive := len(activeInfo.Reasons) > 0
 	candidates := p.discoverCandidates(home, cfg.Bazel, activeInfo)
 	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
+	targets, refined, refineErr := refineBazelReclaimTargetBytes(ctx, targets)
+	if refined {
+		plan.Metadata["reclaim_size_estimate_refined"] = "true"
+	}
+	if refineErr != nil {
+		plan.Metadata["reclaim_size_estimate_partial"] = "true"
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf("Bazel reclaim-byte refinement was partial: %v", refineErr))
+	}
+
 	plan.Targets = targets
 	plan.EstimatedBytesFreed = bazelEstimatedCandidateBytes(targets)
 	plan.Metadata["target_count"] = strconv.Itoa(len(targets))
@@ -136,7 +146,7 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		plan.Warnings = append(plan.Warnings, "detected Bazel cache footprint exceeds configured review budget")
 	}
 	plan.Warnings = append(plan.Warnings, "Bazel cleanup deletes rebuildable cache tiers only when the total footprint exceeds the configured budget and active-use inspection succeeds")
-	plan.Warnings = append(plan.Warnings, "Bazel byte counts use bounded top-level allocation estimates so dry-run stays responsive on very large output bases")
+	plan.Warnings = append(plan.Warnings, "Bazel protected/review byte counts use bounded top-level allocation estimates; reclaim targets use a bounded recursive refinement")
 
 	return plan, activeErr
 }
@@ -446,6 +456,70 @@ func estimateBazelCandidateBytes(path string) (int64, int64) {
 	}
 
 	return logical, physical
+}
+
+func refineBazelReclaimTargetBytes(ctx context.Context, targets []CleanupTarget) ([]CleanupTarget, bool, error) {
+	estimateCtx, cancel := context.WithTimeout(ctx, bazelReclaimEstimateTimeout)
+	defer cancel()
+
+	refined := false
+	for i := range targets {
+		if !bazelTargetReclaimsHost(targets[i]) {
+			continue
+		}
+		logical, physical, err := estimateBazelCandidateBytesRecursive(estimateCtx, targets[i].Path)
+		if physical > targets[i].Bytes {
+			targets[i].Bytes = physical
+			refined = true
+		}
+		if logical > targets[i].LogicalBytes {
+			targets[i].LogicalBytes = logical
+		}
+		if err != nil {
+			return targets, refined, err
+		}
+	}
+	return targets, refined, nil
+}
+
+func estimateBazelCandidateBytesRecursive(ctx context.Context, path string) (int64, int64, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		resolved = path
+	}
+	rootDev, err := deviceID(resolved)
+	if err != nil {
+		logical, physical := estimateBazelCandidateBytes(path)
+		return logical, physical, err
+	}
+
+	var logical int64
+	var physical int64
+	walkErr := filepath.Walk(resolved, func(p string, info os.FileInfo, err error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err != nil {
+			return nil
+		}
+		if dev, err := deviceID(p); err == nil && dev != rootDev {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		logical += info.Size()
+		if allocated, err := getFileAllocatedBytes(p); err == nil {
+			physical += allocated
+		} else {
+			physical += info.Size()
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return logical, physical, walkErr
+	}
+	return logical, physical, ctx.Err()
 }
 
 func isBazelOutputBase(path string) bool {
