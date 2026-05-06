@@ -25,6 +25,9 @@ All notable changes to this project will be documented in this file.
   optimization, separate from command-reported reclaimed bytes.
 - Bazel cache and output-base dry-run planning with active-use detection,
   protected workspace symlink detection, and budget metadata.
+- Bazel reclaim candidates now refine byte estimates with a bounded recursive
+  allocation walk so stale output-base dry-runs do not understate large nested
+  `execroot` and `bazel-out` trees.
 - Top-level dry-run summary fields for planned estimated reclaim, required free
   space, and cleanup target count.
 - Target-free report fields and real-cleanup stop behavior once the configured
