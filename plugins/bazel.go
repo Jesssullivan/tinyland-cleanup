@@ -595,8 +595,8 @@ func newestBazelOutputBases(candidates []bazelCandidate, keep int) map[string]bo
 }
 
 func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration, now time.Time, protectedByRecent bool, globalActive bool, budgetExceeded bool, level CleanupLevel, cfg config.BazelConfig) CleanupTarget {
-	active := candidate.Active || globalActive
-	idleServerOnly := candidate.IdleServer && !candidate.ActiveClient && !globalActive
+	active := candidate.Active || (candidate.Type != "output_base" && globalActive)
+	idleServerOnly := candidate.Type == "output_base" && candidate.IdleServer && !candidate.ActiveClient
 	stale := !candidate.ModTime.After(now.Add(-staleAfter))
 	idleServerStopEligible := candidate.Type == "output_base" &&
 		idleServerOnly &&
