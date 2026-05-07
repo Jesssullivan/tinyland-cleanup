@@ -384,15 +384,19 @@ func TestDiscoverNixProfileLinkGenerations(t *testing.T) {
 func TestParseNixGCRoots(t *testing.T) {
 	output := `
 /proc/1234/fd/5 -> /nix/store/111-source
+{nix-process:4321} -> /nix/store/888-active-derivation.drv
+{lsof} -> /nix/store/555-open-library
 /nix/var/nix/profiles/per-user/jess/profile-42-link -> /nix/store/222-home-manager-generation
 /nix/var/nix/gcroots/auto/abc -> /nix/store/333-tool
+/Users/jess/git/kernel/.direnv/flake-profile-a5d5b61aa8a61b7d9d765e1daf971a9a578f1cfa -> /nix/store/666-kernel-env
 /Users/jess/git/kernel/result -> /nix/store/444-linux-kernel
+/Users/jess/.cache/nix/flake-registry.json -> /nix/store/777-flake-registry.json
 /proc/1234/fd/5 -> /nix/store/111-source
 `
 
 	roots := parseNixGCRoots(output)
-	if len(roots) != 4 {
-		t.Fatalf("got %d roots, want 4: %#v", len(roots), roots)
+	if len(roots) != 8 {
+		t.Fatalf("got %d roots, want 8: %#v", len(roots), roots)
 	}
 
 	classes := map[string]int{}
@@ -407,8 +411,17 @@ func TestParseNixGCRoots(t *testing.T) {
 	if classes["process_root"] != 1 {
 		t.Fatalf("expected one process root, classes=%v", classes)
 	}
+	if classes["nix_process_root"] != 1 {
+		t.Fatalf("expected one nix process root, classes=%v", classes)
+	}
+	if classes["lsof_root"] != 1 {
+		t.Fatalf("expected one lsof root, classes=%v", classes)
+	}
 	if classes["profile_root"] != 1 {
 		t.Fatalf("expected one profile root, classes=%v", classes)
+	}
+	if classes["direnv_root"] != 1 {
+		t.Fatalf("expected one direnv root, classes=%v", classes)
 	}
 	if classes["auto_gcroot"] != 1 {
 		t.Fatalf("expected one auto gcroot, classes=%v", classes)
@@ -416,10 +429,13 @@ func TestParseNixGCRoots(t *testing.T) {
 	if classes["workspace_result"] != 1 {
 		t.Fatalf("expected one workspace result root, classes=%v", classes)
 	}
-	if active != 1 {
-		t.Fatalf("expected one active root, got %d", active)
+	if classes["nix_cache_root"] != 1 {
+		t.Fatalf("expected one nix cache root, classes=%v", classes)
 	}
-	if roots[0].Class != "process_root" || roots[1].Class != "workspace_result" {
+	if active != 3 {
+		t.Fatalf("expected three active roots, got %d", active)
+	}
+	if roots[0].Class != "nix_process_root" || roots[1].Class != "process_root" || roots[2].Class != "lsof_root" || roots[3].Class != "direnv_root" {
 		t.Fatalf("roots should be sorted by operator-actionable class, got %#v", roots)
 	}
 }
@@ -454,18 +470,34 @@ func TestNixGCRootTargetsAreProtectedAndLimited(t *testing.T) {
 func TestNixGCRootTargetsUseSpecificReviewActions(t *testing.T) {
 	roots := []nixGCRoot{
 		{
+			Root:      "{lsof}",
+			StorePath: "/nix/store/111-open-library",
+			Class:     "lsof_root",
+			Active:    true,
+		},
+		{
 			Root:      "/tmp/dev-env-profile-1-link",
 			StorePath: "/nix/store/222-dev-env",
 			Class:     "temporary_root",
+		},
+		{
+			Root:      "/Users/jess/git/kernel/.direnv/flake-profile-a5d5b61aa8a61b7d9d765e1daf971a9a578f1cfa",
+			StorePath: "/nix/store/444-kernel-env",
+			Class:     "direnv_root",
 		},
 		{
 			Root:      "/Users/jess/git/kernel/result",
 			StorePath: "/nix/store/333-kernel",
 			Class:     "workspace_result",
 		},
+		{
+			Root:      "/Users/jess/.cache/nix/flake-registry.json",
+			StorePath: "/nix/store/555-flake-registry.json",
+			Class:     "nix_cache_root",
+		},
 	}
 
-	targets := nixGCRootTargets(roots, 2)
+	targets := nixGCRootTargets(roots, 5)
 	actions := map[string]CleanupTarget{}
 	for _, target := range targets {
 		actions[target.Path] = target
@@ -476,9 +508,24 @@ func TestNixGCRootTargetsUseSpecificReviewActions(t *testing.T) {
 		t.Fatalf("temporary root target should carry specific review action and store path evidence: %+v", temporary)
 	}
 
+	lsof := actions["{lsof}"]
+	if lsof.Action != "review_lsof_gc_root" || lsof.Tier != CleanupTierDisruptive || lsof.Reclaim != CleanupReclaimNone || !lsof.Active {
+		t.Fatalf("lsof root target should carry active process review policy: %+v", lsof)
+	}
+
+	direnv := actions["/Users/jess/git/kernel/.direnv/flake-profile-a5d5b61aa8a61b7d9d765e1daf971a9a578f1cfa"]
+	if direnv.Action != "review_direnv_gc_root" || direnv.Tier != CleanupTierWarm || direnv.Reclaim != CleanupReclaimDeferred {
+		t.Fatalf("direnv root target should carry warm deferred review policy: %+v", direnv)
+	}
+
 	workspace := actions["/Users/jess/git/kernel/result"]
 	if workspace.Action != "review_workspace_result_root" || workspace.Tier != CleanupTierWarm || workspace.Reclaim != CleanupReclaimDeferred {
 		t.Fatalf("workspace result target should carry warm deferred review policy: %+v", workspace)
+	}
+
+	nixCache := actions["/Users/jess/.cache/nix/flake-registry.json"]
+	if nixCache.Action != "review_nix_cache_gc_root" || nixCache.Tier != CleanupTierWarm || nixCache.Reclaim != CleanupReclaimDeferred {
+		t.Fatalf("nix cache root target should carry warm deferred review policy: %+v", nixCache)
 	}
 }
 

@@ -93,9 +93,12 @@ Runtime behavior:
   profile;
 - low-reclaim dry-runs run `nix-store --gc --print-roots` and emit protected
   `nix_gc_root` targets so operators can see whether profiles, gcroots,
-  workspace `result` links, temporary roots, or active processes are pinning the
-  store; active process roots, temporary roots, and workspace result roots are
-  listed before generic unknown roots when attribution output is truncated;
+  direnv profiles, workspace `result` links, Nix cache roots, temporary roots,
+  lsof-discovered open store paths, active Nix process roots, or active
+  processes are pinning the store; active process roots, active Nix process
+  roots, lsof roots, temporary roots, direnv roots, workspace result roots, and
+  Nix cache roots are listed before generic unknown roots when attribution
+  output is truncated;
 - `nix-store --optimize` runs only when `allow_store_optimize: true`.
 
 Recommended Darwin developer-machine defaults are the repo defaults above.

@@ -976,35 +976,53 @@ func parseNixGCRoots(output string) []nixGCRoot {
 
 func nixGCRootClassRank(class string) int {
 	switch class {
-	case "process_root":
+	case "process_root", "nix_process_root":
 		return 0
-	case "temporary_root":
+	case "lsof_root":
 		return 1
-	case "workspace_result":
+	case "temporary_root":
 		return 2
-	case "auto_gcroot", "gcroot":
+	case "direnv_root":
 		return 3
-	case "profile_root":
+	case "workspace_result":
 		return 4
-	default:
+	case "nix_cache_root":
 		return 5
+	case "auto_gcroot", "gcroot":
+		return 6
+	case "profile_root":
+		return 7
+	default:
+		return 8
 	}
 }
 
 func classifyNixGCRoot(root string) (string, bool) {
+	root = strings.TrimSpace(root)
 	lower := strings.ToLower(root)
 
 	switch {
 	case strings.HasPrefix(root, "/proc/"):
 		return "process_root", true
+	case strings.HasPrefix(root, "{nix-process:"):
+		return "nix_process_root", true
+	case strings.HasPrefix(root, "{lsof}"):
+		return "lsof_root", true
 	case strings.Contains(lower, "/profiles/per-user/") ||
 		strings.Contains(lower, "/nix/var/nix/profiles") ||
 		strings.Contains(lower, "/.local/state/nix/profiles") ||
 		strings.Contains(lower, "/.nix-profile"):
 		return "profile_root", false
+	case strings.Contains(lower, "/.direnv/flake-inputs/") ||
+		strings.Contains(lower, "/.direnv/flake-profile-"):
+		return "direnv_root", false
+	case strings.Contains(lower, "/.cache/nix/"):
+		return "nix_cache_root", false
 	case strings.Contains(lower, "/gcroots/auto/"):
 		return "auto_gcroot", false
 	case strings.Contains(lower, "/gcroots/"):
+		return "gcroot", false
+	case strings.Contains(lower, "/nix-gc-roots/"):
 		return "gcroot", false
 	case strings.HasSuffix(root, "/result") ||
 		strings.Contains(root, "/result-"):
@@ -1057,12 +1075,18 @@ func nixGCRootTargets(roots []nixGCRoot, limit int) []CleanupTarget {
 
 func nixGCRootReviewAction(class string) string {
 	switch class {
-	case "process_root":
+	case "process_root", "nix_process_root":
 		return "review_active_gc_root"
+	case "lsof_root":
+		return "review_lsof_gc_root"
 	case "temporary_root":
 		return "review_temporary_gc_root"
+	case "direnv_root":
+		return "review_direnv_gc_root"
 	case "workspace_result":
 		return "review_workspace_result_root"
+	case "nix_cache_root":
+		return "review_nix_cache_gc_root"
 	default:
 		return "review_gc_root"
 	}
@@ -1070,9 +1094,9 @@ func nixGCRootReviewAction(class string) string {
 
 func nixGCRootTier(class string) string {
 	switch class {
-	case "process_root":
+	case "process_root", "nix_process_root", "lsof_root":
 		return CleanupTierDisruptive
-	case "workspace_result", "gcroot", "auto_gcroot", "unknown_root":
+	case "direnv_root", "workspace_result", "nix_cache_root", "gcroot", "auto_gcroot", "unknown_root":
 		return CleanupTierWarm
 	default:
 		return CleanupTierSafe
@@ -1081,7 +1105,7 @@ func nixGCRootTier(class string) string {
 
 func nixGCRootReclaim(class string) string {
 	switch class {
-	case "temporary_root", "workspace_result", "gcroot", "auto_gcroot":
+	case "temporary_root", "direnv_root", "workspace_result", "nix_cache_root", "gcroot", "auto_gcroot":
 		return CleanupReclaimDeferred
 	default:
 		return CleanupReclaimNone
