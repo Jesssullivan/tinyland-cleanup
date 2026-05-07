@@ -286,17 +286,15 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		return targets[i].Bytes > targets[j].Bytes
 	})
 
-	var total, estimated int64
+	var estimated int64
 	for _, target := range targets {
-		total += target.Bytes
 		if target.Action == "delete" || target.Action == "clean-cache" {
 			estimated += target.Bytes
 		}
 	}
 	plan.Targets = targets
 	plan.EstimatedBytesFreed = estimated
-	plan.Metadata["target_count"] = strconv.Itoa(len(targets))
-	plan.Metadata["total_physical_bytes"] = strconv.FormatInt(total, 10)
+	annotateCleanupPlanTargetAccounting(&plan)
 	scanBudget.annotatePlan(&plan)
 
 	return plan

@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
@@ -174,6 +175,55 @@ func hostReclaimForAction(action string) string {
 	default:
 		return CleanupReclaimNone
 	}
+}
+
+func annotateCleanupPlanTargetAccounting(plan *CleanupPlan) {
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]string{}
+	}
+
+	var totalPhysical int64
+	var hostReclaimCandidate int64
+	var deferredReclaimCandidate int64
+	var protectedPhysical int64
+	var activeProtectedPhysical int64
+	var reviewPhysical int64
+
+	for _, target := range plan.Targets {
+		if target.Bytes <= 0 {
+			continue
+		}
+		totalPhysical += target.Bytes
+
+		if target.Protected {
+			protectedPhysical += target.Bytes
+			if target.Active {
+				activeProtectedPhysical += target.Bytes
+			}
+			continue
+		}
+
+		reclaim := target.Reclaim
+		if reclaim == "" {
+			reclaim = hostReclaimForAction(target.Action)
+		}
+		switch reclaim {
+		case CleanupReclaimHost:
+			hostReclaimCandidate += target.Bytes
+		case CleanupReclaimDeferred:
+			deferredReclaimCandidate += target.Bytes
+		default:
+			reviewPhysical += target.Bytes
+		}
+	}
+
+	plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
+	plan.Metadata["total_physical_bytes"] = strconv.FormatInt(totalPhysical, 10)
+	plan.Metadata["host_reclaim_candidate_bytes"] = strconv.FormatInt(hostReclaimCandidate, 10)
+	plan.Metadata["deferred_reclaim_candidate_bytes"] = strconv.FormatInt(deferredReclaimCandidate, 10)
+	plan.Metadata["protected_physical_bytes"] = strconv.FormatInt(protectedPhysical, 10)
+	plan.Metadata["active_protected_physical_bytes"] = strconv.FormatInt(activeProtectedPhysical, 10)
+	plan.Metadata["review_physical_bytes"] = strconv.FormatInt(reviewPhysical, 10)
 }
 
 // Plugin is the interface that cleanup plugins must implement.

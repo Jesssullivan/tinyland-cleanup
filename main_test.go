@@ -135,6 +135,14 @@ func TestRunOnceDryRunTextReportExplainsPlan(t *testing.T) {
 				},
 			},
 			Warnings: []string{"review before cleanup"},
+			Metadata: map[string]string{
+				"total_physical_bytes":             "1024",
+				"host_reclaim_candidate_bytes":     "0",
+				"deferred_reclaim_candidate_bytes": "0",
+				"protected_physical_bytes":         "1024",
+				"active_protected_physical_bytes":  "0",
+				"review_physical_bytes":            "0",
+			},
 		},
 	}
 	daemon := newTestDaemon(t, mock, &output)
@@ -152,6 +160,7 @@ func TestRunOnceDryRunTextReportExplainsPlan(t *testing.T) {
 		"plan: estimated reclaim 1.0 MiB",
 		"- reporting: would run (dry_run)",
 		"reporting dry-run plan",
+		"accounting: total 1.0 KiB, host reclaim 0 B, deferred 0 B, protected 1.0 KiB, active protected 0 B, review 0 B",
 		"example-cache (/tmp/example-cache) [cache]: review, protected, tier=warm, reclaim=none, 1.0 KiB - operator review required",
 		"review before cleanup",
 	} {
