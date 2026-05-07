@@ -836,6 +836,38 @@ func TestPlanTemporaryArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	}
 }
 
+func TestPlanTemporaryArtifactsDoesNotChargeSymlinkTargets(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nix-shell.symlink-forest")
+	targetDir := filepath.Join(tmpDir, "store-target")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "large-store-file"), bytesOfSize(2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(targetDir, "large-store-file"), filepath.Join(root, "tool")); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	oldTime := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	var targets []CleanupTarget
+	p.planTemporaryArtifacts(context.Background(), tmpDir, 1024*1024, 6*time.Hour, nil, nil, &targets)
+
+	for _, target := range targets {
+		if target.Path == root {
+			t.Fatalf("symlink forest should not be reported as large temp artifact, got %#v", target)
+		}
+	}
+}
+
 func TestPlanCleanupReportsGeneratedArtifactsInsideStaleTemporaryRoots(t *testing.T) {
 	p := newDevArtifactsPluginWithActive(nil)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
