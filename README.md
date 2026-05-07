@@ -95,6 +95,9 @@ Development-artifact active-process protection is path-scoped when process cwd
 or command-line evidence proves the active project root, and JSON metadata
 includes `active_dev_artifact_roots` for those protected roots. If cwd evidence
 is unavailable, cleanup keeps the conservative family-wide protection fallback.
+When that fallback protects a whole generated-output family, dry-run planning
+skips the expensive workspace scan for that family and records it in
+`global_active_dev_artifact_scan_skips`.
 
 For a one-off run, override the configured maximum used-space target without
 editing the config file:

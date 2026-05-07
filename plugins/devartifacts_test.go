@@ -697,7 +697,7 @@ func TestPlanNodeModulesScopesActiveProjectProtection(t *testing.T) {
 	}
 }
 
-func TestPlanCleanupAccountsActiveProtectedDevArtifacts(t *testing.T) {
+func TestPlanCleanupSkipsGlobalActiveDevArtifactFamilyScans(t *testing.T) {
 	p := newDevArtifactsPluginWithActive(map[string]string{
 		"node_modules": "Node.js package manager or runtime",
 	})
@@ -727,14 +727,19 @@ func TestPlanCleanupAccountsActiveProtectedDevArtifacts(t *testing.T) {
 	cfg.DevArtifacts.GoBuildCache = false
 	cfg.DevArtifacts.HaskellCache = false
 	cfg.DevArtifacts.TempArtifacts = false
+	cfg.DevArtifacts.LargeLocalArtifacts = false
+	cfg.DevArtifacts.LMStudioModels = false
+	cfg.DevArtifacts.ScanMaxEntries = 1
 
 	plan := p.PlanCleanup(context.Background(), LevelAggressive, cfg, logger)
-	target := findDevArtifactTarget(t, plan.Targets, "node_modules", filepath.Join(project, "node_modules"))
-	if target.Action != "protect" || !target.Protected || !target.Active {
-		t.Fatalf("expected active node_modules to be protected, got %#v", target)
+	if len(plan.Targets) != 0 {
+		t.Fatalf("global active node_modules should skip expensive scan targets, got %#v", plan.Targets)
 	}
-	if got := plan.Metadata["active_protected_physical_bytes"]; got != strconv.FormatInt(target.Bytes, 10) {
-		t.Fatalf("expected active protected bytes to match target size, got %q metadata=%#v", got, plan.Metadata)
+	if got := plan.Metadata["global_active_dev_artifact_scan_skips"]; got != "node_modules: Node.js package manager or runtime" {
+		t.Fatalf("expected global active scan skip metadata, got %q metadata=%#v", got, plan.Metadata)
+	}
+	if got := plan.Metadata["scan_budget_exhausted"]; got == "true" {
+		t.Fatalf("global active family scan should not exhaust scan budget, metadata=%#v", plan.Metadata)
 	}
 	if got := plan.Metadata["host_reclaim_candidate_bytes"]; got != "0" {
 		t.Fatalf("active protected artifact should not be a host reclaim candidate, got %q", got)
