@@ -83,7 +83,9 @@ Large top-level temp roots remain review-only, but stale inactive roots may
 also expose narrower generated-output targets such as Rust `target/`
 directories for safe pruning without deleting the worktree. If scan budgets are
 hit, dry-run output marks the evidence partial with `scan_budget_exhausted` and
-lists `scan_truncated_paths`.
+lists `scan_truncated_paths`. Symlink-heavy temporary roots, including Nix
+shell symlink forests, are measured as symlink entries rather than as the store
+paths they point at.
 
 For a one-off run, override the configured maximum used-space target without
 editing the config file:

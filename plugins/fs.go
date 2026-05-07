@@ -149,10 +149,12 @@ func getFreeDiskSpace(path string) (uint64, error) {
 	return stat.Bavail * uint64(stat.Bsize), nil
 }
 
-// getFileAllocatedBytes returns physical blocks allocated on disk for a file.
+// getFileAllocatedBytes returns physical blocks allocated on disk for a file or
+// symlink. It intentionally uses lstat so symlink forests do not charge the
+// allocation of their /nix/store targets to the directory that contains them.
 // It falls back to apparent size if the filesystem does not report blocks.
 func getFileAllocatedBytes(path string) (int64, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return 0, err
 	}

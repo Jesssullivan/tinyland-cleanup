@@ -199,7 +199,10 @@ critical pressure. Dev-artifact filesystem walking is bounded by
 `dev_artifacts.scan_max_duration`, `dev_artifacts.scan_max_entries`, and
 `dev_artifacts.temp_scan_max_roots`; when a budget is hit, dry-run metadata sets
 `scan_budget_exhausted: true`, reports `scan_truncated_paths`, and treats the
-omitted evidence as non-actionable.
+omitted evidence as non-actionable. Symlink-heavy temporary roots, including Nix
+shell symlink forests, are measured as symlink entries rather than as the
+`/nix/store` paths they point at, so dry-run byte counts do not attribute store
+closures to temporary proof directories.
 
 For Docker, the plan reports Docker daemon disk-usage rows from `docker system
 df`, including images, stopped containers, local volumes, and build cache when

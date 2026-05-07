@@ -125,6 +125,10 @@ All notable changes to this project will be documented in this file.
   cache-tier cleanup remains deferred while Bazel client work is visible.
 - Pass BuildKit `--keep-storage` as the numeric MB value expected by `buildctl`
   during targeted Podman cache pruning.
+- Filesystem allocation walks now account for symlink entries with `lstat`, so
+  temporary symlink forests such as Nix shell roots are not reported as
+  multi-GiB reclaim candidates by charging their `/nix/store` targets to the
+  containing temp directory.
 
 ## [0.2.0]
 
