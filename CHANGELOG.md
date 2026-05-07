@@ -51,6 +51,10 @@ All notable changes to this project will be documented in this file.
   Bazelisk, and pip cache targets.
 - Nix low-reclaim dry-runs now emit protected GC-root attribution targets so
   operators can see what is pinning the store before taking action.
+- Nix GC-root attribution now classifies Darwin `{lsof}` roots as active open
+  store paths, `{nix-process:<pid>}` roots as active Nix work, direnv flake
+  roots as warm review targets, and Nix cache roots separately, reducing
+  generic `unknown_root` noise on developer machines.
 - Human-readable `--output text` reports now explain dry-run and cleanup cycles
   with mount status, host free-space accounting, plugin plans, warnings, and
   representative targets.
