@@ -238,7 +238,7 @@ func TestCleanNodeModulesStale(t *testing.T) {
 	os.Chtimes(packageJSON, oldTime, oldTime)
 
 	// Clean with 30-day threshold - should remove
-	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
+	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactActivity(), newDevArtifactGitTracker(), logger)
 
 	if freed == 0 {
 		t.Error("expected node_modules to be cleaned (stale > 30 days)")
@@ -263,7 +263,7 @@ func TestCleanNodeModulesFresh(t *testing.T) {
 	// package.json has current mtime (just created)
 
 	// Clean with 30-day threshold - should NOT remove
-	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
+	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactActivity(), newDevArtifactGitTracker(), logger)
 
 	if freed != 0 {
 		t.Error("expected fresh node_modules to be preserved")
@@ -291,7 +291,7 @@ func TestCleanNodeModulesProtected(t *testing.T) {
 
 	// Clean with protection - should NOT remove
 	protectPaths := []string{project}
-	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, protectPaths, newDevArtifactGitTracker(), logger)
+	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, protectPaths, newDevArtifactActivity(), newDevArtifactGitTracker(), logger)
 
 	if freed != 0 {
 		t.Error("expected protected node_modules to be preserved")
@@ -317,7 +317,7 @@ func TestCleanZigArtifactsStale(t *testing.T) {
 	os.Chtimes(cacheArtifact, oldTime, oldTime)
 	os.Chtimes(outputArtifact, oldTime, oldTime)
 
-	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactActivity(), newDevArtifactGitTracker(), logger)
 	if freed == 0 {
 		t.Fatal("expected stale Zig artifacts to be cleaned")
 	}
@@ -339,7 +339,7 @@ func TestCleanZigArtifactsFresh(t *testing.T) {
 	os.WriteFile(filepath.Join(project, ".zig-cache", "o", "artifact"), []byte("cache"), 0644)
 	os.WriteFile(filepath.Join(project, "build.zig"), []byte("const std = @import(\"std\");"), 0644)
 
-	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactActivity(), newDevArtifactGitTracker(), logger)
 	if freed != 0 {
 		t.Fatal("expected fresh Zig artifacts to be preserved")
 	}
@@ -369,7 +369,7 @@ func TestPlanZigArtifactsProtectsRecentOutputAtCritical(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planZigArtifacts(context.Background(), tmpDir, 0, true, nil, nil, newDevArtifactGitTracker(), &targets)
+	p.planZigArtifacts(context.Background(), tmpDir, 0, true, nil, newDevArtifactActivity(), newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
 	if target.Action != "protect" || !target.Protected {
@@ -401,7 +401,7 @@ func TestCleanZigArtifactsPreservesRecentOutputAtCritical(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 0, nil, newDevArtifactGitTracker(), logger)
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 0, nil, newDevArtifactActivity(), newDevArtifactGitTracker(), logger)
 	if freed != 0 {
 		t.Fatalf("expected recent Zig output to be preserved, freed %d bytes", freed)
 	}
@@ -435,7 +435,7 @@ func TestPlanZigArtifactsProtectsTrackedCache(t *testing.T) {
 	runGit(t, git, project, "add", "build.zig", ".zig-cache/o/artifact")
 
 	var targets []CleanupTarget
-	p.planZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, true, nil, nil, newDevArtifactGitTracker(), &targets)
+	p.planZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, true, nil, newDevArtifactActivity(), newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
 	if target.Action != "protect" || !target.Protected {
@@ -471,7 +471,7 @@ func TestCleanZigArtifactsPreservesTrackedCache(t *testing.T) {
 	runGit(t, git, project, "init")
 	runGit(t, git, project, "add", "build.zig", ".zig-cache/o/artifact")
 
-	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactGitTracker(), logger)
+	freed := p.cleanZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, nil, newDevArtifactActivity(), newDevArtifactGitTracker(), logger)
 	if freed != 0 {
 		t.Fatalf("expected tracked Zig cache to be preserved, freed %d bytes", freed)
 	}
@@ -650,13 +650,50 @@ func TestPlanNodeModulesProtectsActiveDevelopmentProcess(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planNodeModules(context.Background(), tmpDir, 30*24*time.Hour, true, nil, map[string]string{
+	p.planNodeModules(context.Background(), tmpDir, 30*24*time.Hour, true, nil, newUnscopedDevArtifactActivity(map[string]string{
 		"node_modules": "Node.js package manager or runtime",
-	}, newDevArtifactGitTracker(), &targets)
+	}), newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "node_modules", filepath.Join(project, "node_modules"))
 	if target.Action != "protect" || !target.Protected || !target.Active {
 		t.Fatalf("expected active node_modules to be protected, got %#v", target)
+	}
+}
+
+func TestPlanNodeModulesScopesActiveProjectProtection(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	activeProject := filepath.Join(tmpDir, "active-project")
+	staleProject := filepath.Join(tmpDir, "stale-project")
+	for _, project := range []string{activeProject, staleProject} {
+		if err := os.MkdirAll(filepath.Join(project, "node_modules", "pkg"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(project, "node_modules", "pkg", "index.js"), []byte("module.exports = {}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		packageJSON := filepath.Join(project, "package.json")
+		if err := os.WriteFile(packageJSON, []byte(`{"name":"project"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		oldTime := time.Now().Add(-60 * 24 * time.Hour)
+		if err := os.Chtimes(packageJSON, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	active := newDevArtifactActivity()
+	active.addScoped("node_modules", activeProject, "Node.js package manager or runtime")
+	var targets []CleanupTarget
+	p.planNodeModules(context.Background(), tmpDir, 30*24*time.Hour, true, nil, active, newDevArtifactGitTracker(), &targets)
+
+	activeTarget := findDevArtifactTarget(t, targets, "node_modules", filepath.Join(activeProject, "node_modules"))
+	if activeTarget.Action != "protect" || !activeTarget.Protected || !activeTarget.Active {
+		t.Fatalf("expected scoped active project to be protected, got %#v", activeTarget)
+	}
+	staleTarget := findDevArtifactTarget(t, targets, "node_modules", filepath.Join(staleProject, "node_modules"))
+	if staleTarget.Action != "delete" || staleTarget.Protected || staleTarget.Active {
+		t.Fatalf("expected unrelated stale project to remain a delete candidate, got %#v", staleTarget)
 	}
 }
 
@@ -724,9 +761,9 @@ func TestPlanZigArtifactsProtectsActiveDevelopmentProcess(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, true, nil, map[string]string{
+	p.planZigArtifacts(context.Background(), tmpDir, 30*24*time.Hour, true, nil, newUnscopedDevArtifactActivity(map[string]string{
 		"zig-artifact": "Zig toolchain process",
-	}, newDevArtifactGitTracker(), &targets)
+	}), newDevArtifactGitTracker(), &targets)
 
 	target := findDevArtifactTarget(t, targets, "zig-artifact", filepath.Join(project, ".zig-cache"))
 	if target.Action != "protect" || !target.Protected || !target.Active {
@@ -1160,6 +1197,85 @@ func TestDevArtifactBusyProcessReasons(t *testing.T) {
 		if active[targetType] != reason {
 			t.Fatalf("active[%s] = %q, want %q; active=%#v", targetType, active[targetType], reason, active)
 		}
+	}
+}
+
+func TestDevArtifactActivityFromProcessEvidenceScopesCWD(t *testing.T) {
+	tmpDir := t.TempDir()
+	activeProject := filepath.Join(tmpDir, "active-project")
+	staleProject := filepath.Join(tmpDir, "stale-project")
+	for _, project := range []string{activeProject, staleProject} {
+		if err := os.MkdirAll(project, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(project, "package.json"), []byte(`{"name":"project"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	candidates := devArtifactProcessCandidates("123 /nix/store/node/bin/node node vite dev")
+	activity := devArtifactActivityFromProcessEvidence(candidates, map[string]string{"123": activeProject}, []string{tmpDir}, "")
+
+	if reason, ok := activity.TargetReason("node_modules", filepath.Join(activeProject, "node_modules")); !ok || !strings.Contains(reason, "Node.js") {
+		t.Fatalf("expected active project target to be protected, reason=%q ok=%v", reason, ok)
+	}
+	if _, ok := activity.TargetReason("node_modules", filepath.Join(staleProject, "node_modules")); ok {
+		t.Fatal("expected unrelated project target to remain unprotected")
+	}
+	if activity.GlobalFamilyActive("node_modules") {
+		t.Fatal("path-scoped node activity should not force family-wide protection")
+	}
+}
+
+func TestDevArtifactActivityNormalizesNestedNodeModulesPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	project := filepath.Join(tmpDir, "active-project")
+	nestedPackage := filepath.Join(project, "node_modules", "vite")
+	if err := os.MkdirAll(nestedPackage, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "package.json"), []byte(`{"name":"project"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedPackage, "package.json"), []byte(`{"name":"vite"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := devArtifactProcessCandidates("123 /nix/store/node/bin/node node " + filepath.Join(nestedPackage, "bin", "vite.js"))
+	activity := devArtifactActivityFromProcessEvidence(candidates, nil, []string{tmpDir}, "")
+
+	if _, ok := activity.scopedRoots["node_modules"][project]; !ok {
+		t.Fatalf("expected nested node_modules process to scope to project root %q, got %#v", project, activity.scopedRoots)
+	}
+	if _, ok := activity.scopedRoots["node_modules"][nestedPackage]; ok {
+		t.Fatalf("nested package root should not be treated as owning project, got %#v", activity.scopedRoots)
+	}
+}
+
+func TestDevArtifactActivityIgnoresKnownOutOfScopeProcess(t *testing.T) {
+	tmpDir := t.TempDir()
+	project := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "package.json"), []byte(`{"name":"project"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := devArtifactProcessCandidates("123 /nix/store/node/bin/node node background-helper")
+	activity := devArtifactActivityFromProcessEvidence(candidates, map[string]string{"123": "/Applications"}, []string{tmpDir}, "")
+
+	if activity.HasActivity() {
+		t.Fatalf("known out-of-scope process should not protect scanned artifacts, got %#v", activity)
+	}
+}
+
+func TestDevArtifactActivityKeepsUnscopedFallbackWhenCWDUnknown(t *testing.T) {
+	tmpDir := t.TempDir()
+	candidates := devArtifactProcessCandidates("123 /nix/store/node/bin/node node background-helper")
+	activity := devArtifactActivityFromProcessEvidence(candidates, nil, []string{tmpDir}, "")
+
+	if !activity.GlobalFamilyActive("node_modules") {
+		t.Fatalf("missing cwd evidence should keep conservative family protection, got %#v", activity)
 	}
 }
 

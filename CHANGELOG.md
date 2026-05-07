@@ -92,6 +92,10 @@ All notable changes to this project will be documented in this file.
 - Dev-artifact cleanup now scans stale inactive temporary roots for narrower
   generated-output targets, allowing Rust `target/`, `node_modules`, Python
   virtualenv, and Zig output pruning without deleting the top-level temp root.
+- Dev-artifact active-process protection for `node_modules`, Python
+  virtualenvs, Rust `target/`, and Zig outputs is now path-scoped when process
+  cwd or command-line evidence proves the active project root; missing cwd
+  evidence keeps the conservative family-wide protection fallback.
 - Dev-artifact dry-run and cleanup filesystem walkers now observe cancellation,
   and active temporary roots are protected without expensive size walks so
   operator probes do not compete with active lab or Bazel scratch work.

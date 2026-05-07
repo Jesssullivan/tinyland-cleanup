@@ -91,6 +91,10 @@ For Darwin developer-cache and development-artifact plans, dry-run metadata and
 text reports separate bytes that are direct host-reclaim candidates from bytes
 that are protected, active-protected, deferred, or review-only. Use that
 accounting when a host is full but the safe reclaim estimate is near zero.
+Development-artifact active-process protection is path-scoped when process cwd
+or command-line evidence proves the active project root, and JSON metadata
+includes `active_dev_artifact_roots` for those protected roots. If cwd evidence
+is unavailable, cleanup keeps the conservative family-wide protection fallback.
 
 For a one-off run, override the configured maximum used-space target without
 editing the config file:

@@ -26,8 +26,22 @@ import (
 const devArtifactRecentOutputGrace = 2 * time.Hour
 
 var tempArtifactPathPattern = regexp.MustCompile(`(?:/private)?/tmp/[^\s"'<>]+|/var/tmp/[^\s"'<>]+`)
+var absoluteDevArtifactPathPattern = regexp.MustCompile(`(?:~|/)[^\s"'<>]+`)
 
 var errDevArtifactScanBudgetExceeded = errors.New("dev artifact scan budget exceeded")
+
+type devArtifactActivity struct {
+	familyReasons   map[string]string
+	unscopedReasons map[string]string
+	scopedRoots     map[string]map[string]string
+}
+
+type devArtifactProcessCandidate struct {
+	PID        string
+	TargetType string
+	Reason     string
+	Line       string
+}
 
 type devArtifactScanBudget struct {
 	maxDuration  time.Duration
@@ -220,11 +234,14 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		plan.Warnings = append(plan.Warnings, "warning level reports development artifacts only; moderate or higher is required for deletion")
 	}
 
-	active, activeErr := p.activeDevArtifactProcesses(ctx)
+	active, activeErr := p.activeDevArtifactActivity(ctx, append(append([]string{}, daCfg.ScanPaths...), daCfg.TempScanPaths...), home)
 	if activeErr != nil {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not inspect active development processes: %v", activeErr))
-	} else if len(active) > 0 {
-		plan.Metadata["active_dev_artifacts"] = strings.Join(devArtifactActivityReasons(active), ", ")
+	} else if active.HasActivity() {
+		plan.Metadata["active_dev_artifacts"] = strings.Join(active.ActivityReasons(), ", ")
+		if scoped := active.ScopedRootReasons(); len(scoped) > 0 {
+			plan.Metadata["active_dev_artifact_roots"] = strings.Join(scoped, ", ")
+		}
 	}
 
 	tracker := newDevArtifactGitTracker()
@@ -324,7 +341,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		return result
 	}
 
-	active, activeErr := p.activeDevArtifactProcesses(ctx)
+	active, activeErr := p.activeDevArtifactActivity(ctx, append(append([]string{}, daCfg.ScanPaths...), daCfg.TempScanPaths...), home)
 	if activeErr != nil {
 		logger.Warn("skipping dev artifact cleanup because active process inspection failed", "error", activeErr)
 		return result
@@ -339,8 +356,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			continue
 		}
 
-		if daCfg.NodeModules && !devArtifactFamilyActive(active, "node_modules") {
-			freed := p.cleanNodeModules(scanCtx, expanded, nodeAge, daCfg.ProtectPaths, tracker, logger, scanBudget)
+		if daCfg.NodeModules && !active.GlobalFamilyActive("node_modules") {
+			freed := p.cleanNodeModules(scanCtx, expanded, nodeAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -351,8 +368,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			return result
 		}
 
-		if daCfg.PythonVenvs && !devArtifactFamilyActive(active, "python-venv") {
-			freed := p.cleanPythonVenvs(scanCtx, expanded, venvAge, daCfg.ProtectPaths, tracker, logger, scanBudget)
+		if daCfg.PythonVenvs && !active.GlobalFamilyActive("python-venv") {
+			freed := p.cleanPythonVenvs(scanCtx, expanded, venvAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -363,8 +380,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			return result
 		}
 
-		if daCfg.RustTargets && !devArtifactFamilyActive(active, "rust-target") {
-			freed := p.cleanRustTargets(scanCtx, expanded, rustAge, daCfg.ProtectPaths, tracker, logger, scanBudget)
+		if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
+			freed := p.cleanRustTargets(scanCtx, expanded, rustAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -375,8 +392,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			return result
 		}
 
-		if daCfg.ZigArtifacts && !devArtifactFamilyActive(active, "zig-artifact") {
-			freed := p.cleanZigArtifacts(scanCtx, expanded, zigAge, daCfg.ProtectPaths, tracker, logger, scanBudget)
+		if daCfg.ZigArtifacts && !active.GlobalFamilyActive("zig-artifact") {
+			freed := p.cleanZigArtifacts(scanCtx, expanded, zigAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -410,7 +427,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	}
 
 	// Go build cache (not path-dependent - it's a global cache)
-	if daCfg.GoBuildCache && !devArtifactFamilyActive(active, "go-build-cache") {
+	if daCfg.GoBuildCache && !active.GlobalFamilyActive("go-build-cache") {
 		freed := p.cleanGoBuildCache(ctx, level, logger)
 		result.BytesFreed += freed
 		if freed > 0 {
@@ -419,7 +436,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	}
 
 	// Haskell cache cleanup
-	if daCfg.HaskellCache && !devArtifactFamilyActive(active, "haskell-cache") {
+	if daCfg.HaskellCache && !active.GlobalFamilyActive("haskell-cache") {
 		freed := p.cleanHaskellCache(ctx, level, home, logger)
 		result.BytesFreed += freed
 		if freed > 0 {
@@ -428,7 +445,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	}
 
 	// LM Studio models (opt-in only)
-	if daCfg.LMStudioModels && !devArtifactFamilyActive(active, "lmstudio-models") {
+	if daCfg.LMStudioModels && !active.GlobalFamilyActive("lmstudio-models") {
 		freed := p.cleanLMStudioModels(ctx, level, home, logger)
 		result.BytesFreed += freed
 		if freed > 0 {
@@ -452,7 +469,7 @@ func devArtifactThresholds(level CleanupLevel) (nodeAge, venvAge, rustAge, zigAg
 	}
 }
 
-func (p *DevArtifactsPlugin) planNodeModules(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+func (p *DevArtifactsPlugin) planNodeModules(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active devArtifactActivity, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	p.findArtifactDirs(ctx, scanPath, "node_modules", "package.json", func(dir string, size int64) {
 		marker := filepath.Join(filepath.Dir(dir), "package.json")
@@ -461,7 +478,7 @@ func (p *DevArtifactsPlugin) planNodeModules(ctx context.Context, scanPath strin
 	}, budget)
 }
 
-func (p *DevArtifactsPlugin) planPythonVenvs(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+func (p *DevArtifactsPlugin) planPythonVenvs(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active devArtifactActivity, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	markers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
 	p.findArtifactDirs(ctx, scanPath, ".venv", "", func(dir string, size int64) {
@@ -470,7 +487,7 @@ func (p *DevArtifactsPlugin) planPythonVenvs(ctx context.Context, scanPath strin
 	}, budget)
 }
 
-func (p *DevArtifactsPlugin) planRustTargets(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+func (p *DevArtifactsPlugin) planRustTargets(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active devArtifactActivity, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	p.findArtifactDirs(ctx, scanPath, "target", "Cargo.toml", func(dir string, size int64) {
 		marker := filepath.Join(filepath.Dir(dir), "Cargo.toml")
@@ -479,7 +496,7 @@ func (p *DevArtifactsPlugin) planRustTargets(ctx context.Context, scanPath strin
 	}, budget)
 }
 
-func (p *DevArtifactsPlugin) planZigArtifacts(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+func (p *DevArtifactsPlugin) planZigArtifacts(ctx context.Context, scanPath string, maxAge time.Duration, mutates bool, protectPaths []string, active devArtifactActivity, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	for _, artifactName := range []string{".zig-cache", "zig-out"} {
 		p.findArtifactDirs(ctx, scanPath, artifactName, "build.zig", func(dir string, size int64) {
@@ -542,7 +559,7 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 	}
 }
 
-func (p *DevArtifactsPlugin) planTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active, activeRoots map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+func (p *DevArtifactsPlugin) planTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active devArtifactActivity, activeRoots map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	p.forEachStaleTemporaryRoot(ctx, scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
 		if daCfg.NodeModules {
@@ -560,22 +577,22 @@ func (p *DevArtifactsPlugin) planTemporaryGeneratedArtifacts(ctx context.Context
 	}, budget)
 }
 
-func (p *DevArtifactsPlugin) cleanTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, daCfg config.DevArtifactsConfig, active, activeRoots map[string]string, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+func (p *DevArtifactsPlugin) cleanTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, daCfg config.DevArtifactsConfig, active devArtifactActivity, activeRoots map[string]string, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
 	var totalFreed int64
 	budget := optionalDevArtifactScanBudget(budgets)
 	p.forEachStaleTemporaryRoot(ctx, scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
 		logger.Debug("scanning stale temporary root for generated artifacts", "path", root)
-		if daCfg.NodeModules && !devArtifactFamilyActive(active, "node_modules") {
-			totalFreed += p.cleanNodeModules(ctx, root, nodeAge, daCfg.ProtectPaths, tracker, logger, budget)
+		if daCfg.NodeModules && !active.GlobalFamilyActive("node_modules") {
+			totalFreed += p.cleanNodeModules(ctx, root, nodeAge, daCfg.ProtectPaths, active, tracker, logger, budget)
 		}
-		if daCfg.PythonVenvs && !devArtifactFamilyActive(active, "python-venv") {
-			totalFreed += p.cleanPythonVenvs(ctx, root, venvAge, daCfg.ProtectPaths, tracker, logger, budget)
+		if daCfg.PythonVenvs && !active.GlobalFamilyActive("python-venv") {
+			totalFreed += p.cleanPythonVenvs(ctx, root, venvAge, daCfg.ProtectPaths, active, tracker, logger, budget)
 		}
-		if daCfg.RustTargets && !devArtifactFamilyActive(active, "rust-target") {
-			totalFreed += p.cleanRustTargets(ctx, root, rustAge, daCfg.ProtectPaths, tracker, logger, budget)
+		if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
+			totalFreed += p.cleanRustTargets(ctx, root, rustAge, daCfg.ProtectPaths, active, tracker, logger, budget)
 		}
-		if daCfg.ZigArtifacts && !devArtifactFamilyActive(active, "zig-artifact") {
-			totalFreed += p.cleanZigArtifacts(ctx, root, zigAge, daCfg.ProtectPaths, tracker, logger, budget)
+		if daCfg.ZigArtifacts && !active.GlobalFamilyActive("zig-artifact") {
+			totalFreed += p.cleanZigArtifacts(ctx, root, zigAge, daCfg.ProtectPaths, active, tracker, logger, budget)
 		}
 	}, budget)
 	return totalFreed
@@ -906,8 +923,8 @@ func largeLocalArtifactDirKinds() map[string]string {
 	}
 }
 
-func (p *DevArtifactsPlugin) devArtifactTarget(targetType, name, path string, bytes int64, stale, mutates, protected bool, protectReason string, tracked bool, marker string, maxAge time.Duration, active map[string]string) CleanupTarget {
-	activeReason, isActive := active[targetType]
+func (p *DevArtifactsPlugin) devArtifactTarget(targetType, name, path string, bytes int64, stale, mutates, protected bool, protectReason string, tracked bool, marker string, maxAge time.Duration, active devArtifactActivity) CleanupTarget {
+	activeReason, isActive := active.TargetReason(targetType, path)
 	target := CleanupTarget{
 		Type:      targetType,
 		Name:      name,
@@ -964,7 +981,7 @@ func (p *DevArtifactsPlugin) pythonProjectStale(parentDir string, markers []stri
 	return true
 }
 
-func (p *DevArtifactsPlugin) planGoBuildCache(ctx context.Context, level CleanupLevel, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planGoBuildCache(ctx context.Context, level CleanupLevel, active devArtifactActivity, targets *[]CleanupTarget) {
 	dir := p.getGoCacheDir(ctx)
 	if dir == "" || !pathExistsAndIsDir(dir) {
 		return
@@ -982,7 +999,7 @@ func (p *DevArtifactsPlugin) planGoBuildCache(ctx context.Context, level Cleanup
 		Path:  dir,
 		Bytes: size,
 	}
-	if activeReason, ok := active["go-build-cache"]; ok {
+	if activeReason, ok := active.FamilyReason("go-build-cache"); ok {
 		target.Action = "protect"
 		target.Active = true
 		target.Protected = true
@@ -1008,7 +1025,7 @@ func (p *DevArtifactsPlugin) planGoBuildCache(ctx context.Context, level Cleanup
 	*targets = append(*targets, target)
 }
 
-func (p *DevArtifactsPlugin) planHaskellCaches(ctx context.Context, home string, level CleanupLevel, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planHaskellCaches(ctx context.Context, home string, level CleanupLevel, active devArtifactActivity, targets *[]CleanupTarget) {
 	ghcupCache := filepath.Join(home, ".ghcup", "cache")
 	if pathExistsAndIsDir(ghcupCache) {
 		bytes, err := getDirAllocatedBytesContext(ctx, ghcupCache)
@@ -1021,7 +1038,7 @@ func (p *DevArtifactsPlugin) planHaskellCaches(ctx context.Context, home string,
 			Path:  ghcupCache,
 			Bytes: bytes,
 		}
-		if activeReason, ok := active["haskell-cache"]; ok {
+		if activeReason, ok := active.FamilyReason("haskell-cache"); ok {
 			target.Action = "protect"
 			target.Active = true
 			target.Protected = true
@@ -1050,7 +1067,7 @@ func (p *DevArtifactsPlugin) planHaskellCaches(ctx context.Context, home string,
 			Path:  cabalStore,
 			Bytes: bytes,
 		}
-		if activeReason, ok := active["haskell-cache"]; ok {
+		if activeReason, ok := active.FamilyReason("haskell-cache"); ok {
 			target.Action = "protect"
 			target.Active = true
 			target.Protected = true
@@ -1072,7 +1089,7 @@ func (p *DevArtifactsPlugin) planHaskellCaches(ctx context.Context, home string,
 	}
 }
 
-func (p *DevArtifactsPlugin) planLMStudioModels(ctx context.Context, home string, level CleanupLevel, active map[string]string, targets *[]CleanupTarget) {
+func (p *DevArtifactsPlugin) planLMStudioModels(ctx context.Context, home string, level CleanupLevel, active devArtifactActivity, targets *[]CleanupTarget) {
 	dir := filepath.Join(home, ".lmstudio", "models")
 	if !pathExistsAndIsDir(dir) {
 		return
@@ -1087,7 +1104,7 @@ func (p *DevArtifactsPlugin) planLMStudioModels(ctx context.Context, home string
 		Path:  dir,
 		Bytes: bytes,
 	}
-	if activeReason, ok := active["lmstudio-models"]; ok {
+	if activeReason, ok := active.FamilyReason("lmstudio-models"); ok {
 		target.Action = "protect"
 		target.Active = true
 		target.Protected = true
@@ -1108,76 +1125,464 @@ func (p *DevArtifactsPlugin) planLMStudioModels(ctx context.Context, home string
 	*targets = append(*targets, target)
 }
 
-func (p *DevArtifactsPlugin) activeDevArtifactProcesses(ctx context.Context) (map[string]string, error) {
+func (p *DevArtifactsPlugin) activeDevArtifactActivity(ctx context.Context, scanPaths []string, home string) (devArtifactActivity, error) {
 	if p.activeProcesses != nil {
-		return p.activeProcesses(ctx)
+		active, err := p.activeProcesses(ctx)
+		return newUnscopedDevArtifactActivity(active), err
 	}
 
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	cmd := exec.CommandContext(psCtx, "ps", "-axo", "pid=,comm=,args=")
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return devArtifactActivity{}, err
 	}
-	return devArtifactBusyProcessReasons(string(output)), nil
+	candidates := devArtifactProcessCandidates(string(output))
+	cwds := devArtifactProcessCWDs(ctx, candidates)
+	return devArtifactActivityFromProcessEvidence(candidates, cwds, scanPaths, home), nil
 }
 
 func devArtifactBusyProcessReasons(output string) map[string]string {
 	active := map[string]string{}
-	add := func(targetType, reason string) {
-		if _, ok := active[targetType]; !ok {
-			active[targetType] = reason
-		}
-	}
-
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(strings.ToLower(line))
-		if len(fields) == 0 {
-			continue
-		}
-		command := filepath.Base(fields[0])
-		arg0 := command
-		if len(fields) > 1 {
-			arg0 = filepath.Base(fields[1])
-		}
-		normalized := strings.Join(fields, " ")
-
-		switch {
-		case command == "npm" || command == "pnpm" || command == "yarn" || command == "bun" ||
-			arg0 == "npm" || arg0 == "pnpm" || arg0 == "yarn" || arg0 == "bun" ||
-			command == "node" || arg0 == "node":
-			add("node_modules", "Node.js package manager or runtime")
-		case command == "python" || command == "python3" || command == "pip" || command == "pip3" ||
-			command == "uv" || command == "poetry" || command == "pytest" ||
-			arg0 == "python" || arg0 == "python3" || arg0 == "pip" || arg0 == "pip3" ||
-			arg0 == "uv" || arg0 == "poetry" || arg0 == "pytest":
-			add("python-venv", "Python toolchain process")
-		case command == "cargo" || command == "rustc" || command == "rust-analyzer" ||
-			arg0 == "cargo" || arg0 == "rustc" || arg0 == "rust-analyzer":
-			add("rust-target", "Rust toolchain process")
-		case command == "zig" || command == "zls" ||
-			arg0 == "zig" || arg0 == "zls":
-			add("zig-artifact", "Zig toolchain process")
-		case (command == "go" || arg0 == "go") &&
-			(strings.Contains(normalized, " go build") ||
-				strings.Contains(normalized, " go test") ||
-				strings.Contains(normalized, " go run") ||
-				strings.Contains(normalized, " go install") ||
-				strings.Contains(normalized, " go clean") ||
-				strings.Contains(normalized, " go work")):
-			add("go-build-cache", "Go toolchain process")
-		case command == "gopls" || arg0 == "gopls":
-			add("go-build-cache", "Go language server process")
-		case command == "cabal" || command == "stack" || command == "ghcup" || command == "ghc" ||
-			arg0 == "cabal" || arg0 == "stack" || arg0 == "ghcup" || arg0 == "ghc":
-			add("haskell-cache", "Haskell toolchain process")
-		case strings.Contains(normalized, "lm studio") || strings.Contains(normalized, "lmstudio"):
-			add("lmstudio-models", "LM Studio process")
+	for _, candidate := range devArtifactProcessCandidates(output) {
+		if _, ok := active[candidate.TargetType]; !ok {
+			active[candidate.TargetType] = candidate.Reason
 		}
 	}
 	return active
+}
+
+func devArtifactProcessCandidates(output string) []devArtifactProcessCandidate {
+	var candidates []devArtifactProcessCandidate
+	for _, line := range strings.Split(output, "\n") {
+		candidate, ok := devArtifactProcessCandidateFromLine(line)
+		if ok {
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates
+}
+
+func devArtifactProcessCandidateFromLine(line string) (devArtifactProcessCandidate, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return devArtifactProcessCandidate{}, false
+	}
+	idx := 0
+	pid := ""
+	if _, err := strconv.Atoi(fields[0]); err == nil {
+		pid = fields[0]
+		idx = 1
+	}
+	if idx >= len(fields) {
+		return devArtifactProcessCandidate{}, false
+	}
+	command := filepath.Base(strings.ToLower(fields[idx]))
+	arg0 := command
+	if idx+1 < len(fields) {
+		arg0 = filepath.Base(strings.ToLower(fields[idx+1]))
+	}
+	normalized := strings.ToLower(line)
+
+	targetType := ""
+	reason := ""
+	switch {
+	case command == "npm" || command == "pnpm" || command == "yarn" || command == "bun" ||
+		arg0 == "npm" || arg0 == "pnpm" || arg0 == "yarn" || arg0 == "bun" ||
+		command == "node" || arg0 == "node":
+		targetType = "node_modules"
+		reason = "Node.js package manager or runtime"
+	case command == "python" || command == "python3" || command == "pip" || command == "pip3" ||
+		command == "uv" || command == "poetry" || command == "pytest" ||
+		arg0 == "python" || arg0 == "python3" || arg0 == "pip" || arg0 == "pip3" ||
+		arg0 == "uv" || arg0 == "poetry" || arg0 == "pytest":
+		targetType = "python-venv"
+		reason = "Python toolchain process"
+	case command == "cargo" || command == "rustc" || command == "rust-analyzer" ||
+		arg0 == "cargo" || arg0 == "rustc" || arg0 == "rust-analyzer":
+		targetType = "rust-target"
+		reason = "Rust toolchain process"
+	case command == "zig" || command == "zls" ||
+		arg0 == "zig" || arg0 == "zls":
+		targetType = "zig-artifact"
+		reason = "Zig toolchain process"
+	case (command == "go" || arg0 == "go") &&
+		(strings.Contains(normalized, " go build") ||
+			strings.Contains(normalized, " go test") ||
+			strings.Contains(normalized, " go run") ||
+			strings.Contains(normalized, " go install") ||
+			strings.Contains(normalized, " go clean") ||
+			strings.Contains(normalized, " go work")):
+		targetType = "go-build-cache"
+		reason = "Go toolchain process"
+	case command == "gopls" || arg0 == "gopls":
+		targetType = "go-build-cache"
+		reason = "Go language server process"
+	case command == "cabal" || command == "stack" || command == "ghcup" || command == "ghc" ||
+		arg0 == "cabal" || arg0 == "stack" || arg0 == "ghcup" || arg0 == "ghc":
+		targetType = "haskell-cache"
+		reason = "Haskell toolchain process"
+	case strings.Contains(normalized, "lm studio") || strings.Contains(normalized, "lmstudio"):
+		targetType = "lmstudio-models"
+		reason = "LM Studio process"
+	default:
+		return devArtifactProcessCandidate{}, false
+	}
+
+	return devArtifactProcessCandidate{
+		PID:        pid,
+		TargetType: targetType,
+		Reason:     reason,
+		Line:       line,
+	}, true
+}
+
+func newDevArtifactActivity() devArtifactActivity {
+	return devArtifactActivity{
+		familyReasons:   map[string]string{},
+		unscopedReasons: map[string]string{},
+		scopedRoots:     map[string]map[string]string{},
+	}
+}
+
+func newUnscopedDevArtifactActivity(active map[string]string) devArtifactActivity {
+	activity := newDevArtifactActivity()
+	for targetType, reason := range active {
+		activity.addUnscoped(targetType, reason)
+	}
+	return activity
+}
+
+func devArtifactActivityFromProcessEvidence(candidates []devArtifactProcessCandidate, cwds map[string]string, scanPaths []string, home string) devArtifactActivity {
+	activity := newDevArtifactActivity()
+	for _, candidate := range candidates {
+		if devArtifactGlobalCacheFamily(candidate.TargetType) {
+			activity.addUnscoped(candidate.TargetType, candidate.Reason)
+			continue
+		}
+		roots := devArtifactScopedRootsForCandidate(candidate, cwds[candidate.PID], scanPaths, home)
+		if len(roots) == 0 {
+			if cwds[candidate.PID] != "" && !devArtifactCandidateTouchesScanPath(candidate, cwds[candidate.PID], scanPaths, home) {
+				continue
+			}
+			activity.addUnscoped(candidate.TargetType, candidate.Reason)
+			continue
+		}
+		for _, root := range roots {
+			activity.addScoped(candidate.TargetType, root, candidate.Reason)
+		}
+	}
+	return activity
+}
+
+func (a devArtifactActivity) HasActivity() bool {
+	return len(a.familyReasons) > 0
+}
+
+func (a devArtifactActivity) FamilyReason(targetType string) (string, bool) {
+	reason, ok := a.familyReasons[targetType]
+	return reason, ok
+}
+
+func (a devArtifactActivity) GlobalFamilyActive(targetType string) bool {
+	_, ok := a.unscopedReasons[targetType]
+	return ok
+}
+
+func (a devArtifactActivity) TargetReason(targetType string, path string) (string, bool) {
+	if reason, ok := a.unscopedReasons[targetType]; ok {
+		return reason, true
+	}
+	projectRoot := devArtifactProjectRootForTarget(targetType, path)
+	for root, reason := range a.scopedRoots[targetType] {
+		if pathWithin(projectRoot, root) || pathWithin(root, projectRoot) {
+			return reason, true
+		}
+	}
+	return "", false
+}
+
+func (a devArtifactActivity) ActivityReasons() []string {
+	reasons := make([]string, 0, len(a.familyReasons))
+	for targetType, reason := range a.familyReasons {
+		if _, ok := a.unscopedReasons[targetType]; ok {
+			reasons = append(reasons, targetType+": "+reason)
+			continue
+		}
+		reasons = append(reasons, targetType+": "+reason+" (path-scoped)")
+	}
+	sort.Strings(reasons)
+	return reasons
+}
+
+func (a devArtifactActivity) ScopedRootReasons() []string {
+	var roots []string
+	for targetType, byRoot := range a.scopedRoots {
+		for root, reason := range byRoot {
+			roots = append(roots, targetType+": "+root+" ("+reason+")")
+		}
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+func (a *devArtifactActivity) addUnscoped(targetType string, reason string) {
+	if a.familyReasons == nil {
+		*a = newDevArtifactActivity()
+	}
+	if _, ok := a.familyReasons[targetType]; !ok {
+		a.familyReasons[targetType] = reason
+	}
+	if _, ok := a.unscopedReasons[targetType]; !ok {
+		a.unscopedReasons[targetType] = reason
+	}
+}
+
+func (a *devArtifactActivity) addScoped(targetType string, root string, reason string) {
+	if a.familyReasons == nil {
+		*a = newDevArtifactActivity()
+	}
+	root = filepath.Clean(root)
+	if _, ok := a.familyReasons[targetType]; !ok {
+		a.familyReasons[targetType] = reason
+	}
+	if a.scopedRoots[targetType] == nil {
+		a.scopedRoots[targetType] = map[string]string{}
+	}
+	if _, ok := a.scopedRoots[targetType][root]; !ok {
+		a.scopedRoots[targetType][root] = reason
+	}
+}
+
+func devArtifactGlobalCacheFamily(targetType string) bool {
+	switch targetType {
+	case "go-build-cache", "haskell-cache", "lmstudio-models":
+		return true
+	default:
+		return false
+	}
+}
+
+func devArtifactScopedRootsForCandidate(candidate devArtifactProcessCandidate, cwd string, scanPaths []string, home string) []string {
+	seen := map[string]struct{}{}
+	var roots []string
+	addPath := func(path string) {
+		root := devArtifactActiveProjectRootForPath(path, candidate.TargetType, scanPaths, home)
+		if root == "" {
+			return
+		}
+		if _, ok := seen[root]; ok {
+			return
+		}
+		seen[root] = struct{}{}
+		roots = append(roots, root)
+	}
+	if cwd != "" {
+		addPath(cwd)
+	}
+	for _, path := range absoluteDevArtifactPathPattern.FindAllString(candidate.Line, -1) {
+		addPath(path)
+	}
+	sort.Strings(roots)
+	return roots
+}
+
+func devArtifactCandidateTouchesScanPath(candidate devArtifactProcessCandidate, cwd string, scanPaths []string, home string) bool {
+	if len(scanPaths) == 0 {
+		return true
+	}
+	if cwd != "" && devArtifactPathUnderAnyScanPath(cwd, scanPaths, home) {
+		return true
+	}
+	for _, path := range absoluteDevArtifactPathPattern.FindAllString(candidate.Line, -1) {
+		if devArtifactPathUnderAnyScanPath(path, scanPaths, home) {
+			return true
+		}
+	}
+	return false
+}
+
+func devArtifactPathUnderAnyScanPath(path string, scanPaths []string, home string) bool {
+	path = filepath.Clean(expandHome(path, home))
+	for _, scanPath := range scanPaths {
+		root := filepath.Clean(expandHome(scanPath, home))
+		if pathWithin(path, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func devArtifactActiveProjectRootForPath(path string, targetType string, scanPaths []string, home string) string {
+	path = expandHome(path, home)
+	path = filepath.Clean(path)
+	for _, scanPath := range scanPaths {
+		root := filepath.Clean(expandHome(scanPath, home))
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			continue
+		}
+		if projectRoot := devArtifactProjectRootFromArtifactSegment(path, root, targetType); projectRoot != "" {
+			return projectRoot
+		}
+		if projectRoot := devArtifactNearestProjectRoot(path, root, devArtifactProjectMarkers(targetType)); projectRoot != "" {
+			return projectRoot
+		}
+	}
+	return ""
+}
+
+func devArtifactProjectRootFromArtifactSegment(path string, stopRoot string, targetType string) string {
+	artifactNames := devArtifactNames(targetType)
+	if len(artifactNames) == 0 {
+		return ""
+	}
+	current := filepath.Clean(path)
+	for {
+		base := filepath.Base(current)
+		for _, artifactName := range artifactNames {
+			if base == artifactName {
+				parent := filepath.Dir(current)
+				if pathWithin(parent, stopRoot) {
+					return parent
+				}
+				return ""
+			}
+		}
+		if current == stopRoot || current == string(os.PathSeparator) || current == "." {
+			return ""
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func devArtifactNames(targetType string) []string {
+	switch targetType {
+	case "node_modules":
+		return []string{"node_modules"}
+	case "python-venv":
+		return []string{".venv"}
+	case "rust-target":
+		return []string{"target"}
+	case "zig-artifact":
+		return []string{".zig-cache", "zig-out"}
+	default:
+		return nil
+	}
+}
+
+func devArtifactNearestProjectRoot(path string, stopRoot string, markers []string) string {
+	if len(markers) == 0 {
+		return ""
+	}
+	current := path
+	if info, err := os.Stat(current); err == nil && !info.IsDir() {
+		current = filepath.Dir(current)
+	}
+	for {
+		for _, marker := range markers {
+			if pathExists(filepath.Join(current, marker)) {
+				return current
+			}
+		}
+		if current == stopRoot || current == string(os.PathSeparator) || current == "." {
+			return ""
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
+}
+
+func devArtifactProjectMarkers(targetType string) []string {
+	switch targetType {
+	case "node_modules":
+		return []string{"package.json"}
+	case "python-venv":
+		return []string{"pyproject.toml", "setup.py", "requirements.txt"}
+	case "rust-target":
+		return []string{"Cargo.toml"}
+	case "zig-artifact":
+		return []string{"build.zig"}
+	default:
+		return nil
+	}
+}
+
+func devArtifactProjectRootForTarget(targetType string, targetPath string) string {
+	switch targetType {
+	case "node_modules", "python-venv", "rust-target", "zig-artifact":
+		return filepath.Clean(filepath.Dir(targetPath))
+	default:
+		return filepath.Clean(targetPath)
+	}
+}
+
+func pathWithin(path string, root string) bool {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+	if path == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func devArtifactProcessCWDs(ctx context.Context, candidates []devArtifactProcessCandidate) map[string]string {
+	var pids []string
+	seen := map[string]struct{}{}
+	for _, candidate := range candidates {
+		if candidate.PID == "" {
+			continue
+		}
+		if _, ok := seen[candidate.PID]; ok {
+			continue
+		}
+		seen[candidate.PID] = struct{}{}
+		pids = append(pids, candidate.PID)
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+	lsof, err := exec.LookPath("lsof")
+	if err != nil {
+		return nil
+	}
+	lsofCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	args := []string{"-a", "-d", "cwd", "-Fpn", "-p", strings.Join(pids, ",")}
+	output, err := exec.CommandContext(lsofCtx, lsof, args...).CombinedOutput()
+	if err != nil && len(output) == 0 {
+		return nil
+	}
+	return parseDevArtifactProcessCWDs(string(output))
+}
+
+func parseDevArtifactProcessCWDs(output string) map[string]string {
+	cwds := map[string]string{}
+	currentPID := ""
+	for _, line := range strings.Split(output, "\n") {
+		if line == "" {
+			continue
+		}
+		switch line[0] {
+		case 'p':
+			currentPID = strings.TrimPrefix(line, "p")
+		case 'n':
+			if currentPID != "" {
+				cwds[currentPID] = strings.TrimPrefix(line, "n")
+			}
+		}
+	}
+	return cwds
 }
 
 func activeTempArtifactRoots(ctx context.Context, scanPaths []string, home string) map[string]string {
@@ -1509,12 +1914,16 @@ func (p *DevArtifactsPlugin) reportArtifacts(ctx context.Context, daCfg config.D
 // cleanNodeModules removes stale node_modules directories.
 // A node_modules is considered stale if the sibling package.json hasn't been
 // modified within the maxAge threshold.
-func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, active devArtifactActivity, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
 	var totalFreed int64
 	budget := optionalDevArtifactScanBudget(budgets)
 
 	p.findArtifactDirs(ctx, scanPath, "node_modules", "package.json", func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
+			return
+		}
+		if reason, ok := active.TargetReason("node_modules", dir); ok {
+			logger.Debug("preserving active node_modules", "path", dir, "reason", reason)
 			return
 		}
 		if tracker.ContainsTrackedFiles(dir) {
@@ -1546,13 +1955,17 @@ func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath stri
 // cleanPythonVenvs removes stale Python virtual environments.
 // A .venv is stale if sibling pyproject.toml/setup.py/requirements.txt hasn't
 // been modified within the maxAge threshold.
-func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, active devArtifactActivity, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
 	var totalFreed int64
 	pythonMarkers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
 	budget := optionalDevArtifactScanBudget(budgets)
 
 	p.findArtifactDirs(ctx, scanPath, ".venv", "", func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
+			return
+		}
+		if reason, ok := active.TargetReason("python-venv", dir); ok {
+			logger.Debug("preserving active .venv", "path", dir, "reason", reason)
 			return
 		}
 		if tracker.ContainsTrackedFiles(dir) {
@@ -1608,12 +2021,16 @@ func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath stri
 
 // cleanRustTargets removes stale Rust target/ directories.
 // A target/ is stale if sibling Cargo.toml hasn't been modified within maxAge.
-func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, active devArtifactActivity, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
 	var totalFreed int64
 	budget := optionalDevArtifactScanBudget(budgets)
 
 	p.findArtifactDirs(ctx, scanPath, "target", "Cargo.toml", func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
+			return
+		}
+		if reason, ok := active.TargetReason("rust-target", dir); ok {
+			logger.Debug("preserving active Rust target", "path", dir, "reason", reason)
 			return
 		}
 		if tracker.ContainsTrackedFiles(dir) {
@@ -1643,13 +2060,17 @@ func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath stri
 
 // cleanZigArtifacts removes stale Zig .zig-cache and zig-out directories.
 // A Zig artifact is stale if sibling build.zig hasn't been modified within maxAge.
-func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath string, maxAge time.Duration, protectPaths []string, active devArtifactActivity, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
 	var totalFreed int64
 	budget := optionalDevArtifactScanBudget(budgets)
 
 	for _, artifactName := range []string{".zig-cache", "zig-out"} {
 		p.findArtifactDirs(ctx, scanPath, artifactName, "build.zig", func(dir string, size int64) {
 			if p.isProtected(dir, protectPaths) {
+				return
+			}
+			if reason, ok := active.TargetReason("zig-artifact", dir); ok {
+				logger.Debug("preserving active Zig artifact", "path", dir, "reason", reason)
 				return
 			}
 			if tracker.ContainsTrackedFiles(dir) {
