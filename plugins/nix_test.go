@@ -387,6 +387,7 @@ func TestParseNixGCRoots(t *testing.T) {
 {nix-process:4321} -> /nix/store/888-active-derivation.drv
 {lsof} -> /nix/store/555-open-library
 /nix/var/nix/profiles/per-user/jess/profile-42-link -> /nix/store/222-home-manager-generation
+/Users/jess/.local/state/home-manager/gcroots/current-home -> /nix/store/999-home-manager-generation
 /nix/var/nix/gcroots/auto/abc -> /nix/store/333-tool
 /Users/jess/git/kernel/.direnv/flake-profile-a5d5b61aa8a61b7d9d765e1daf971a9a578f1cfa -> /nix/store/666-kernel-env
 /Users/jess/git/kernel/result -> /nix/store/444-linux-kernel
@@ -395,8 +396,8 @@ func TestParseNixGCRoots(t *testing.T) {
 `
 
 	roots := parseNixGCRoots(output)
-	if len(roots) != 8 {
-		t.Fatalf("got %d roots, want 8: %#v", len(roots), roots)
+	if len(roots) != 9 {
+		t.Fatalf("got %d roots, want 9: %#v", len(roots), roots)
 	}
 
 	classes := map[string]int{}
@@ -419,6 +420,9 @@ func TestParseNixGCRoots(t *testing.T) {
 	}
 	if classes["profile_root"] != 1 {
 		t.Fatalf("expected one profile root, classes=%v", classes)
+	}
+	if classes["home_manager_gcroot"] != 1 {
+		t.Fatalf("expected one Home Manager gcroot, classes=%v", classes)
 	}
 	if classes["direnv_root"] != 1 {
 		t.Fatalf("expected one direnv root, classes=%v", classes)
@@ -495,9 +499,14 @@ func TestNixGCRootTargetsUseSpecificReviewActions(t *testing.T) {
 			StorePath: "/nix/store/555-flake-registry.json",
 			Class:     "nix_cache_root",
 		},
+		{
+			Root:      "/Users/jess/.local/state/home-manager/gcroots/current-home",
+			StorePath: "/nix/store/666-home-manager-generation",
+			Class:     "home_manager_gcroot",
+		},
 	}
 
-	targets := nixGCRootTargets(roots, 5)
+	targets := nixGCRootTargets(roots, 6)
 	actions := map[string]CleanupTarget{}
 	for _, target := range targets {
 		actions[target.Path] = target
@@ -526,6 +535,11 @@ func TestNixGCRootTargetsUseSpecificReviewActions(t *testing.T) {
 	nixCache := actions["/Users/jess/.cache/nix/flake-registry.json"]
 	if nixCache.Action != "review_nix_cache_gc_root" || nixCache.Tier != CleanupTierWarm || nixCache.Reclaim != CleanupReclaimDeferred {
 		t.Fatalf("nix cache root target should carry warm deferred review policy: %+v", nixCache)
+	}
+
+	homeManagerGCRoot := actions["/Users/jess/.local/state/home-manager/gcroots/current-home"]
+	if homeManagerGCRoot.Action != "review_home_manager_gc_root" || homeManagerGCRoot.Tier != CleanupTierSafe || homeManagerGCRoot.Reclaim != CleanupReclaimNone {
+		t.Fatalf("Home Manager gcroot target should carry safe protected review policy: %+v", homeManagerGCRoot)
 	}
 }
 
