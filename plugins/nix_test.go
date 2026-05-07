@@ -393,6 +393,8 @@ func TestParseNixGCRoots(t *testing.T) {
 /Users/jess/git/kernel/result -> /nix/store/444-linux-kernel
 /Users/jess/.cache/nix/flake-registry.json -> /nix/store/777-flake-registry.json
 /proc/1234/fd/5 -> /nix/store/111-source
+removing stale link '/nix/var/nix/gcroots/auto/news.json'
+finding garbage collector roots...
 `
 
 	roots := parseNixGCRoots(output)

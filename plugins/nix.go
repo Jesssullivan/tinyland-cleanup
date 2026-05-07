@@ -941,7 +941,7 @@ func parseNixGCRoots(output string) []nixGCRoot {
 				storePath = fields[len(fields)-1]
 			}
 		}
-		if root == "" {
+		if root == "" || !looksLikeNixGCRoot(root) {
 			continue
 		}
 
@@ -972,6 +972,10 @@ func parseNixGCRoots(output string) []nixGCRoot {
 		return iRank < jRank
 	})
 	return roots
+}
+
+func looksLikeNixGCRoot(root string) bool {
+	return strings.HasPrefix(root, "/") || strings.HasPrefix(root, "{")
 }
 
 func nixGCRootClassRank(class string) int {
