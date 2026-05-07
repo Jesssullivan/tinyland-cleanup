@@ -57,6 +57,9 @@ All notable changes to this project will be documented in this file.
   generic `unknown_root` noise on developer machines.
 - Nix GC-root attribution now classifies Home Manager current/new generation
   gcroots separately from generic unknown roots.
+- Nix GC-root attribution now ignores `nix-store --gc --print-roots` status
+  messages such as stale-root removal lines instead of reporting them as
+  generic unknown roots.
 - Human-readable `--output text` reports now explain dry-run and cleanup cycles
   with mount status, host free-space accounting, plugin plans, warnings, and
   representative targets.
