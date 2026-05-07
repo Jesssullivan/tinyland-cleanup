@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -616,6 +617,17 @@ func TestPlanCleanupModerateClassifiesDevArtifacts(t *testing.T) {
 	if plan.Metadata["mutates"] != "true" {
 		t.Fatalf("expected mutates=true metadata, got %#v", plan.Metadata)
 	}
+	if got := plan.Metadata["host_reclaim_candidate_bytes"]; got != strconv.FormatInt(oldTarget.Bytes, 10) {
+		t.Fatalf("expected stale delete bytes to be host reclaim candidates, got %q metadata=%#v", got, plan.Metadata)
+	}
+	protectedBytes := requirePlanMetadataInt64(t, plan.Metadata, "protected_physical_bytes")
+	if protectedBytes != freshTarget.Bytes+protectedTarget.Bytes {
+		t.Fatalf("expected protected byte accounting for fresh/configured targets, got %d metadata=%#v", protectedBytes, plan.Metadata)
+	}
+	totalBytes := requirePlanMetadataInt64(t, plan.Metadata, "total_physical_bytes")
+	if totalBytes != oldTarget.Bytes+freshTarget.Bytes+protectedTarget.Bytes {
+		t.Fatalf("expected total byte accounting across all targets, got %d metadata=%#v", totalBytes, plan.Metadata)
+	}
 }
 
 func TestPlanNodeModulesProtectsActiveDevelopmentProcess(t *testing.T) {
@@ -645,6 +657,50 @@ func TestPlanNodeModulesProtectsActiveDevelopmentProcess(t *testing.T) {
 	target := findDevArtifactTarget(t, targets, "node_modules", filepath.Join(project, "node_modules"))
 	if target.Action != "protect" || !target.Protected || !target.Active {
 		t.Fatalf("expected active node_modules to be protected, got %#v", target)
+	}
+}
+
+func TestPlanCleanupAccountsActiveProtectedDevArtifacts(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(map[string]string{
+		"node_modules": "Node.js package manager or runtime",
+	})
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	tmpDir := t.TempDir()
+	project := filepath.Join(tmpDir, "active-project")
+	if err := os.MkdirAll(filepath.Join(project, "node_modules", "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "node_modules", "pkg", "index.js"), []byte("module.exports = {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	packageJSON := filepath.Join(project, "package.json")
+	if err := os.WriteFile(packageJSON, []byte(`{"name":"active"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	if err := os.Chtimes(packageJSON, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.DevArtifacts.ScanPaths = []string{tmpDir}
+	cfg.DevArtifacts.PythonVenvs = false
+	cfg.DevArtifacts.RustTargets = false
+	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.GoBuildCache = false
+	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.TempArtifacts = false
+
+	plan := p.PlanCleanup(context.Background(), LevelAggressive, cfg, logger)
+	target := findDevArtifactTarget(t, plan.Targets, "node_modules", filepath.Join(project, "node_modules"))
+	if target.Action != "protect" || !target.Protected || !target.Active {
+		t.Fatalf("expected active node_modules to be protected, got %#v", target)
+	}
+	if got := plan.Metadata["active_protected_physical_bytes"]; got != strconv.FormatInt(target.Bytes, 10) {
+		t.Fatalf("expected active protected bytes to match target size, got %q metadata=%#v", got, plan.Metadata)
+	}
+	if got := plan.Metadata["host_reclaim_candidate_bytes"]; got != "0" {
+		t.Fatalf("active protected artifact should not be a host reclaim candidate, got %q", got)
 	}
 }
 
@@ -1159,4 +1215,17 @@ func newDevArtifactsPluginWithActive(active map[string]string) *DevArtifactsPlug
 			return active, nil
 		},
 	}
+}
+
+func requirePlanMetadataInt64(t *testing.T, metadata map[string]string, key string) int64 {
+	t.Helper()
+	raw, ok := metadata[key]
+	if !ok {
+		t.Fatalf("expected metadata key %q in %#v", key, metadata)
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		t.Fatalf("metadata key %q should be an int64, got %q: %v", key, raw, err)
+	}
+	return value
 }

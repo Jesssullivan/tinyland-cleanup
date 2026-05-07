@@ -85,6 +85,19 @@ Structured plugin targets may include policy metadata:
 
 Use this metadata to separate cheap cache cleanup from expensive rebuilds,
 privileged actions, and review-only evidence before applying a real cleanup.
+For Darwin developer-cache and development-artifact plans, plugin metadata also
+rolls target bytes up by disposition:
+
+- `host_reclaim_candidate_bytes`: unprotected targets expected to free host
+  space directly;
+- `deferred_reclaim_candidate_bytes`: unprotected targets that only enable
+  later host-space reclamation;
+- `protected_physical_bytes`: protected targets that explain pressure but are
+  not cleanup candidates;
+- `active_protected_physical_bytes`: the protected subset blocked by active-use
+  evidence;
+- `review_physical_bytes`: measured review-only targets that require manual
+  operator action.
 
 ## Probe Darwin Volumes
 

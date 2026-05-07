@@ -87,6 +87,11 @@ lists `scan_truncated_paths`. Symlink-heavy temporary roots, including Nix
 shell symlink forests, are measured as symlink entries rather than as the store
 paths they point at.
 
+For Darwin developer-cache and development-artifact plans, dry-run metadata and
+text reports separate bytes that are direct host-reclaim candidates from bytes
+that are protected, active-protected, deferred, or review-only. Use that
+accounting when a host is full but the safe reclaim estimate is near zero.
+
 For a one-off run, override the configured maximum used-space target without
 editing the config file:
 

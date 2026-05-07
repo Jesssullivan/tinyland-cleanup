@@ -928,8 +928,7 @@ func (p *CachePlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *
 
 	plan.Targets = targets
 	plan.EstimatedBytesFreed = estimated
-	plan.Metadata["target_count"] = strconv.Itoa(len(targets))
-	plan.Metadata["total_physical_bytes"] = strconv.FormatInt(total, 10)
+	annotateCleanupPlanTargetAccounting(&plan)
 
 	if cfg.DarwinDevCaches.MaxTotalGB > 0 && total > int64(cfg.DarwinDevCaches.MaxTotalGB)*1024*1024*1024 {
 		plan.Warnings = append(plan.Warnings, "known Darwin developer caches exceed configured review budget")

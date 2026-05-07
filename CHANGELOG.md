@@ -69,6 +69,9 @@ All notable changes to this project will be documented in this file.
 - Dry-run cleanup targets now carry policy tier, logical byte, reclaim kind,
   and host-space reclaim expectation metadata where planner evidence is
   available.
+- Darwin developer-cache and development-artifact dry-runs now summarize
+  target bytes by host-reclaim candidate, deferred reclaim, protected, active
+  protected, and review-only disposition.
 - Review-only sparsebundle targets now report logical size from `Info.plist`
   when available, making APFS bundle physical-vs-logical accounting visible in
   dry-run plans.

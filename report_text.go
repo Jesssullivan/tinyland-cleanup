@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/Jesssullivan/tinyland-cleanup/monitor"
@@ -172,6 +173,9 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 				return err
 			}
 		}
+		if err := writeTextPlanAccounting(w, plan.Metadata); err != nil {
+			return err
+		}
 		if len(plan.Warnings) > 0 {
 			if err := writeTextList(w, "  warnings:", plan.Warnings, 3); err != nil {
 				return err
@@ -215,6 +219,40 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 		}
 	}
 	return nil
+}
+
+func writeTextPlanAccounting(w io.Writer, metadata map[string]string) error {
+	total, ok := planMetadataInt64(metadata, "total_physical_bytes")
+	if !ok || total <= 0 {
+		return nil
+	}
+	hostReclaim, _ := planMetadataInt64(metadata, "host_reclaim_candidate_bytes")
+	deferred, _ := planMetadataInt64(metadata, "deferred_reclaim_candidate_bytes")
+	protected, _ := planMetadataInt64(metadata, "protected_physical_bytes")
+	activeProtected, _ := planMetadataInt64(metadata, "active_protected_physical_bytes")
+	review, _ := planMetadataInt64(metadata, "review_physical_bytes")
+
+	_, err := fmt.Fprintf(w, "  accounting: total %s, host reclaim %s, deferred %s, protected %s, active protected %s, review %s\n",
+		formatByteCount(total),
+		formatByteCount(hostReclaim),
+		formatByteCount(deferred),
+		formatByteCount(protected),
+		formatByteCount(activeProtected),
+		formatByteCount(review),
+	)
+	return err
+}
+
+func planMetadataInt64(metadata map[string]string, key string) (int64, bool) {
+	if len(metadata) == 0 {
+		return 0, false
+	}
+	raw, ok := metadata[key]
+	if !ok {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	return value, err == nil
 }
 
 func writeTextList(w io.Writer, header string, items []string, limit int) error {
