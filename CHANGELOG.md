@@ -55,6 +55,8 @@ All notable changes to this project will be documented in this file.
   store paths, `{nix-process:<pid>}` roots as active Nix work, direnv flake
   roots as warm review targets, and Nix cache roots separately, reducing
   generic `unknown_root` noise on developer machines.
+- Nix GC-root attribution now classifies Home Manager current/new generation
+  gcroots separately from generic unknown roots.
 - Human-readable `--output text` reports now explain dry-run and cleanup cycles
   with mount status, host free-space accounting, plugin plans, warnings, and
   representative targets.

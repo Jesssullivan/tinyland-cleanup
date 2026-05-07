@@ -990,7 +990,7 @@ func nixGCRootClassRank(class string) int {
 		return 5
 	case "auto_gcroot", "gcroot":
 		return 6
-	case "profile_root":
+	case "home_manager_gcroot", "profile_root":
 		return 7
 	default:
 		return 8
@@ -1013,6 +1013,8 @@ func classifyNixGCRoot(root string) (string, bool) {
 		strings.Contains(lower, "/.local/state/nix/profiles") ||
 		strings.Contains(lower, "/.nix-profile"):
 		return "profile_root", false
+	case strings.Contains(lower, "/.local/state/home-manager/gcroots/"):
+		return "home_manager_gcroot", false
 	case strings.Contains(lower, "/.direnv/flake-inputs/") ||
 		strings.Contains(lower, "/.direnv/flake-profile-"):
 		return "direnv_root", false
@@ -1087,6 +1089,8 @@ func nixGCRootReviewAction(class string) string {
 		return "review_workspace_result_root"
 	case "nix_cache_root":
 		return "review_nix_cache_gc_root"
+	case "home_manager_gcroot":
+		return "review_home_manager_gc_root"
 	default:
 		return "review_gc_root"
 	}
