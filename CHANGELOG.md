@@ -96,6 +96,10 @@ All notable changes to this project will be documented in this file.
   virtualenvs, Rust `target/`, and Zig outputs is now path-scoped when process
   cwd or command-line evidence proves the active project root; missing cwd
   evidence keeps the conservative family-wide protection fallback.
+- Dev-artifact dry-runs now skip expensive workspace scans for generated-output
+  families that are already protected by conservative family-wide active-use
+  evidence, matching real cleanup behavior and preserving scan budget for
+  reclaimable surfaces.
 - Dev-artifact dry-run and cleanup filesystem walkers now observe cancellation,
   and active temporary roots are protected without expensive size walks so
   operator probes do not compete with active lab or Bazel scratch work.

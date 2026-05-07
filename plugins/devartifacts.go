@@ -242,6 +242,9 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		if scoped := active.ScopedRootReasons(); len(scoped) > 0 {
 			plan.Metadata["active_dev_artifact_roots"] = strings.Join(scoped, ", ")
 		}
+		if skipped := activeGlobalGeneratedArtifactScanSkips(active, daCfg); len(skipped) > 0 {
+			plan.Metadata["global_active_dev_artifact_scan_skips"] = strings.Join(devArtifactActivityReasons(skipped), ", ")
+		}
 	}
 
 	tracker := newDevArtifactGitTracker()
@@ -269,16 +272,16 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		if !pathExistsAndIsDir(expanded) {
 			continue
 		}
-		if daCfg.NodeModules {
+		if daCfg.NodeModules && !active.GlobalFamilyActive("node_modules") {
 			p.planNodeModules(scanCtx, expanded, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
 		}
-		if daCfg.PythonVenvs {
+		if daCfg.PythonVenvs && !active.GlobalFamilyActive("python-venv") {
 			p.planPythonVenvs(scanCtx, expanded, venvAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
 		}
-		if daCfg.RustTargets {
+		if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
 			p.planRustTargets(scanCtx, expanded, rustAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
 		}
-		if daCfg.ZigArtifacts {
+		if daCfg.ZigArtifacts && !active.GlobalFamilyActive("zig-artifact") {
 			p.planZigArtifacts(scanCtx, expanded, zigAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
 		}
 		if daCfg.LargeLocalArtifacts {
@@ -562,16 +565,16 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 func (p *DevArtifactsPlugin) planTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active devArtifactActivity, activeRoots map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	p.forEachStaleTemporaryRoot(ctx, scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
-		if daCfg.NodeModules {
+		if daCfg.NodeModules && !active.GlobalFamilyActive("node_modules") {
 			p.planNodeModules(ctx, root, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, targets, budget)
 		}
-		if daCfg.PythonVenvs {
+		if daCfg.PythonVenvs && !active.GlobalFamilyActive("python-venv") {
 			p.planPythonVenvs(ctx, root, venvAge, mutates, daCfg.ProtectPaths, active, tracker, targets, budget)
 		}
-		if daCfg.RustTargets {
+		if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
 			p.planRustTargets(ctx, root, rustAge, mutates, daCfg.ProtectPaths, active, tracker, targets, budget)
 		}
-		if daCfg.ZigArtifacts {
+		if daCfg.ZigArtifacts && !active.GlobalFamilyActive("zig-artifact") {
 			p.planZigArtifacts(ctx, root, zigAge, mutates, daCfg.ProtectPaths, active, tracker, targets, budget)
 		}
 	}, budget)
@@ -1363,6 +1366,23 @@ func devArtifactGlobalCacheFamily(targetType string) bool {
 	default:
 		return false
 	}
+}
+
+func activeGlobalGeneratedArtifactScanSkips(active devArtifactActivity, daCfg config.DevArtifactsConfig) map[string]string {
+	skipped := map[string]string{}
+	add := func(enabled bool, targetType string) {
+		if !enabled {
+			return
+		}
+		if reason, ok := active.unscopedReasons[targetType]; ok {
+			skipped[targetType] = reason
+		}
+	}
+	add(daCfg.NodeModules, "node_modules")
+	add(daCfg.PythonVenvs, "python-venv")
+	add(daCfg.RustTargets, "rust-target")
+	add(daCfg.ZigArtifacts, "zig-artifact")
+	return skipped
 }
 
 func devArtifactScopedRootsForCandidate(candidate devArtifactProcessCandidate, cwd string, scanPaths []string, home string) []string {

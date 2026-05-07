@@ -210,9 +210,13 @@ tracked by Git. For `node_modules`, Python virtualenvs, Rust `target/`, and Zig
 outputs, active-process protection is path-scoped when process cwd or
 command-line evidence proves the active project root; JSON metadata reports
 those roots as `active_dev_artifact_roots`. If cwd evidence is unavailable, the
-plan keeps the conservative family-wide protection fallback. Zig `.zig-cache`
-and `zig-out` targets are also preserved when they contain files modified
-within the recent-output grace window, even at critical pressure.
+plan keeps the conservative family-wide protection fallback. When the fallback
+protects a whole generated-output family, dry-run planning skips that expensive
+workspace scan and records the family in
+`global_active_dev_artifact_scan_skips`, matching real cleanup behavior while
+preserving scan budget for surfaces that can still reclaim space. Zig
+`.zig-cache` and `zig-out` targets are also preserved when they contain files
+modified within the recent-output grace window, even at critical pressure.
 Dev-artifact filesystem walking is bounded by
 `dev_artifacts.scan_max_duration`, `dev_artifacts.scan_max_entries`, and
 `dev_artifacts.temp_scan_max_roots`; when a budget is hit, dry-run metadata sets
