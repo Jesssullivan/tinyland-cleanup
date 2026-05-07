@@ -127,6 +127,7 @@ podman:
 nix:
   # Preserve rollback safety even under disk pressure
   min_user_generations: 5
+  min_home_manager_generations: 5
   min_system_generations: 3
   # Filesystem used for plugin-isolated host free-space deltas around real Nix GC.
   host_measure_path: /nix/store
@@ -134,6 +135,14 @@ nix:
   # User generation deletion policy for moderate/aggressive and critical levels
   delete_generations_older_than: 14d
   critical_delete_generations_older_than: 3d
+
+  # Home Manager generations are review-only unless this explicit profile
+  # deletion workflow is enabled. When enabled, cleanup uses
+  # `home-manager remove-generations` for generations selected by the policy
+  # below, while preserving the current generation and minimum count.
+  delete_home_manager_generations: false
+  home_manager_delete_generations_older_than: 14d
+  home_manager_critical_delete_generations_older_than: 3d
 
   # Store optimization can be disruptive; leave it explicitly opt-in
   allow_store_optimize: false

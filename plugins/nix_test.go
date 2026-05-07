@@ -511,6 +511,110 @@ func TestNixReviewOnlyGenerationTargetsProtectsSelectedGenerations(t *testing.T)
 	}
 }
 
+func TestNixHomeManagerGenerationTargetsRequireOptIn(t *testing.T) {
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	generations := []nixGeneration{
+		{Number: 1, CreatedAt: now.Add(-30 * 24 * time.Hour), Scope: "home-manager"},
+		{Number: 2, CreatedAt: now.Add(-1 * 24 * time.Hour), Scope: "home-manager", Current: true},
+	}
+
+	reviewTargets := nixHomeManagerGenerationTargets(
+		nixGenerationTargets(generations, now, 1, 7*24*time.Hour),
+		config.NixConfig{},
+	)
+	reviewActions := map[string]CleanupTarget{}
+	for _, target := range reviewTargets {
+		reviewActions[target.Version] = target
+	}
+	if reviewActions["1"].Action != "review_home_manager_generation" || !reviewActions["1"].Protected {
+		t.Fatalf("Home Manager generation should be review-only without opt-in: %+v", reviewActions["1"])
+	}
+
+	deleteTargets := nixHomeManagerGenerationTargets(
+		nixGenerationTargets(generations, now, 1, 7*24*time.Hour),
+		config.NixConfig{DeleteHomeManagerGenerations: true},
+	)
+	deleteActions := map[string]CleanupTarget{}
+	for _, target := range deleteTargets {
+		deleteActions[target.Version] = target
+	}
+	if deleteActions["1"].Action != "delete_home_manager_generation" || deleteActions["1"].Protected {
+		t.Fatalf("Home Manager generation should be deletable with opt-in: %+v", deleteActions["1"])
+	}
+	if deleteActions["2"].Action != "keep_generation" || !deleteActions["2"].Protected {
+		t.Fatalf("current Home Manager generation should remain kept: %+v", deleteActions["2"])
+	}
+}
+
+func TestNixPluginDeleteHomeManagerGenerationsByPolicyUsesRemoveGenerations(t *testing.T) {
+	tempHome := t.TempDir()
+	profileDir := filepath.Join(tempHome, ".local", "state", "nix", "profiles")
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	for _, generation := range []struct {
+		name    string
+		modTime time.Time
+	}{
+		{"home-manager-1-link", now.Add(-72 * time.Hour)},
+		{"home-manager-2-link", now.Add(-48 * time.Hour)},
+		{"home-manager-3-link", now.Add(-1 * time.Hour)},
+	} {
+		path := filepath.Join(profileDir, generation.name)
+		if err := os.WriteFile(path, []byte(generation.name), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, generation.modTime, generation.modTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("home-manager-3-link", filepath.Join(profileDir, "home-manager")); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsLog := filepath.Join(t.TempDir(), "home-manager.args")
+	fakeHomeManager := filepath.Join(binDir, "home-manager")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$TINYLAND_HOME_MANAGER_ARGS_LOG\"\n"
+	if err := os.WriteFile(fakeHomeManager, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", tempHome)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TINYLAND_HOME_MANAGER_ARGS_LOG", argsLog)
+
+	p := NewNixPlugin()
+	result := p.deleteHomeManagerGenerationsByPolicy(
+		context.Background(),
+		LevelModerate,
+		config.NixConfig{
+			DeleteHomeManagerGenerations:          true,
+			MinHomeManagerGenerations:             1,
+			DeleteGenerationsOlderThan:            "24h",
+			HomeManagerDeleteGenerationsOlderThan: "24h",
+			MaxGCDuration:                         "5s",
+		},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if result.Error != nil {
+		t.Fatalf("deleteHomeManagerGenerationsByPolicy returned error: %v", result.Error)
+	}
+	if result.ItemsCleaned != 2 {
+		t.Fatalf("deleted %d generations, want 2", result.ItemsCleaned)
+	}
+
+	rawArgs, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(rawArgs)), "remove-generations 1 2"; got != want {
+		t.Fatalf("home-manager args = %q, want %q", got, want)
+	}
+}
+
 func TestNixGenerationTargetsPreserveCurrentAndMinimum(t *testing.T) {
 	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 	generations := []nixGeneration{

@@ -129,7 +129,8 @@ enabling offline compaction.
 Darwin developer cache review is documented in
 [docs/darwin-dev-caches.md](docs/darwin-dev-caches.md).
 
-Nix store and generation cleanup policy is documented in
+Nix store, user-profile generation, and opt-in Home Manager generation cleanup
+policy is documented in
 [docs/nix-cleanup-policy.md](docs/nix-cleanup-policy.md).
 
 Bazel cache and output-base review is documented in

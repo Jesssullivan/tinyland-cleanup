@@ -23,6 +23,8 @@ All notable changes to this project will be documented in this file.
   retention targets, daemon-contention detection, and opt-in store optimization.
 - Nix real-cleanup host free-space delta accounting around GC and optional store
   optimization, separate from command-reported reclaimed bytes.
+- Opt-in Home Manager generation cleanup via `home-manager remove-generations`,
+  with separate minimum-retention and age-policy settings.
 - Bazel cache and output-base dry-run planning with active-use detection,
   protected workspace symlink detection, and budget metadata.
 - Bazel reclaim candidates now refine byte estimates with a bounded recursive
