@@ -72,18 +72,23 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		WouldRun: true,
 		Steps:    nixPlanSteps(level, cfg.Nix),
 		Metadata: map[string]string{
-			"cleanup_level":                             level.String(),
-			"min_user_generations":                      strconv.Itoa(cfg.Nix.MinUserGenerations),
-			"min_system_generations":                    strconv.Itoa(cfg.Nix.MinSystemGenerations),
-			"delete_generations_older_than":             cfg.Nix.DeleteGenerationsOlderThan,
-			"critical_delete_generations_older_than":    cfg.Nix.CriticalDeleteGenerationsOlderThan,
-			"allow_store_optimize":                      strconv.FormatBool(cfg.Nix.AllowStoreOptimize),
-			"skip_when_daemon_busy":                     strconv.FormatBool(cfg.Nix.SkipWhenDaemonBusy),
-			"daemon_busy_backoff":                       cfg.Nix.DaemonBusyBackoff,
-			"max_gc_duration":                           cfg.Nix.MaxGCDuration,
-			"host_measure_path":                         nixHostMeasurePath(cfg.Nix),
-			"root_attribution_limit":                    strconv.Itoa(nixRootAttributionLimit(cfg.Nix)),
-			"generation_policy_delete_older_than_level": nixGenerationPolicyAge(level, cfg.Nix),
+			"cleanup_level":                                          level.String(),
+			"min_user_generations":                                   strconv.Itoa(cfg.Nix.MinUserGenerations),
+			"min_home_manager_generations":                           strconv.Itoa(nixMinHomeManagerGenerations(cfg.Nix)),
+			"min_system_generations":                                 strconv.Itoa(cfg.Nix.MinSystemGenerations),
+			"delete_generations_older_than":                          cfg.Nix.DeleteGenerationsOlderThan,
+			"critical_delete_generations_older_than":                 cfg.Nix.CriticalDeleteGenerationsOlderThan,
+			"delete_home_manager_generations":                        strconv.FormatBool(cfg.Nix.DeleteHomeManagerGenerations),
+			"home_manager_delete_generations_older_than":             cfg.Nix.HomeManagerDeleteGenerationsOlderThan,
+			"home_manager_critical_delete_generations_older_than":    cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan,
+			"allow_store_optimize":                                   strconv.FormatBool(cfg.Nix.AllowStoreOptimize),
+			"skip_when_daemon_busy":                                  strconv.FormatBool(cfg.Nix.SkipWhenDaemonBusy),
+			"daemon_busy_backoff":                                    cfg.Nix.DaemonBusyBackoff,
+			"max_gc_duration":                                        cfg.Nix.MaxGCDuration,
+			"host_measure_path":                                      nixHostMeasurePath(cfg.Nix),
+			"root_attribution_limit":                                 strconv.Itoa(nixRootAttributionLimit(cfg.Nix)),
+			"generation_policy_delete_older_than_level":              nixGenerationPolicyAge(level, cfg.Nix),
+			"home_manager_generation_policy_delete_older_than_level": nixHomeManagerGenerationPolicyAge(level, cfg.Nix),
 		},
 	}
 
@@ -211,6 +216,14 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		generationsDeleted = generationResult.ItemsCleaned
 		if generationResult.Error != nil {
 			result.Error = generationResult.Error
+			return result
+		}
+
+		homeManagerGenerationResult := p.deleteHomeManagerGenerationsByPolicy(ctx, level, cfg.Nix, logger)
+		result.ItemsCleaned += homeManagerGenerationResult.ItemsCleaned
+		generationsDeleted += homeManagerGenerationResult.ItemsCleaned
+		if homeManagerGenerationResult.Error != nil {
+			result.Error = homeManagerGenerationResult.Error
 			return result
 		}
 	}
@@ -473,6 +486,70 @@ func (p *NixPlugin) deleteUserGenerationsByPolicy(ctx context.Context, level Cle
 	return result
 }
 
+func (p *NixPlugin) deleteHomeManagerGenerationsByPolicy(ctx context.Context, level CleanupLevel, cfg config.NixConfig, logger *slog.Logger) CleanupResult {
+	result := CleanupResult{Plugin: p.Name(), Level: level}
+
+	if !cfg.DeleteHomeManagerGenerations {
+		return result
+	}
+
+	if _, err := exec.LookPath("home-manager"); err != nil {
+		logger.Debug("home-manager not available, skipping Home Manager generation policy deletion")
+		return result
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		logger.Warn("could not locate user home for Home Manager generation deletion", "error", err)
+		return result
+	}
+
+	stateProfilesDir := filepath.Join(home, ".local", "state", "nix", "profiles")
+	generations, err := discoverNixProfileLinkGenerations(stateProfilesDir, "home-manager", "home-manager")
+	if err != nil {
+		logger.Warn("could not inspect Home Manager profile links", "error", err)
+		return result
+	}
+	if len(generations) == 0 {
+		return result
+	}
+
+	olderThan := parseNixPolicyDuration(nixHomeManagerGenerationPolicyAge(level, cfg), 0)
+	if olderThan <= 0 {
+		return result
+	}
+
+	targets := nixGenerationTargets(generations, time.Now(), nixMinHomeManagerGenerations(cfg), olderThan)
+	var generationNumbers []string
+	for _, target := range targets {
+		if target.Action == "delete_generation" {
+			generationNumbers = append(generationNumbers, target.Version)
+		}
+	}
+	if len(generationNumbers) == 0 {
+		return result
+	}
+
+	args := append([]string{"remove-generations"}, generationNumbers...)
+	deleteCtx, cancel := context.WithTimeout(ctx, nixCommandTimeout(cfg))
+	defer cancel()
+
+	cmd := exec.CommandContext(deleteCtx, "home-manager", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if reason, ok := nixContentionReason(string(output)); ok && cfg.SkipWhenDaemonBusy {
+			logger.Warn("skipping Home Manager generation deletion because store contention was reported", "reason", reason)
+			return result
+		}
+		result.Error = fmt.Errorf("home-manager %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		return result
+	}
+
+	result.ItemsCleaned = len(generationNumbers)
+	logger.Info("deleted old Home Manager generations", "generations", strings.Join(generationNumbers, ", "))
+	return result
+}
+
 func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLevel, cfg config.NixConfig, logger *slog.Logger) ([]CleanupTarget, []string) {
 	_ = logger
 
@@ -483,6 +560,13 @@ func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLeve
 
 	var targets []CleanupTarget
 	var warnings []string
+	homeManagerConfig := cfg
+	if cfg.DeleteHomeManagerGenerations {
+		if _, err := exec.LookPath("home-manager"); err != nil {
+			warnings = append(warnings, "home-manager is not available; Home Manager generations will remain review-only")
+			homeManagerConfig.DeleteHomeManagerGenerations = false
+		}
+	}
 
 	_, nixEnvErr := exec.LookPath("nix-env")
 	userGenerationsPlanned := false
@@ -516,11 +600,10 @@ func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLeve
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("could not inspect Home Manager profile links: %v", err))
 		} else if len(homeManagerGenerations) > 0 {
-			homeManagerTargets := nixReviewOnlyGenerationTargets(
-				nixGenerationTargets(homeManagerGenerations, time.Now(), cfg.MinUserGenerations, olderThan),
-				"review_home_manager_generation",
-				"outside retention policy, but Home Manager generation deletion requires an explicit profile workflow",
-				CleanupTierWarm,
+			homeManagerOlderThan := parseNixPolicyDuration(nixHomeManagerGenerationPolicyAge(level, cfg), olderThan)
+			homeManagerTargets := nixHomeManagerGenerationTargets(
+				nixGenerationTargets(homeManagerGenerations, time.Now(), nixMinHomeManagerGenerations(cfg), homeManagerOlderThan),
+				homeManagerConfig,
 			)
 			targets = append(targets, homeManagerTargets...)
 		}
@@ -638,6 +721,27 @@ func nixReviewOnlyGenerationTargets(targets []CleanupTarget, action string, dele
 	return targets
 }
 
+func nixHomeManagerGenerationTargets(targets []CleanupTarget, cfg config.NixConfig) []CleanupTarget {
+	if !cfg.DeleteHomeManagerGenerations {
+		return nixReviewOnlyGenerationTargets(
+			targets,
+			"review_home_manager_generation",
+			"outside retention policy, but Home Manager generation deletion requires delete_home_manager_generations=true",
+			CleanupTierWarm,
+		)
+	}
+
+	for i := range targets {
+		if targets[i].Action != "delete_generation" {
+			continue
+		}
+		targets[i].Action = "delete_home_manager_generation"
+		targets[i].Reason = "outside Home Manager retention policy and eligible for home-manager remove-generations"
+		annotateCleanupTargetPolicy(&targets[i], CleanupTierWarm, CleanupReclaimDeferred)
+	}
+	return targets
+}
+
 func nixActiveWorkTargets(reasons []string, backoff string) []CleanupTarget {
 	targets := make([]CleanupTarget, 0, len(reasons))
 	for _, reason := range reasons {
@@ -676,13 +780,23 @@ func nixPlanSteps(level CleanupLevel, cfg config.NixConfig) []string {
 	case LevelModerate, LevelAggressive:
 		steps = append(steps,
 			fmt.Sprintf("Delete user generations older than %s only when at least %d user generations remain", cfg.DeleteGenerationsOlderThan, cfg.MinUserGenerations),
-			"Run plain Nix GC after selected user generation deletion",
 		)
+		if cfg.DeleteHomeManagerGenerations {
+			steps = append(steps, fmt.Sprintf("Delete Home Manager generations older than %s only when at least %d Home Manager generations remain", nixHomeManagerGenerationPolicyAge(level, cfg), nixMinHomeManagerGenerations(cfg)))
+		} else {
+			steps = append(steps, "Report stale Home Manager generations as review-only because delete_home_manager_generations=false")
+		}
+		steps = append(steps, "Run plain Nix GC after selected generation deletion")
 	case LevelCritical:
 		steps = append(steps,
 			fmt.Sprintf("Delete user generations older than %s only when at least %d user generations remain", cfg.CriticalDeleteGenerationsOlderThan, cfg.MinUserGenerations),
-			"Run plain Nix GC after selected user generation deletion",
 		)
+		if cfg.DeleteHomeManagerGenerations {
+			steps = append(steps, fmt.Sprintf("Delete Home Manager generations older than %s only when at least %d Home Manager generations remain", nixHomeManagerGenerationPolicyAge(level, cfg), nixMinHomeManagerGenerations(cfg)))
+		} else {
+			steps = append(steps, "Report stale Home Manager generations as review-only because delete_home_manager_generations=false")
+		}
+		steps = append(steps, "Run plain Nix GC after selected generation deletion")
 		if cfg.AllowStoreOptimize {
 			steps = append(steps, "Run nix-store --optimize because allow_store_optimize=true")
 		} else {
@@ -703,6 +817,27 @@ func nixGenerationPolicyAge(level CleanupLevel, cfg config.NixConfig) string {
 	default:
 		return ""
 	}
+}
+
+func nixHomeManagerGenerationPolicyAge(level CleanupLevel, cfg config.NixConfig) string {
+	switch level {
+	case LevelCritical:
+		if strings.TrimSpace(cfg.HomeManagerCriticalDeleteGenerationsOlderThan) != "" {
+			return cfg.HomeManagerCriticalDeleteGenerationsOlderThan
+		}
+	case LevelModerate, LevelAggressive:
+		if strings.TrimSpace(cfg.HomeManagerDeleteGenerationsOlderThan) != "" {
+			return cfg.HomeManagerDeleteGenerationsOlderThan
+		}
+	}
+	return nixGenerationPolicyAge(level, cfg)
+}
+
+func nixMinHomeManagerGenerations(cfg config.NixConfig) int {
+	if cfg.MinHomeManagerGenerations > 0 {
+		return cfg.MinHomeManagerGenerations
+	}
+	return cfg.MinUserGenerations
 }
 
 func nixCommandTimeout(cfg config.NixConfig) time.Duration {

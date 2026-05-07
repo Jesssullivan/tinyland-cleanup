@@ -361,6 +361,9 @@ func TestNixPolicyDefaults(t *testing.T) {
 	if cfg.Nix.MinUserGenerations != 5 {
 		t.Errorf("Nix.MinUserGenerations should be 5, got %d", cfg.Nix.MinUserGenerations)
 	}
+	if cfg.Nix.MinHomeManagerGenerations != 5 {
+		t.Errorf("Nix.MinHomeManagerGenerations should be 5, got %d", cfg.Nix.MinHomeManagerGenerations)
+	}
 	if cfg.Nix.MinSystemGenerations != 3 {
 		t.Errorf("Nix.MinSystemGenerations should be 3, got %d", cfg.Nix.MinSystemGenerations)
 	}
@@ -372,6 +375,15 @@ func TestNixPolicyDefaults(t *testing.T) {
 	}
 	if cfg.Nix.CriticalDeleteGenerationsOlderThan != "3d" {
 		t.Errorf("Nix.CriticalDeleteGenerationsOlderThan should be 3d, got %q", cfg.Nix.CriticalDeleteGenerationsOlderThan)
+	}
+	if cfg.Nix.DeleteHomeManagerGenerations {
+		t.Error("Nix.DeleteHomeManagerGenerations should be false by default")
+	}
+	if cfg.Nix.HomeManagerDeleteGenerationsOlderThan != "14d" {
+		t.Errorf("Nix.HomeManagerDeleteGenerationsOlderThan should be 14d, got %q", cfg.Nix.HomeManagerDeleteGenerationsOlderThan)
+	}
+	if cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan != "3d" {
+		t.Errorf("Nix.HomeManagerCriticalDeleteGenerationsOlderThan should be 3d, got %q", cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan)
 	}
 	if cfg.Nix.AllowStoreOptimize {
 		t.Error("Nix.AllowStoreOptimize should be false by default")
@@ -545,10 +557,14 @@ podman:
     - applehv
 nix:
   min_user_generations: 7
+  min_home_manager_generations: 11
   min_system_generations: 4
   host_measure_path: /nix
   delete_generations_older_than: 21d
   critical_delete_generations_older_than: 5d
+  delete_home_manager_generations: true
+  home_manager_delete_generations_older_than: 9d
+  home_manager_critical_delete_generations_older_than: 2d
   allow_store_optimize: true
   skip_when_daemon_busy: false
   daemon_busy_backoff: 45m
@@ -699,6 +715,9 @@ darwin_dev_caches:
 	if cfg.Nix.MinUserGenerations != 7 {
 		t.Errorf("Nix.MinUserGenerations should be 7 per config, got %d", cfg.Nix.MinUserGenerations)
 	}
+	if cfg.Nix.MinHomeManagerGenerations != 11 {
+		t.Errorf("Nix.MinHomeManagerGenerations should be 11 per config, got %d", cfg.Nix.MinHomeManagerGenerations)
+	}
 	if cfg.Nix.MinSystemGenerations != 4 {
 		t.Errorf("Nix.MinSystemGenerations should be 4 per config, got %d", cfg.Nix.MinSystemGenerations)
 	}
@@ -710,6 +729,15 @@ darwin_dev_caches:
 	}
 	if cfg.Nix.CriticalDeleteGenerationsOlderThan != "5d" {
 		t.Errorf("Nix.CriticalDeleteGenerationsOlderThan should be 5d per config, got %q", cfg.Nix.CriticalDeleteGenerationsOlderThan)
+	}
+	if !cfg.Nix.DeleteHomeManagerGenerations {
+		t.Error("Nix.DeleteHomeManagerGenerations should be true per config")
+	}
+	if cfg.Nix.HomeManagerDeleteGenerationsOlderThan != "9d" {
+		t.Errorf("Nix.HomeManagerDeleteGenerationsOlderThan should be 9d per config, got %q", cfg.Nix.HomeManagerDeleteGenerationsOlderThan)
+	}
+	if cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan != "2d" {
+		t.Errorf("Nix.HomeManagerCriticalDeleteGenerationsOlderThan should be 2d per config, got %q", cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan)
 	}
 	if !cfg.Nix.AllowStoreOptimize {
 		t.Error("Nix.AllowStoreOptimize should be true per config")

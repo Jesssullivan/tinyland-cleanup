@@ -245,6 +245,8 @@ type BazelConfig struct {
 type NixConfig struct {
 	// MinUserGenerations preserves at least this many user profile generations.
 	MinUserGenerations int `yaml:"min_user_generations"`
+	// MinHomeManagerGenerations preserves at least this many Home Manager generations.
+	MinHomeManagerGenerations int `yaml:"min_home_manager_generations"`
 	// MinSystemGenerations preserves at least this many system/darwin generations when visible.
 	MinSystemGenerations int `yaml:"min_system_generations"`
 	// HostMeasurePath is the filesystem path used for plugin-isolated host free-space deltas.
@@ -253,6 +255,12 @@ type NixConfig struct {
 	DeleteGenerationsOlderThan string `yaml:"delete_generations_older_than"`
 	// CriticalDeleteGenerationsOlderThan is the critical-level generation age policy.
 	CriticalDeleteGenerationsOlderThan string `yaml:"critical_delete_generations_older_than"`
+	// DeleteHomeManagerGenerations enables home-manager remove-generations for selected generations.
+	DeleteHomeManagerGenerations bool `yaml:"delete_home_manager_generations"`
+	// HomeManagerDeleteGenerationsOlderThan is the normal Home Manager generation age policy.
+	HomeManagerDeleteGenerationsOlderThan string `yaml:"home_manager_delete_generations_older_than"`
+	// HomeManagerCriticalDeleteGenerationsOlderThan is the critical-level Home Manager generation age policy.
+	HomeManagerCriticalDeleteGenerationsOlderThan string `yaml:"home_manager_critical_delete_generations_older_than"`
 	// AllowStoreOptimize enables nix-store --optimize at critical level.
 	AllowStoreOptimize bool `yaml:"allow_store_optimize"`
 	// SkipWhenDaemonBusy skips Nix cleanup when active Nix work is detected.
@@ -459,16 +467,20 @@ func DefaultConfig() *Config {
 			AllowDeleteActiveOutputBases: false,
 		},
 		Nix: NixConfig{
-			MinUserGenerations:                 5,
-			MinSystemGenerations:               3,
-			HostMeasurePath:                    "/nix/store",
-			DeleteGenerationsOlderThan:         "14d",
-			CriticalDeleteGenerationsOlderThan: "3d",
-			AllowStoreOptimize:                 false,
-			SkipWhenDaemonBusy:                 true,
-			DaemonBusyBackoff:                  "30m",
-			MaxGCDuration:                      "20m",
-			RootAttributionLimit:               20,
+			MinUserGenerations:                            5,
+			MinHomeManagerGenerations:                     5,
+			MinSystemGenerations:                          3,
+			HostMeasurePath:                               "/nix/store",
+			DeleteGenerationsOlderThan:                    "14d",
+			CriticalDeleteGenerationsOlderThan:            "3d",
+			DeleteHomeManagerGenerations:                  false,
+			HomeManagerDeleteGenerationsOlderThan:         "14d",
+			HomeManagerCriticalDeleteGenerationsOlderThan: "3d",
+			AllowStoreOptimize:                            false,
+			SkipWhenDaemonBusy:                            true,
+			DaemonBusyBackoff:                             "30m",
+			MaxGCDuration:                                 "20m",
+			RootAttributionLimit:                          20,
 		},
 		Lima: LimaConfig{
 			VMNames: []string{"colima", "unified"},

@@ -25,12 +25,14 @@ The Nix plan includes:
 - `host_measure_path`, the filesystem path used to measure plugin-isolated
   host free-space deltas around real Nix GC and optional store optimization;
 - visible GC roots when dry-run GC reports no reclaimable store space;
-- generation targets with `keep_generation`, `delete_generation`, or
+- generation targets with `keep_generation`, `delete_generation`,
+  `delete_home_manager_generation`, `review_home_manager_generation`, or
   `review_privileged_generation` actions;
 - lock-free Home Manager generation targets discovered from
   `~/.local/state/nix/profiles/home-manager-*-link`, reported as protected
-  `review_home_manager_generation` items when they fall outside policy;
-- configured minimum user and system generation retention;
+  `review_home_manager_generation` items when they fall outside policy unless
+  `delete_home_manager_generations` is explicitly enabled;
+- configured minimum user, Home Manager, and system generation retention;
 - whether critical `nix-store --optimize` is allowed.
 
 Default policy:
@@ -38,10 +40,14 @@ Default policy:
 ```yaml
 nix:
   min_user_generations: 5
+  min_home_manager_generations: 5
   min_system_generations: 3
   host_measure_path: /nix/store
   delete_generations_older_than: 14d
   critical_delete_generations_older_than: 3d
+  delete_home_manager_generations: false
+  home_manager_delete_generations_older_than: 14d
+  home_manager_critical_delete_generations_older_than: 3d
   allow_store_optimize: false
   skip_when_daemon_busy: true
   daemon_busy_backoff: 30m
@@ -54,6 +60,10 @@ Runtime behavior:
 - warning runs plain Nix garbage collection only;
 - moderate and aggressive may delete old user profile generations selected by
   the age policy, while preserving the current generation and the minimum count;
+- Home Manager generations are dry-run review-only by default. If
+  `delete_home_manager_generations: true`, moderate and aggressive cleanup uses
+  `home-manager remove-generations` for selected Home Manager generations while
+  preserving the current generation and `min_home_manager_generations`;
 - critical uses the stricter age policy, then runs plain Nix garbage collection;
 - dry-run GC lock or SQLite contention is treated like active Nix work when
   `skip_when_daemon_busy` is enabled, so the plan is deferred instead of
@@ -76,8 +86,8 @@ Runtime behavior:
 - system or nix-darwin generations are reported for operator review but are not
   deleted by the unprivileged plugin path;
 - Home Manager generations are discovered from profile symlinks without taking a
-  `nix-env` profile lock; stale Home Manager generations are review-only until
-  an explicit profile deletion workflow is implemented;
+  `nix-env` profile lock; stale Home Manager generations use the explicit
+  `home-manager remove-generations` workflow only when configured;
 - user profile generations fall back to the same lock-free profile-link scan
   when `nix-env --list-generations` is unavailable or cannot inspect the
   profile;
@@ -98,10 +108,14 @@ Recommended Rocky or Linux runner defaults:
 ```yaml
 nix:
   min_user_generations: 3
+  min_home_manager_generations: 3
   min_system_generations: 2
   host_measure_path: /nix/store
   delete_generations_older_than: 7d
   critical_delete_generations_older_than: 2d
+  delete_home_manager_generations: false
+  home_manager_delete_generations_older_than: 7d
+  home_manager_critical_delete_generations_older_than: 2d
   allow_store_optimize: false
   skip_when_daemon_busy: true
   daemon_busy_backoff: 15m
