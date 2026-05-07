@@ -206,9 +206,14 @@ cleanup, and avoid full size walks of that root during dry-run planning. The
 plan also protects matching artifact families when active
 package manager, compiler, language server, runtime, or LM Studio processes are
 visible, and it preserves any candidate artifact directory that contains files
-tracked by Git. Zig `.zig-cache` and `zig-out` targets are also preserved when
-they contain files modified within the recent-output grace window, even at
-critical pressure. Dev-artifact filesystem walking is bounded by
+tracked by Git. For `node_modules`, Python virtualenvs, Rust `target/`, and Zig
+outputs, active-process protection is path-scoped when process cwd or
+command-line evidence proves the active project root; JSON metadata reports
+those roots as `active_dev_artifact_roots`. If cwd evidence is unavailable, the
+plan keeps the conservative family-wide protection fallback. Zig `.zig-cache`
+and `zig-out` targets are also preserved when they contain files modified
+within the recent-output grace window, even at critical pressure.
+Dev-artifact filesystem walking is bounded by
 `dev_artifacts.scan_max_duration`, `dev_artifacts.scan_max_entries`, and
 `dev_artifacts.temp_scan_max_roots`; when a budget is hit, dry-run metadata sets
 `scan_budget_exhausted: true`, reports `scan_truncated_paths`, and treats the
