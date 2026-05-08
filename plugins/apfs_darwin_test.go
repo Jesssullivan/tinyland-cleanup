@@ -72,6 +72,22 @@ com.apple.TimeMachine.2026-01-15-123456.local
 			expected: 1,
 		},
 		{
+			name: "os update snapshots",
+			input: `Snapshots for volume group containing disk /:
+com.apple.os.update-1234567890ABCDEF
+com.apple.os.update-MSUPrepareUpdate
+`,
+			expected: 2,
+		},
+		{
+			name: "time machine and os update snapshots",
+			input: `Snapshots for volume group containing disk /:
+com.apple.TimeMachine.2026-01-15-123456.local
+com.apple.os.update-MSUPrepareUpdate
+`,
+			expected: 2,
+		},
+		{
 			name:     "malformed lines ignored",
 			input:    "not a snapshot\ninvalid-date.local\n",
 			expected: 0,
@@ -110,6 +126,37 @@ com.apple.TimeMachine.2026-01-12-120000.local
 	// Verify newest is 2026-01-15
 	if snapshots[0].Date != "2026-01-15-160000" {
 		t.Errorf("expected newest snapshot date '2026-01-15-160000', got %q", snapshots[0].Date)
+	}
+}
+
+func TestParseSnapshotListClassifiesOSUpdates(t *testing.T) {
+	input := `Snapshots for volume group containing disk /:
+com.apple.os.update-1234567890ABCDEF
+com.apple.TimeMachine.2026-01-15-160000.local
+com.apple.os.update-MSUPrepareUpdate
+`
+	snapshots := parseSnapshotList(input)
+	if len(snapshots) != 3 {
+		t.Fatalf("expected 3 snapshots, got %d", len(snapshots))
+	}
+
+	if snapshots[0].Date != "2026-01-15-160000" {
+		t.Fatalf("expected timed snapshot first, got %#v", snapshots[0])
+	}
+	if got := apfsSnapshotKind(snapshots[0]); got != "time-machine" {
+		t.Fatalf("first snapshot kind = %q, want time-machine", got)
+	}
+	if got := apfsSnapshotKind(snapshots[1]); got != "os-update" {
+		t.Fatalf("second snapshot kind = %q, want os-update", got)
+	}
+	if got := apfsSnapshotDisplayName(snapshots[1]); got != "com.apple.os.update-1234567890ABCDEF" {
+		t.Fatalf("second snapshot display = %q", got)
+	}
+	if token, ok := apfsSnapshotDeleteToken(snapshots[1]); ok || token != "" {
+		t.Fatalf("OS-update snapshot should not have a deletion token, got %q", token)
+	}
+	if got := apfsSnapshotKind(snapshots[2]); got != "os-update" {
+		t.Fatalf("third snapshot kind = %q, want os-update", got)
 	}
 }
 
@@ -200,6 +247,49 @@ func TestAPFSPlanTargetsCriticalDeletesOnlyEligibleOldSnapshots(t *testing.T) {
 	}
 	if got := apfsEstimatedCandidateBytes(targets); got != 20*apfsGiB {
 		t.Fatalf("estimated candidate bytes = %d, want %d", got, 20*apfsGiB)
+	}
+}
+
+func TestAPFSPlanTargetsReportsOSUpdateSnapshotsConservatively(t *testing.T) {
+	now := time.Date(2026, 1, 16, 12, 0, 0, 0, time.UTC)
+	snapshots := []snapshotInfo{
+		{
+			Date:       "2026-01-16-100000",
+			Time:       time.Date(2026, 1, 16, 10, 0, 0, 0, time.UTC),
+			Kind:       "time-machine",
+			Identifier: "com.apple.TimeMachine.2026-01-16-100000.local",
+			HasTime:    true,
+		},
+		{
+			Date:       "com.apple.os.update-MSUPrepareUpdate",
+			Kind:       "os-update",
+			Identifier: "com.apple.os.update-MSUPrepareUpdate",
+		},
+	}
+	cfg := config.APFSConfig{
+		ThinEnabled:     true,
+		MaxThinGB:       50,
+		KeepRecentDays:  1,
+		DeleteOSUpdates: true,
+	}
+
+	targets := apfsPlanTargets(snapshots, LevelCritical, cfg, 50, false, true, now)
+	if len(targets) != 3 {
+		t.Fatalf("expected aggregate target plus 2 snapshots, got %d", len(targets))
+	}
+
+	osUpdateTarget := targets[2]
+	if osUpdateTarget.Name != "com.apple.os.update-MSUPrepareUpdate" {
+		t.Fatalf("OS-update target name = %q", osUpdateTarget.Name)
+	}
+	if osUpdateTarget.Version != "os-update" {
+		t.Fatalf("OS-update target version = %q", osUpdateTarget.Version)
+	}
+	if osUpdateTarget.Action != "keep" || !osUpdateTarget.Protected {
+		t.Fatalf("OS-update snapshot should be protected review-only evidence, got %#v", osUpdateTarget)
+	}
+	if got := apfsEstimatedCandidateBytes(targets); got != 10*apfsGiB {
+		t.Fatalf("estimated candidate bytes = %d, want thinning estimate only", got)
 	}
 }
 

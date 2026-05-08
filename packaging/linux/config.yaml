@@ -58,9 +58,16 @@ podman:
 
 nix:
   min_user_generations: 5
+  min_home_manager_generations: 5
   min_system_generations: 3
+  max_user_generations: 0
+  max_home_manager_generations: 0
+  host_measure_path: /nix/store
   delete_generations_older_than: 14d
   critical_delete_generations_older_than: 3d
+  delete_home_manager_generations: false
+  home_manager_delete_generations_older_than: 14d
+  home_manager_critical_delete_generations_older_than: 3d
   allow_store_optimize: false
   skip_when_daemon_busy: true
   daemon_busy_backoff: 30m

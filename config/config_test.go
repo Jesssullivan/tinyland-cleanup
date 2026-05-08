@@ -218,12 +218,56 @@ func TestLoadHomeManagerContract(t *testing.T) {
 	}
 }
 
+func TestPackagedLinuxConfigParsesCurrentNixPolicy(t *testing.T) {
+	cfg, err := LoadConfig(packagedLinuxConfigPath(t))
+	if err != nil {
+		t.Fatalf("packaged Linux config should load: %v", err)
+	}
+
+	if cfg.Nix.MinHomeManagerGenerations != 5 {
+		t.Errorf("expected min_home_manager_generations=5, got %d", cfg.Nix.MinHomeManagerGenerations)
+	}
+	if cfg.Nix.MaxUserGenerations != 0 {
+		t.Errorf("expected max_user_generations=0, got %d", cfg.Nix.MaxUserGenerations)
+	}
+	if cfg.Nix.MaxHomeManagerGenerations != 0 {
+		t.Errorf("expected max_home_manager_generations=0, got %d", cfg.Nix.MaxHomeManagerGenerations)
+	}
+	if cfg.Nix.HostMeasurePath != "/nix/store" {
+		t.Errorf("expected host_measure_path=/nix/store, got %q", cfg.Nix.HostMeasurePath)
+	}
+	if cfg.Nix.DeleteHomeManagerGenerations {
+		t.Error("expected delete_home_manager_generations=false")
+	}
+	if cfg.Nix.HomeManagerDeleteGenerationsOlderThan != "14d" {
+		t.Errorf("expected home_manager_delete_generations_older_than=14d, got %q", cfg.Nix.HomeManagerDeleteGenerationsOlderThan)
+	}
+	if cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan != "3d" {
+		t.Errorf("expected home_manager_critical_delete_generations_older_than=3d, got %q", cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan)
+	}
+}
+
 func homeManagerContractPath(t *testing.T) string {
 	t.Helper()
 
 	candidates := []string{
 		filepath.Join("testdata", "home-manager-honey.yaml"),
 		filepath.Join("config", "testdata", "home-manager-honey.yaml"),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return candidates[0]
+}
+
+func packagedLinuxConfigPath(t *testing.T) string {
+	t.Helper()
+
+	candidates := []string{
+		filepath.Join("..", "packaging", "linux", "config.yaml"),
+		filepath.Join("packaging", "linux", "config.yaml"),
 	}
 	for _, candidate := range candidates {
 		if _, err := os.Stat(candidate); err == nil {

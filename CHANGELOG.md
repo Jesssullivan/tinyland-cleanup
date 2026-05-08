@@ -130,10 +130,14 @@ All notable changes to this project will be documented in this file.
 - Dev-artifacts planning now has explicit scan budgets for duration, recursive
   entry count, and top-level temporary roots, with dry-run warnings and metadata
   when evidence is partial.
+- APFS snapshot dry-runs now recognize `com.apple.os.update-*` local snapshots
+  as protected review evidence instead of silently ignoring them.
 
 ### Changed
 
 - Go module path moved to `github.com/Jesssullivan/tinyland-cleanup`.
+- Nix package builds now pass version, source revision, and flake timestamp
+  into `--version` output for provenance.
 - Clarified that the legacy `target_free` config key represents the target
   maximum used-space percentage after cleanup.
 - Critical Darwin cache cleanup now prefers typed developer-cache targets when
