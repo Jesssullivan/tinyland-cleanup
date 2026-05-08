@@ -77,6 +77,8 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 			"min_user_generations":                                   strconv.Itoa(cfg.Nix.MinUserGenerations),
 			"min_home_manager_generations":                           strconv.Itoa(nixMinHomeManagerGenerations(cfg.Nix)),
 			"min_system_generations":                                 strconv.Itoa(cfg.Nix.MinSystemGenerations),
+			"max_user_generations":                                   strconv.Itoa(cfg.Nix.MaxUserGenerations),
+			"max_home_manager_generations":                           strconv.Itoa(cfg.Nix.MaxHomeManagerGenerations),
 			"delete_generations_older_than":                          cfg.Nix.DeleteGenerationsOlderThan,
 			"critical_delete_generations_older_than":                 cfg.Nix.CriticalDeleteGenerationsOlderThan,
 			"delete_home_manager_generations":                        strconv.FormatBool(cfg.Nix.DeleteHomeManagerGenerations),
@@ -455,11 +457,11 @@ func (p *NixPlugin) deleteUserGenerationsByPolicy(ctx context.Context, level Cle
 	}
 
 	olderThan := parseNixPolicyDuration(nixGenerationPolicyAge(level, cfg), 0)
-	if olderThan <= 0 {
+	if olderThan <= 0 && cfg.MaxUserGenerations <= 0 {
 		return result
 	}
 
-	targets := nixGenerationTargets(generations, time.Now(), cfg.MinUserGenerations, olderThan)
+	targets := nixGenerationTargetsWithMax(generations, time.Now(), cfg.MinUserGenerations, olderThan, cfg.MaxUserGenerations)
 	var generationNumbers []string
 	for _, target := range targets {
 		if target.Action == "delete_generation" {
@@ -519,11 +521,11 @@ func (p *NixPlugin) deleteHomeManagerGenerationsByPolicy(ctx context.Context, le
 	}
 
 	olderThan := parseNixPolicyDuration(nixHomeManagerGenerationPolicyAge(level, cfg), 0)
-	if olderThan <= 0 {
+	if olderThan <= 0 && cfg.MaxHomeManagerGenerations <= 0 {
 		return result
 	}
 
-	targets := nixGenerationTargets(generations, time.Now(), nixMinHomeManagerGenerations(cfg), olderThan)
+	targets := nixGenerationTargetsWithMax(generations, time.Now(), nixMinHomeManagerGenerations(cfg), olderThan, cfg.MaxHomeManagerGenerations)
 	var generationNumbers []string
 	for _, target := range targets {
 		if target.Action == "delete_generation" {
@@ -558,7 +560,7 @@ func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLeve
 	_ = logger
 
 	olderThan := parseNixPolicyDuration(nixGenerationPolicyAge(level, cfg), 0)
-	if olderThan <= 0 {
+	if olderThan <= 0 && cfg.MaxUserGenerations <= 0 && cfg.MaxHomeManagerGenerations <= 0 {
 		return nil, nil
 	}
 
@@ -581,7 +583,7 @@ func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLeve
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("could not inspect user Nix generations with nix-env: %v", err))
 		} else {
-			targets = append(targets, nixGenerationTargets(userGenerations, time.Now(), cfg.MinUserGenerations, olderThan)...)
+			targets = append(targets, nixGenerationTargetsWithMax(userGenerations, time.Now(), cfg.MinUserGenerations, olderThan, cfg.MaxUserGenerations)...)
 			userGenerationsPlanned = true
 		}
 	}
@@ -595,7 +597,7 @@ func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLeve
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("could not inspect user Nix profile links: %v", err))
 			} else if len(userLinkGenerations) > 0 {
-				targets = append(targets, nixGenerationTargets(userLinkGenerations, time.Now(), cfg.MinUserGenerations, olderThan)...)
+				targets = append(targets, nixGenerationTargetsWithMax(userLinkGenerations, time.Now(), cfg.MinUserGenerations, olderThan, cfg.MaxUserGenerations)...)
 				warnings = append(warnings, "using lock-free user Nix profile link inspection after nix-env generation inspection was unavailable")
 			}
 		}
@@ -606,7 +608,7 @@ func (p *NixPlugin) planGenerationTargets(ctx context.Context, level CleanupLeve
 		} else if len(homeManagerGenerations) > 0 {
 			homeManagerOlderThan := parseNixPolicyDuration(nixHomeManagerGenerationPolicyAge(level, cfg), olderThan)
 			homeManagerTargets := nixHomeManagerGenerationTargets(
-				nixGenerationTargets(homeManagerGenerations, time.Now(), nixMinHomeManagerGenerations(cfg), homeManagerOlderThan),
+				nixGenerationTargetsWithMax(homeManagerGenerations, time.Now(), nixMinHomeManagerGenerations(cfg), homeManagerOlderThan, cfg.MaxHomeManagerGenerations),
 				homeManagerConfig,
 			)
 			targets = append(targets, homeManagerTargets...)
@@ -785,20 +787,32 @@ func nixPlanSteps(level CleanupLevel, cfg config.NixConfig) []string {
 		steps = append(steps,
 			fmt.Sprintf("Delete user generations older than %s only when at least %d user generations remain", cfg.DeleteGenerationsOlderThan, cfg.MinUserGenerations),
 		)
+		if cfg.MaxUserGenerations > 0 {
+			steps = append(steps, fmt.Sprintf("Cap user generations at %d while preserving the current generation and minimum rollback count", cfg.MaxUserGenerations))
+		}
 		if cfg.DeleteHomeManagerGenerations {
 			steps = append(steps, fmt.Sprintf("Delete Home Manager generations older than %s only when at least %d Home Manager generations remain", nixHomeManagerGenerationPolicyAge(level, cfg), nixMinHomeManagerGenerations(cfg)))
+			if cfg.MaxHomeManagerGenerations > 0 {
+				steps = append(steps, fmt.Sprintf("Cap Home Manager generations at %d while preserving the current generation and minimum rollback count", cfg.MaxHomeManagerGenerations))
+			}
 		} else {
-			steps = append(steps, "Report stale Home Manager generations as review-only because delete_home_manager_generations=false")
+			steps = append(steps, "Report stale or over-cap Home Manager generations as review-only because delete_home_manager_generations=false")
 		}
 		steps = append(steps, "Run plain Nix GC after selected generation deletion")
 	case LevelCritical:
 		steps = append(steps,
 			fmt.Sprintf("Delete user generations older than %s only when at least %d user generations remain", cfg.CriticalDeleteGenerationsOlderThan, cfg.MinUserGenerations),
 		)
+		if cfg.MaxUserGenerations > 0 {
+			steps = append(steps, fmt.Sprintf("Cap user generations at %d while preserving the current generation and minimum rollback count", cfg.MaxUserGenerations))
+		}
 		if cfg.DeleteHomeManagerGenerations {
 			steps = append(steps, fmt.Sprintf("Delete Home Manager generations older than %s only when at least %d Home Manager generations remain", nixHomeManagerGenerationPolicyAge(level, cfg), nixMinHomeManagerGenerations(cfg)))
+			if cfg.MaxHomeManagerGenerations > 0 {
+				steps = append(steps, fmt.Sprintf("Cap Home Manager generations at %d while preserving the current generation and minimum rollback count", cfg.MaxHomeManagerGenerations))
+			}
 		} else {
-			steps = append(steps, "Report stale Home Manager generations as review-only because delete_home_manager_generations=false")
+			steps = append(steps, "Report stale or over-cap Home Manager generations as review-only because delete_home_manager_generations=false")
 		}
 		steps = append(steps, "Run plain Nix GC after selected generation deletion")
 		if cfg.AllowStoreOptimize {
@@ -1199,8 +1213,15 @@ func nixGCRootClassSummary(roots []nixGCRoot) string {
 }
 
 func nixGenerationTargets(generations []nixGeneration, now time.Time, minKeep int, olderThan time.Duration) []CleanupTarget {
+	return nixGenerationTargetsWithMax(generations, now, minKeep, olderThan, 0)
+}
+
+func nixGenerationTargetsWithMax(generations []nixGeneration, now time.Time, minKeep int, olderThan time.Duration, maxKeep int) []CleanupTarget {
 	if minKeep < 1 {
 		minKeep = 1
+	}
+	if maxKeep > 0 && maxKeep < minKeep {
+		maxKeep = minKeep
 	}
 
 	sorted := append([]nixGeneration(nil), generations...)
@@ -1219,10 +1240,20 @@ func nixGenerationTargets(generations []nixGeneration, now time.Time, minKeep in
 		protectedByMinimum[generation.Number] = true
 	}
 
+	protectedByMaximum := map[int]bool{}
+	if maxKeep > 0 {
+		for idx, generation := range sorted {
+			if idx >= maxKeep {
+				break
+			}
+			protectedByMaximum[generation.Number] = true
+		}
+	}
+
+	ageEnabled := olderThan > 0
 	cutoff := now.Add(-olderThan)
 	targets := make([]CleanupTarget, 0, len(sorted))
 	for _, generation := range sorted {
-		protected := generation.Current || protectedByMinimum[generation.Number] || generation.CreatedAt.After(cutoff)
 		action := "keep_generation"
 		reason := "within generation retention policy"
 		switch {
@@ -1230,12 +1261,16 @@ func nixGenerationTargets(generations []nixGeneration, now time.Time, minKeep in
 			reason = "current profile generation"
 		case protectedByMinimum[generation.Number]:
 			reason = fmt.Sprintf("within minimum retained %s generations", generation.Scope)
-		case generation.CreatedAt.After(cutoff):
+		case maxKeep > 0 && !protectedByMaximum[generation.Number]:
+			action = "delete_generation"
+			reason = "exceeds configured maximum generation count and outside retained minimum"
+		case ageEnabled && generation.CreatedAt.After(cutoff):
 			reason = "younger than configured generation age"
-		default:
+		case ageEnabled:
 			action = "delete_generation"
 			reason = "older than configured generation age and outside retained minimum"
 		}
+		protected := action != "delete_generation"
 
 		nameScope := generation.Scope
 		if nameScope == "" {

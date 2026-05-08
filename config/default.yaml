@@ -129,6 +129,11 @@ nix:
   min_user_generations: 5
   min_home_manager_generations: 5
   min_system_generations: 3
+  # Optional generation-count pressure valves. Zero disables count-based
+  # deletion; age policy still applies. Current generations and minimum
+  # rollback counts are always preserved.
+  max_user_generations: 0
+  max_home_manager_generations: 0
   # Filesystem used for plugin-isolated host free-space deltas around real Nix GC.
   host_measure_path: /nix/store
 
