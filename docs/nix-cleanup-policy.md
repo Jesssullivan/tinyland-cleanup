@@ -42,6 +42,8 @@ nix:
   min_user_generations: 5
   min_home_manager_generations: 5
   min_system_generations: 3
+  max_user_generations: 0
+  max_home_manager_generations: 0
   host_measure_path: /nix/store
   delete_generations_older_than: 14d
   critical_delete_generations_older_than: 3d
@@ -60,6 +62,11 @@ Runtime behavior:
 - warning runs plain Nix garbage collection only;
 - moderate and aggressive may delete old user profile generations selected by
   the age policy, while preserving the current generation and the minimum count;
+- `max_user_generations` and `max_home_manager_generations` are disabled when
+  set to `0`. When set, they act as count-based pressure valves in addition to
+  age policy: older over-cap generations become cleanup candidates while the
+  current generation and configured minimum rollback counts are still
+  preserved;
 - Home Manager generations are dry-run review-only by default. If
   `delete_home_manager_generations: true`, moderate and aggressive cleanup uses
   `home-manager remove-generations` for selected Home Manager generations while
@@ -113,6 +120,8 @@ nix:
   min_user_generations: 3
   min_home_manager_generations: 3
   min_system_generations: 2
+  max_user_generations: 0
+  max_home_manager_generations: 0
   host_measure_path: /nix/store
   delete_generations_older_than: 7d
   critical_delete_generations_older_than: 2d

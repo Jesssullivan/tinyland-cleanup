@@ -10,18 +10,22 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
 
-      perSystem = { pkgs, self', system, ... }: {
+      perSystem = { pkgs, self', system, ... }: let
+        buildVersion = "0.2.0";
+        buildCommit = inputs.self.rev or "dirty";
+        buildDate = inputs.self.lastModifiedDate or "unknown";
+      in {
         packages.default = pkgs.buildGoModule {
           pname = "tinyland-cleanup";
-          version = "0.2.0";
+          version = buildVersion;
           src = ./.;
           vendorHash = null;
 
           ldflags = [
             "-s" "-w"
-            "-X main.version=0.2.0"
-          ] ++ pkgs.lib.optionals (inputs.self ? rev) [
-            "-X main.commit=${inputs.self.rev}"
+            "-X main.version=${buildVersion}"
+            "-X main.commit=${buildCommit}"
+            "-X main.date=${buildDate}"
           ];
 
           meta = with pkgs.lib; {

@@ -234,11 +234,14 @@ enabled. Reported reclaimable bytes may describe Docker daemon or VM storage
 and may not immediately equal host free-space delta on macOS or VM-backed
 Docker installations.
 
-For APFS snapshots on macOS, the plan reports local snapshot count, newest and
-oldest snapshot dates, requested thinning size, sudo capability, and Time
-Machine backup state. Snapshot sizes are estimates because `tmutil` does not
-report per-snapshot allocation; real cleanup requires passwordless sudo and is
-deferred while a Time Machine backup is active.
+For APFS snapshots on macOS, the plan reports local snapshot count,
+Time Machine and OS-update snapshot counts, newest and oldest snapshot
+identifiers, requested thinning size, sudo capability, and Time Machine backup
+state. Snapshot sizes are estimates because `tmutil` does not report
+per-snapshot allocation; real cleanup requires passwordless sudo and is
+deferred while a Time Machine backup is active. OS-update snapshots are surfaced
+as protected review evidence because automatic deletion requires a date-form
+`tmutil deletelocalsnapshots` token.
 
 For Homebrew, iOS Simulator, and Xcode on macOS, the plan reports package-manager
 cleanup estimates, simulator device/log/runtime targets, and Xcode logs,

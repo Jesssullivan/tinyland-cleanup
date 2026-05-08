@@ -102,8 +102,11 @@ func (p *APFSPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *c
 		plan.SkipReason = "no_apfs_snapshots"
 		return plan
 	}
-	plan.Metadata["newest_snapshot"] = snapshots[0].Date
-	plan.Metadata["oldest_snapshot"] = snapshots[len(snapshots)-1].Date
+	timeMachineSnapshots, osUpdateSnapshots := apfsSnapshotCounts(snapshots)
+	plan.Metadata["time_machine_snapshot_count"] = strconv.Itoa(timeMachineSnapshots)
+	plan.Metadata["os_update_snapshot_count"] = strconv.Itoa(osUpdateSnapshots)
+	plan.Metadata["newest_snapshot"] = apfsSnapshotDisplayName(snapshots[0])
+	plan.Metadata["oldest_snapshot"] = apfsSnapshotDisplayName(snapshots[len(snapshots)-1])
 
 	low, high := apfsSnapshotEstimateBytes(snapshots)
 	plan.Metadata["estimated_snapshot_low_bytes"] = strconv.FormatInt(low, 10)
@@ -238,8 +241,11 @@ func (p *APFSPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *confi
 
 // snapshotInfo represents an APFS local snapshot.
 type snapshotInfo struct {
-	Date string // e.g., "2026-01-15-123456"
-	Time time.Time
+	Date       string // e.g., "2026-01-15-123456", or the full identifier for non-date snapshots.
+	Time       time.Time
+	Kind       string
+	Identifier string
+	HasTime    bool
 }
 
 // listSnapshots lists all local APFS snapshots.
@@ -257,7 +263,10 @@ func (p *APFSPlugin) listSnapshots(ctx context.Context) ([]snapshotInfo, error) 
 }
 
 // parseSnapshotList parses tmutil listlocalsnapshots output.
-// Format: "com.apple.TimeMachine.2026-01-15-123456.local" per line
+// Time Machine snapshots are date-form identifiers such as
+// "com.apple.TimeMachine.2026-01-15-123456.local". macOS update snapshots are
+// non-date identifiers such as "com.apple.os.update-..." and must be reported
+// separately because tmutil deletion accepts date-form tokens.
 func parseSnapshotList(output string) []snapshotInfo {
 	var snapshots []snapshotInfo
 	re := regexp.MustCompile(`(\d{4}-\d{2}-\d{2}-\d{6})`)
@@ -265,6 +274,14 @@ func parseSnapshotList(output string) []snapshotInfo {
 	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "com.apple.os.update-") {
+			snapshots = append(snapshots, snapshotInfo{
+				Date:       line,
+				Kind:       "os-update",
+				Identifier: line,
+			})
 			continue
 		}
 
@@ -281,17 +298,70 @@ func parseSnapshotList(output string) []snapshotInfo {
 		}
 
 		snapshots = append(snapshots, snapshotInfo{
-			Date: dateStr,
-			Time: t,
+			Date:       dateStr,
+			Time:       t,
+			Kind:       "time-machine",
+			Identifier: line,
+			HasTime:    true,
 		})
 	}
 
-	// Sort by time (newest first)
-	sort.Slice(snapshots, func(i, j int) bool {
-		return snapshots[i].Time.After(snapshots[j].Time)
+	// Sort timed snapshots by time (newest first), then keep non-timed
+	// snapshots in tmutil's original order.
+	sort.SliceStable(snapshots, func(i, j int) bool {
+		iHasTime := apfsSnapshotHasTime(snapshots[i])
+		jHasTime := apfsSnapshotHasTime(snapshots[j])
+		switch {
+		case iHasTime && jHasTime:
+			return snapshots[i].Time.After(snapshots[j].Time)
+		case iHasTime != jHasTime:
+			return iHasTime
+		default:
+			return false
+		}
 	})
 
 	return snapshots
+}
+
+func apfsSnapshotKind(snapshot snapshotInfo) string {
+	if snapshot.Kind != "" {
+		return snapshot.Kind
+	}
+	if apfsSnapshotHasTime(snapshot) {
+		return "time-machine"
+	}
+	return "unknown"
+}
+
+func apfsSnapshotHasTime(snapshot snapshotInfo) bool {
+	return snapshot.HasTime || !snapshot.Time.IsZero()
+}
+
+func apfsSnapshotDisplayName(snapshot snapshotInfo) string {
+	if snapshot.Identifier != "" {
+		return snapshot.Identifier
+	}
+	return snapshot.Date
+}
+
+func apfsSnapshotDeleteToken(snapshot snapshotInfo) (string, bool) {
+	if apfsSnapshotHasTime(snapshot) && snapshot.Date != "" {
+		return snapshot.Date, true
+	}
+	return "", false
+}
+
+func apfsSnapshotCounts(snapshots []snapshotInfo) (timeMachine int, osUpdate int) {
+	for _, snapshot := range snapshots {
+		switch apfsSnapshotKind(snapshot) {
+		case "time-machine":
+			timeMachine++
+		case "os-update":
+			osUpdate++
+		}
+	}
+	return timeMachine, osUpdate
 }
 
 // reportSnapshots logs information about existing snapshots.
@@ -305,8 +375,8 @@ func (p *APFSPlugin) reportSnapshots(snapshots []snapshotInfo, logger *slog.Logg
 
 	logger.Info("APFS local snapshots",
 		"count", len(snapshots),
-		"oldest", oldest.Date,
-		"newest", newest.Date,
+		"oldest", apfsSnapshotDisplayName(oldest),
+		"newest", apfsSnapshotDisplayName(newest),
 		"estimated_size_gb", fmt.Sprintf("~%d-%d", len(snapshots)*5, len(snapshots)*15),
 	)
 }
@@ -398,15 +468,20 @@ func apfsPlanTargets(snapshots []snapshotInfo, level CleanupLevel, cfg config.AP
 		target := CleanupTarget{
 			Type:      "apfs-snapshot",
 			Tier:      CleanupTierPrivileged,
-			Name:      snapshot.Date,
+			Name:      apfsSnapshotDisplayName(snapshot),
+			Version:   apfsSnapshotKind(snapshot),
 			Bytes:     5 * apfsGiB,
 			Protected: true,
 			Action:    "keep",
 			Reason:    "local snapshot is preserved by default",
 		}
 		switch {
+		case apfsSnapshotKind(snapshot) == "os-update":
+			target.Reason = "OS-update snapshot is reported for operator review; automatic deletion requires a date-form tmutil deletion token"
 		case i == 0:
 			target.Reason = "newest local snapshot is always preserved"
+		case !apfsSnapshotHasTime(snapshot):
+			target.Reason = "snapshot is missing a date-form tmutil deletion token"
 		case level == LevelCritical && cfg.DeleteOSUpdates && sudoPasswordless && !backupActive && snapshot.Time.Before(cutoff):
 			target.Protected = false
 			target.Action = "delete_old_snapshot"
@@ -491,19 +566,27 @@ func (p *APFSPlugin) deleteOldSnapshots(ctx context.Context, snapshots []snapsho
 		// Never delete the only snapshot
 		return result
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 
 	cutoff := time.Now().Add(-time.Duration(keepDays) * 24 * time.Hour)
 
 	// Skip the first snapshot (most recent) - NEVER delete it
 	for _, snap := range snapshots[1:] {
+		deleteToken, ok := apfsSnapshotDeleteToken(snap)
+		if !ok {
+			logger.Debug("skipping APFS snapshot without date-form deletion token", "snapshot", apfsSnapshotDisplayName(snap), "kind", apfsSnapshotKind(snap))
+			continue
+		}
 		if snap.Time.After(cutoff) {
 			continue // Too recent to delete
 		}
 
-		logger.Warn("deleting old APFS snapshot", "date", snap.Date)
-		output, err := RunWithSudo(ctx, "tmutil", "deletelocalsnapshots", snap.Date)
+		logger.Warn("deleting old APFS snapshot", "date", deleteToken)
+		output, err := RunWithSudo(ctx, "tmutil", "deletelocalsnapshots", deleteToken)
 		if err != nil {
-			logger.Debug("failed to delete snapshot", "date", snap.Date, "error", err, "output", string(output))
+			logger.Debug("failed to delete snapshot", "date", deleteToken, "error", err, "output", string(output))
 			continue
 		}
 

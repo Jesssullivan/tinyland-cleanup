@@ -72,7 +72,10 @@ go_test(
         "config/config_pbt_test.go",
         "config/config_test.go",
     ],
-    data = ["config/testdata/home-manager-honey.yaml"],
+    data = [
+        "config/testdata/home-manager-honey.yaml",
+        "packaging/linux/config.yaml",
+    ],
     embed = [":config"],
     deps = ["@net_pgregory_rapid//:rapid"],
 )
