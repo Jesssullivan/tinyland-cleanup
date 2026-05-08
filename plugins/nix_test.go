@@ -473,6 +473,78 @@ func TestNixGCRootTargetsAreProtectedAndLimited(t *testing.T) {
 	}
 }
 
+func TestNixGCRootTargetsCollapseRepeatedRoots(t *testing.T) {
+	roots := []nixGCRoot{
+		{
+			Root:      "{lsof}",
+			StorePath: "/nix/store/111-open-library",
+			Class:     "lsof_root",
+			Active:    true,
+		},
+		{
+			Root:      "{lsof}",
+			StorePath: "/nix/store/222-open-library",
+			Class:     "lsof_root",
+			Active:    true,
+		},
+		{
+			Root:      "/Users/jess/git/kernel/result",
+			StorePath: "/nix/store/333-kernel",
+			Class:     "workspace_result",
+		},
+	}
+
+	targets := nixGCRootTargets(roots, 10)
+	if len(targets) != 2 {
+		t.Fatalf("got %d targets, want 2: %#v", len(targets), targets)
+	}
+	if targets[0].Path != "{lsof}" || targets[0].Action != "review_lsof_gc_root" {
+		t.Fatalf("first target should be the collapsed lsof root: %+v", targets[0])
+	}
+	if targets[0].Version != "111-open-library (+1 more)" {
+		t.Fatalf("collapsed lsof target version = %q", targets[0].Version)
+	}
+	if !strings.Contains(targets[0].Name, "2 store paths") || !strings.Contains(targets[0].Reason, "2 store paths") {
+		t.Fatalf("collapsed lsof target should explain retained store paths: %+v", targets[0])
+	}
+	if targets[1].Path != "/Users/jess/git/kernel/result" {
+		t.Fatalf("second target should remain the workspace result root: %+v", targets[1])
+	}
+}
+
+func TestNixUniqueGCRootsPreservesClassOrdering(t *testing.T) {
+	roots := []nixGCRoot{
+		{
+			Root:      "/Users/jess/git/kernel/result",
+			StorePath: "/nix/store/333-kernel",
+			Class:     "workspace_result",
+		},
+		{
+			Root:      "{nix-process:1234}",
+			StorePath: "/nix/store/111-builder-input",
+			Class:     "nix_process_root",
+			Active:    true,
+		},
+		{
+			Root:      "{nix-process:1234}",
+			StorePath: "/nix/store/222-builder-input",
+			Class:     "nix_process_root",
+			Active:    true,
+		},
+	}
+
+	unique := nixUniqueGCRoots(roots)
+	if len(unique) != 2 {
+		t.Fatalf("got %d unique roots, want 2: %#v", len(unique), unique)
+	}
+	if unique[0].Class != "nix_process_root" || unique[0].StorePathCount != 2 {
+		t.Fatalf("active process root should remain first and collapsed: %#v", unique)
+	}
+	if unique[1].Class != "workspace_result" || unique[1].StorePathCount != 1 {
+		t.Fatalf("workspace result should remain after active root: %#v", unique)
+	}
+}
+
 func TestNixGCRootTargetsUseSpecificReviewActions(t *testing.T) {
 	roots := []nixGCRoot{
 		{

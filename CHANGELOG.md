@@ -60,6 +60,9 @@ All notable changes to this project will be documented in this file.
 - Nix GC-root attribution now ignores `nix-store --gc --print-roots` status
   messages such as stale-root removal lines instead of reporting them as
   generic unknown roots.
+- Nix GC-root attribution dry-runs now collapse repeated roots such as
+  `{lsof}` and `{nix-process:<pid>}` into one protected target per root while
+  retaining raw and unique root-class counts in metadata.
 - Human-readable `--output text` reports now explain dry-run and cleanup cycles
   with mount status, host free-space accounting, plugin plans, warnings, and
   representative targets.

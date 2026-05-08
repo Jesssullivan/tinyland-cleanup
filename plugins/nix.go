@@ -32,10 +32,11 @@ type nixGeneration struct {
 }
 
 type nixGCRoot struct {
-	Root      string
-	StorePath string
-	Class     string
-	Active    bool
+	Root           string
+	StorePath      string
+	StorePathCount int
+	Class          string
+	Active         bool
 }
 
 // NewNixPlugin creates a new Nix cleanup plugin.
@@ -311,13 +312,16 @@ func (p *NixPlugin) planGCRootAttribution(ctx context.Context, cfg config.NixCon
 	}
 
 	roots := parseNixGCRoots(output)
+	uniqueRoots := nixUniqueGCRoots(roots)
 	metadata["gc_root_attribution_roots"] = strconv.Itoa(len(roots))
 	metadata["gc_root_attribution_classes"] = nixGCRootClassSummary(roots)
+	metadata["gc_root_attribution_unique_roots"] = strconv.Itoa(len(uniqueRoots))
+	metadata["gc_root_attribution_unique_classes"] = nixGCRootClassSummary(uniqueRoots)
 
 	targets := nixGCRootTargets(roots, limit)
-	if len(targets) < len(roots) {
+	if len(targets) < len(uniqueRoots) {
 		metadata["gc_root_attribution_truncated"] = "true"
-		return targets, metadata, []string{fmt.Sprintf("Nix GC root attribution truncated to %d of %d visible roots", len(targets), len(roots))}
+		return targets, metadata, []string{fmt.Sprintf("Nix GC root attribution truncated to %d of %d visible roots (%d store-path entries)", len(targets), len(uniqueRoots), len(roots))}
 	}
 
 	return targets, metadata, nil
@@ -953,13 +957,19 @@ func parseNixGCRoots(output string) []nixGCRoot {
 
 		class, active := classifyNixGCRoot(root)
 		roots = append(roots, nixGCRoot{
-			Root:      root,
-			StorePath: storePath,
-			Class:     class,
-			Active:    active,
+			Root:           root,
+			StorePath:      storePath,
+			StorePathCount: 1,
+			Class:          class,
+			Active:         active,
 		})
 	}
 
+	sortNixGCRoots(roots)
+	return roots
+}
+
+func sortNixGCRoots(roots []nixGCRoot) {
 	sort.Slice(roots, func(i, j int) bool {
 		iRank := nixGCRootClassRank(roots[i].Class)
 		jRank := nixGCRootClassRank(roots[j].Class)
@@ -971,7 +981,6 @@ func parseNixGCRoots(output string) []nixGCRoot {
 		}
 		return iRank < jRank
 	})
-	return roots
 }
 
 func looksLikeNixGCRoot(root string) bool {
@@ -1042,6 +1051,7 @@ func classifyNixGCRoot(root string) (string, bool) {
 }
 
 func nixGCRootTargets(roots []nixGCRoot, limit int) []CleanupTarget {
+	roots = nixUniqueGCRoots(roots)
 	if limit <= 0 || len(roots) == 0 {
 		return nil
 	}
@@ -1059,8 +1069,21 @@ func nixGCRootTargets(roots []nixGCRoot, limit int) []CleanupTarget {
 			reason = fmt.Sprintf("%s %s", reason, version)
 		}
 		name := fmt.Sprintf("%s %s", root.Class, filepath.Base(root.Root))
+		if root.StorePathCount > 1 {
+			name = fmt.Sprintf("%s (%d store paths)", name, root.StorePathCount)
+			if version != "" {
+				version = fmt.Sprintf("%s (+%d more)", version, root.StorePathCount-1)
+				reason = fmt.Sprintf("visible Nix GC root retaining %d store paths; sample %s", root.StorePathCount, filepath.Base(root.StorePath))
+			} else {
+				reason = fmt.Sprintf("visible Nix GC root retaining %d store paths", root.StorePathCount)
+			}
+		}
 		if root.Active {
-			reason = "active process root; review the owning process before any Nix GC action"
+			if root.StorePathCount > 1 {
+				reason = fmt.Sprintf("active GC root retaining %d store paths; review the owning process before any Nix GC action", root.StorePathCount)
+			} else {
+				reason = "active process root; review the owning process before any Nix GC action"
+			}
 		}
 
 		target := CleanupTarget{
@@ -1077,6 +1100,38 @@ func nixGCRootTargets(roots []nixGCRoot, limit int) []CleanupTarget {
 		targets = append(targets, target)
 	}
 	return targets
+}
+
+func nixUniqueGCRoots(roots []nixGCRoot) []nixGCRoot {
+	if len(roots) == 0 {
+		return nil
+	}
+
+	grouped := make([]nixGCRoot, 0, len(roots))
+	index := map[string]int{}
+	for _, root := range roots {
+		key := strings.Join([]string{
+			root.Root,
+			root.Class,
+			strconv.FormatBool(root.Active),
+		}, "\x00")
+		if idx, ok := index[key]; ok {
+			grouped[idx].StorePathCount += max(root.StorePathCount, 1)
+			if grouped[idx].StorePath == "" && root.StorePath != "" {
+				grouped[idx].StorePath = root.StorePath
+			}
+			continue
+		}
+
+		if root.StorePathCount <= 0 {
+			root.StorePathCount = 1
+		}
+		index[key] = len(grouped)
+		grouped = append(grouped, root)
+	}
+
+	sortNixGCRoots(grouped)
+	return grouped
 }
 
 func nixGCRootReviewAction(class string) string {
