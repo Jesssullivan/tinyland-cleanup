@@ -367,6 +367,12 @@ func TestNixPolicyDefaults(t *testing.T) {
 	if cfg.Nix.MinSystemGenerations != 3 {
 		t.Errorf("Nix.MinSystemGenerations should be 3, got %d", cfg.Nix.MinSystemGenerations)
 	}
+	if cfg.Nix.MaxUserGenerations != 0 {
+		t.Errorf("Nix.MaxUserGenerations should default to disabled, got %d", cfg.Nix.MaxUserGenerations)
+	}
+	if cfg.Nix.MaxHomeManagerGenerations != 0 {
+		t.Errorf("Nix.MaxHomeManagerGenerations should default to disabled, got %d", cfg.Nix.MaxHomeManagerGenerations)
+	}
 	if cfg.Nix.HostMeasurePath != "/nix/store" {
 		t.Errorf("Nix.HostMeasurePath should be /nix/store, got %q", cfg.Nix.HostMeasurePath)
 	}
@@ -559,6 +565,8 @@ nix:
   min_user_generations: 7
   min_home_manager_generations: 11
   min_system_generations: 4
+  max_user_generations: 12
+  max_home_manager_generations: 16
   host_measure_path: /nix
   delete_generations_older_than: 21d
   critical_delete_generations_older_than: 5d
@@ -720,6 +728,12 @@ darwin_dev_caches:
 	}
 	if cfg.Nix.MinSystemGenerations != 4 {
 		t.Errorf("Nix.MinSystemGenerations should be 4 per config, got %d", cfg.Nix.MinSystemGenerations)
+	}
+	if cfg.Nix.MaxUserGenerations != 12 {
+		t.Errorf("Nix.MaxUserGenerations should be 12 per config, got %d", cfg.Nix.MaxUserGenerations)
+	}
+	if cfg.Nix.MaxHomeManagerGenerations != 16 {
+		t.Errorf("Nix.MaxHomeManagerGenerations should be 16 per config, got %d", cfg.Nix.MaxHomeManagerGenerations)
 	}
 	if cfg.Nix.HostMeasurePath != "/nix" {
 		t.Errorf("Nix.HostMeasurePath should be /nix per config, got %q", cfg.Nix.HostMeasurePath)

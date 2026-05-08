@@ -249,6 +249,10 @@ type NixConfig struct {
 	MinHomeManagerGenerations int `yaml:"min_home_manager_generations"`
 	// MinSystemGenerations preserves at least this many system/darwin generations when visible.
 	MinSystemGenerations int `yaml:"min_system_generations"`
+	// MaxUserGenerations caps retained user profile generations when greater than zero.
+	MaxUserGenerations int `yaml:"max_user_generations"`
+	// MaxHomeManagerGenerations caps retained Home Manager generations when greater than zero.
+	MaxHomeManagerGenerations int `yaml:"max_home_manager_generations"`
 	// HostMeasurePath is the filesystem path used for plugin-isolated host free-space deltas.
 	HostMeasurePath string `yaml:"host_measure_path"`
 	// DeleteGenerationsOlderThan is the normal generation age policy.
@@ -470,6 +474,8 @@ func DefaultConfig() *Config {
 			MinUserGenerations:                            5,
 			MinHomeManagerGenerations:                     5,
 			MinSystemGenerations:                          3,
+			MaxUserGenerations:                            0,
+			MaxHomeManagerGenerations:                     0,
 			HostMeasurePath:                               "/nix/store",
 			DeleteGenerationsOlderThan:                    "14d",
 			CriticalDeleteGenerationsOlderThan:            "3d",

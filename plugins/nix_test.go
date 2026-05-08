@@ -750,6 +750,69 @@ func TestNixPluginDeleteHomeManagerGenerationsByPolicyUsesRemoveGenerations(t *t
 	}
 }
 
+func TestNixGenerationTargetsCanCapRecentChurn(t *testing.T) {
+	now := time.Date(2026, 5, 7, 21, 30, 0, 0, time.UTC)
+	var generations []nixGeneration
+	for number := 1; number <= 8; number++ {
+		generations = append(generations, nixGeneration{
+			Number:    number,
+			CreatedAt: now.Add(-time.Duration(8-number) * time.Minute),
+			Scope:     "user",
+			Current:   number == 8,
+		})
+	}
+
+	targets := nixGenerationTargetsWithMax(generations, now, 3, 7*24*time.Hour, 5)
+	actions := map[string]CleanupTarget{}
+	for _, target := range targets {
+		actions[target.Version] = target
+	}
+
+	for _, generation := range []string{"1", "2", "3"} {
+		target := actions[generation]
+		if target.Action != "delete_generation" || target.Protected {
+			t.Fatalf("expected generation %s to be deleted by count cap: %+v", generation, target)
+		}
+		if !strings.Contains(target.Reason, "maximum generation count") {
+			t.Fatalf("generation %s reason should mention maximum count: %+v", generation, target)
+		}
+	}
+	for _, generation := range []string{"4", "5", "6", "7", "8"} {
+		target := actions[generation]
+		if target.Action != "keep_generation" || !target.Protected {
+			t.Fatalf("expected generation %s to be retained: %+v", generation, target)
+		}
+	}
+}
+
+func TestNixGenerationTargetsCountCapPreservesCurrentAndMinimum(t *testing.T) {
+	now := time.Date(2026, 5, 7, 21, 30, 0, 0, time.UTC)
+	generations := []nixGeneration{
+		{Number: 1, CreatedAt: now.Add(-8 * time.Minute), Scope: "user", Current: true},
+		{Number: 2, CreatedAt: now.Add(-7 * time.Minute), Scope: "user"},
+		{Number: 3, CreatedAt: now.Add(-6 * time.Minute), Scope: "user"},
+		{Number: 4, CreatedAt: now.Add(-5 * time.Minute), Scope: "user"},
+		{Number: 5, CreatedAt: now.Add(-4 * time.Minute), Scope: "user"},
+	}
+
+	targets := nixGenerationTargetsWithMax(generations, now, 3, 7*24*time.Hour, 2)
+	actions := map[string]CleanupTarget{}
+	for _, target := range targets {
+		actions[target.Version] = target
+	}
+
+	for _, generation := range []string{"1", "3", "4", "5"} {
+		target := actions[generation]
+		if target.Action != "keep_generation" || !target.Protected {
+			t.Fatalf("expected generation %s to stay protected: %+v", generation, target)
+		}
+	}
+	target := actions["2"]
+	if target.Action != "delete_generation" || target.Protected {
+		t.Fatalf("expected only generation 2 to be over the normalized cap: %+v", target)
+	}
+}
+
 func TestNixGenerationTargetsPreserveCurrentAndMinimum(t *testing.T) {
 	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
 	generations := []nixGeneration{
