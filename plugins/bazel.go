@@ -126,15 +126,15 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 
 	globalActive := len(activeInfo.Reasons) > 0
 	candidates := p.discoverCandidates(home, cfg.Bazel, activeInfo)
-	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
-	targets, refined, refineErr := refineBazelReclaimTargetBytes(ctx, targets)
+	candidates, refined, refineErr := refineBazelOutputBaseCandidateBytes(ctx, candidates)
 	if refined {
-		plan.Metadata["reclaim_size_estimate_refined"] = "true"
+		plan.Metadata["output_base_size_estimate_refined"] = "true"
 	}
 	if refineErr != nil {
-		plan.Metadata["reclaim_size_estimate_partial"] = "true"
-		plan.Warnings = append(plan.Warnings, fmt.Sprintf("Bazel reclaim-byte refinement was partial: %v", refineErr))
+		plan.Metadata["output_base_size_estimate_partial"] = "true"
+		plan.Warnings = append(plan.Warnings, fmt.Sprintf("Bazel output-base byte refinement was partial: %v", refineErr))
 	}
+	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
 
 	plan.Targets = targets
 	plan.EstimatedBytesFreed = bazelEstimatedCandidateBytes(targets)
@@ -146,7 +146,7 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		plan.Warnings = append(plan.Warnings, "detected Bazel cache footprint exceeds configured review budget")
 	}
 	plan.Warnings = append(plan.Warnings, "Bazel cleanup deletes rebuildable cache tiers only when the total footprint exceeds the configured budget and active-use inspection succeeds")
-	plan.Warnings = append(plan.Warnings, "Bazel protected/review byte counts use bounded top-level allocation estimates; reclaim targets use a bounded recursive refinement")
+	plan.Warnings = append(plan.Warnings, "Bazel output-base byte counts use a bounded recursive allocation estimate; cache tier counts use bounded top-level allocation estimates")
 
 	return plan, activeErr
 }
@@ -458,28 +458,28 @@ func estimateBazelCandidateBytes(path string) (int64, int64) {
 	return logical, physical
 }
 
-func refineBazelReclaimTargetBytes(ctx context.Context, targets []CleanupTarget) ([]CleanupTarget, bool, error) {
+func refineBazelOutputBaseCandidateBytes(ctx context.Context, candidates []bazelCandidate) ([]bazelCandidate, bool, error) {
 	estimateCtx, cancel := context.WithTimeout(ctx, bazelReclaimEstimateTimeout)
 	defer cancel()
 
 	refined := false
-	for i := range targets {
-		if !bazelTargetReclaimsHost(targets[i]) {
+	for i := range candidates {
+		if candidates[i].Type != "output_base" {
 			continue
 		}
-		logical, physical, err := estimateBazelCandidateBytesRecursive(estimateCtx, targets[i].Path)
-		if physical > targets[i].Bytes {
-			targets[i].Bytes = physical
+		logical, physical, err := estimateBazelCandidateBytesRecursive(estimateCtx, candidates[i].Path)
+		if physical > candidates[i].Physical {
+			candidates[i].Physical = physical
 			refined = true
 		}
-		if logical > targets[i].LogicalBytes {
-			targets[i].LogicalBytes = logical
+		if logical > candidates[i].Logical {
+			candidates[i].Logical = logical
 		}
 		if err != nil {
-			return targets, refined, err
+			return candidates, refined, err
 		}
 	}
-	return targets, refined, nil
+	return candidates, refined, nil
 }
 
 func estimateBazelCandidateBytesRecursive(ctx context.Context, path string) (int64, int64, error) {

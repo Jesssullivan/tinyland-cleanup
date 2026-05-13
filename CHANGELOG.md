@@ -30,6 +30,10 @@ All notable changes to this project will be documented in this file.
 - Bazel reclaim candidates now refine byte estimates with a bounded recursive
   allocation walk so stale output-base dry-runs do not understate large nested
   `execroot` and `bazel-out` trees.
+- Bazel protected, recent, active, and reclaimable output-base candidates now
+  share the same bounded recursive allocation walk before policy planning, so
+  dry-runs and budget metadata do not understate large protected `execroot` and
+  `bazel-out` trees.
 - Top-level dry-run summary fields for planned estimated reclaim, required free
   space, and cleanup target count.
 - Target-free report fields and real-cleanup stop behavior once the configured
