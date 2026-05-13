@@ -23,9 +23,10 @@ The Bazel plan includes targets for:
 
 Targets include policy tier, physical byte estimates, logical byte estimates
 when different, host-reclaim expectation, active-use evidence, protected status,
-the planned action, and a reason. Reclaimable output-base targets get a bounded
-recursive allocation refinement so nested `execroot` and `bazel-out` bytes are
-visible in dry-run plans. Output bases are protected when:
+the planned action, and a reason. Output-base candidates get a bounded
+recursive allocation refinement before policy planning so protected, recent,
+active, and reclaimable `execroot` and `bazel-out` bytes are visible in dry-run
+plans and budget metadata. Output bases are protected when:
 
 - an active Bazel process exposes an explicit `--output_base`;
 - an output-base lock or server PID file is visible;
@@ -85,10 +86,10 @@ Runtime boundary:
 - after an output base is deleted, workspace roots are scanned shallowly for
   canonical repo-local `bazel-*` symlinks, and only symlinks whose raw target
   points inside that deleted output base are removed;
-- protected/review byte counts use top-level allocation estimates so dry-run
-  remains responsive on very large generated trees; reclaimable output-base
-  targets use a bounded recursive refinement and mark the plan partial if the
-  refinement times out;
+- output-base byte counts use a bounded recursive allocation estimate and mark
+  the plan partial if the refinement times out; repository cache, disk cache,
+  and Bazelisk cache-tier byte counts use top-level allocation estimates so
+  dry-run remains responsive on very large cache trees;
 - Bazel output bases, repository caches, and disk caches are `warm` targets
   because they are rebuildable but expensive; Bazelisk downloads are `safe`
   targets;
