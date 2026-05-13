@@ -319,6 +319,15 @@ func TestDevArtifactsConfigDefaults(t *testing.T) {
 	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
 		t.Errorf("DevArtifacts.TempScanMaxRoots should default to 128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
 	}
+	if !cfg.DevArtifacts.NixTempRoots {
+		t.Error("DevArtifacts.NixTempRoots should default to true")
+	}
+	if cfg.DevArtifacts.NixTempRootMinMB != 1 {
+		t.Errorf("DevArtifacts.NixTempRootMinMB should default to 1, got %d", cfg.DevArtifacts.NixTempRootMinMB)
+	}
+	if cfg.DevArtifacts.NixTempRootStaleAfter != "24h" {
+		t.Errorf("DevArtifacts.NixTempRootStaleAfter should default to 24h, got %q", cfg.DevArtifacts.NixTempRootStaleAfter)
+	}
 }
 
 func TestAPFSConfigDefaults(t *testing.T) {
