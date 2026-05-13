@@ -197,6 +197,13 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 		plan.WouldRun = false
 		plan.SkipReason = "podman_machine_not_running"
 		plan.Summary = "Podman machine is not running"
+		plan.Steps = append(plan.Steps, "Skip online Podman pruning because the Podman machine is not running")
+		plan.Warnings = append(plan.Warnings, "online Podman cleanup needs a running machine; offline VM disk inspection remains safe in dry-run")
+		if level == LevelCritical {
+			compaction := p.planOfflineCompaction(ctx, cfg, logger)
+			addPodmanCompactionPlanToCleanupPlan(&plan, compaction)
+			plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
+		}
 		return plan
 	}
 
@@ -256,38 +263,45 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 			}
 
 			compaction := p.planOfflineCompaction(ctx, cfg, logger)
-			plan.RequiredFreeBytes = compaction.RequiredFreeBytes
-			if compaction.CanCompact {
-				plan.EstimatedBytesFreed = compaction.EstimatedReclaimBytes
-			}
-			plan.Warnings = append(plan.Warnings, compaction.Warnings...)
-			plan.Steps = append(plan.Steps, compaction.Steps...)
-			plan.Targets = append(plan.Targets, podmanCompactionTargets(compaction)...)
-			plan.Metadata["offline_compaction_enabled"] = strconv.FormatBool(compaction.ConfigEnabled)
-			plan.Metadata["offline_compaction_can_run"] = strconv.FormatBool(compaction.CanCompact)
-			plan.Metadata["offline_compaction_skip_reason"] = compaction.SkipReason
-			plan.Metadata["offline_compaction_provider"] = compaction.Provider
-			plan.Metadata["offline_compaction_format"] = compaction.DiskFormat
-			plan.Metadata["offline_compaction_disk_path"] = compaction.DiskPath
-			plan.Metadata["offline_compaction_scratch_dir"] = compaction.ScratchDir
-			plan.Metadata["offline_compaction_temp_path"] = compaction.TempPath
-			plan.Metadata["offline_compaction_backup_path"] = compaction.BackupPath
-			plan.Metadata["offline_compaction_qemu_img_path"] = compaction.QemuImgPath
-			plan.Metadata["offline_compaction_logical_bytes"] = strconv.FormatInt(compaction.LogicalBytes, 10)
-			plan.Metadata["offline_compaction_physical_bytes"] = strconv.FormatInt(compaction.PhysicalBytes, 10)
-			plan.Metadata["offline_compaction_free_bytes"] = strconv.FormatInt(compaction.FreeBytes, 10)
-			plan.Metadata["offline_compaction_required_free_bytes"] = strconv.FormatInt(compaction.RequiredFreeBytes, 10)
-			plan.Metadata["offline_compaction_estimated_reclaim_bytes"] = strconv.FormatInt(compaction.EstimatedReclaimBytes, 10)
-			plan.Metadata["offline_compaction_active_containers"] = strconv.FormatBool(compaction.ActiveContainers)
-			plan.Metadata["offline_compaction_scratch_dir_configured"] = strconv.FormatBool(compaction.ScratchDirConfigured)
-			plan.Metadata["offline_compaction_scratch_dir_available"] = strconv.FormatBool(compaction.ScratchDirAvailable)
-			plan.Metadata["offline_compaction_scratch_dir_cross_device"] = strconv.FormatBool(compaction.ScratchDirCrossDevice)
-			plan.Metadata["offline_compaction_cross_device_replacement"] = strconv.FormatBool(compaction.CrossDeviceReplacement)
+			addPodmanCompactionPlanToCleanupPlan(&plan, compaction)
 		}
 		plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
 	}
 
 	return plan
+}
+
+func addPodmanCompactionPlanToCleanupPlan(plan *CleanupPlan, compaction podmanCompactionPlan) {
+	if plan.Metadata == nil {
+		plan.Metadata = map[string]string{}
+	}
+	plan.RequiredFreeBytes = compaction.RequiredFreeBytes
+	if compaction.CanCompact {
+		plan.EstimatedBytesFreed = compaction.EstimatedReclaimBytes
+	}
+	plan.Warnings = append(plan.Warnings, compaction.Warnings...)
+	plan.Steps = append(plan.Steps, compaction.Steps...)
+	plan.Targets = append(plan.Targets, podmanCompactionTargets(compaction)...)
+	plan.Metadata["offline_compaction_enabled"] = strconv.FormatBool(compaction.ConfigEnabled)
+	plan.Metadata["offline_compaction_can_run"] = strconv.FormatBool(compaction.CanCompact)
+	plan.Metadata["offline_compaction_skip_reason"] = compaction.SkipReason
+	plan.Metadata["offline_compaction_provider"] = compaction.Provider
+	plan.Metadata["offline_compaction_format"] = compaction.DiskFormat
+	plan.Metadata["offline_compaction_disk_path"] = compaction.DiskPath
+	plan.Metadata["offline_compaction_scratch_dir"] = compaction.ScratchDir
+	plan.Metadata["offline_compaction_temp_path"] = compaction.TempPath
+	plan.Metadata["offline_compaction_backup_path"] = compaction.BackupPath
+	plan.Metadata["offline_compaction_qemu_img_path"] = compaction.QemuImgPath
+	plan.Metadata["offline_compaction_logical_bytes"] = strconv.FormatInt(compaction.LogicalBytes, 10)
+	plan.Metadata["offline_compaction_physical_bytes"] = strconv.FormatInt(compaction.PhysicalBytes, 10)
+	plan.Metadata["offline_compaction_free_bytes"] = strconv.FormatInt(compaction.FreeBytes, 10)
+	plan.Metadata["offline_compaction_required_free_bytes"] = strconv.FormatInt(compaction.RequiredFreeBytes, 10)
+	plan.Metadata["offline_compaction_estimated_reclaim_bytes"] = strconv.FormatInt(compaction.EstimatedReclaimBytes, 10)
+	plan.Metadata["offline_compaction_active_containers"] = strconv.FormatBool(compaction.ActiveContainers)
+	plan.Metadata["offline_compaction_scratch_dir_configured"] = strconv.FormatBool(compaction.ScratchDirConfigured)
+	plan.Metadata["offline_compaction_scratch_dir_available"] = strconv.FormatBool(compaction.ScratchDirAvailable)
+	plan.Metadata["offline_compaction_scratch_dir_cross_device"] = strconv.FormatBool(compaction.ScratchDirCrossDevice)
+	plan.Metadata["offline_compaction_cross_device_replacement"] = strconv.FormatBool(compaction.CrossDeviceReplacement)
 }
 
 // Cleanup performs Podman cleanup at the specified level.
@@ -905,6 +919,17 @@ func detectPodmanEnvironment() (*PodmanEnvironment, error) {
 		return env, nil
 	}
 
+	if runtime.GOOS == "darwin" {
+		env.Runtime = "podman"
+		env.NeedsVM = true
+		env.VMProvider = detectMachineProvider()
+		env.VMRunning, env.MachineName = detectMachine()
+		if env.VMRunning {
+			env.SocketPath = getPodmanSocket()
+		}
+		return env, nil
+	}
+
 	// Verify podman is functional
 	cmd := exec.Command("podman", "info", "--format", "{{.Version.Version}}")
 	if err := cmd.Run(); err != nil {
@@ -914,13 +939,6 @@ func detectPodmanEnvironment() (*PodmanEnvironment, error) {
 
 	// Platform-specific detection
 	switch runtime.GOOS {
-	case "darwin":
-		env.NeedsVM = true
-		env.VMProvider = detectMachineProvider()
-		env.VMRunning, env.MachineName = detectRunningMachine()
-		if env.VMRunning {
-			env.SocketPath = getPodmanSocket()
-		}
 	case "linux":
 		env.NeedsVM = false
 		home, _ := os.UserHomeDir()
@@ -952,24 +970,46 @@ func detectMachineProvider() string {
 	return "applehv"
 }
 
-// detectRunningMachine detects if a Podman machine is running and returns its name.
-func detectRunningMachine() (bool, string) {
+// detectMachine detects the running machine when available, otherwise a default
+// or first machine that can still be inspected while stopped.
+func detectMachine() (bool, string) {
 	cmd := exec.Command("podman", "machine", "list", "--format", "{{.Name}}\t{{.Running}}")
 	output, err := cmd.Output()
 	if err != nil {
 		return false, ""
 	}
+	return parsePodmanMachineList(string(output))
+}
 
+func parsePodmanMachineList(output string) (bool, string) {
+	var firstMachine string
+	var defaultMachine string
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		parts := strings.Split(line, "\t")
-		if len(parts) >= 2 && strings.ToLower(parts[1]) == "true" {
-			// Strip trailing "*" which marks the default machine
-			name := strings.TrimRight(parts[0], "*")
+		if len(parts) < 2 {
+			continue
+		}
+		rawName := strings.TrimSpace(parts[0])
+		if rawName == "" {
+			continue
+		}
+		isDefault := strings.HasSuffix(rawName, "*")
+		name := strings.TrimRight(rawName, "*")
+		if firstMachine == "" {
+			firstMachine = name
+		}
+		if isDefault {
+			defaultMachine = name
+		}
+		if strings.ToLower(strings.TrimSpace(parts[1])) == "true" {
 			return true, name
 		}
 	}
 
-	return false, ""
+	if defaultMachine != "" {
+		return false, defaultMachine
+	}
+	return false, firstMachine
 }
 
 // getPodmanSocket returns the Podman socket path.
@@ -1170,7 +1210,7 @@ func (p *PodmanPlugin) planOfflineCompaction(ctx context.Context, cfg *config.Co
 		return plan
 	}
 
-	if cfg.Podman.CompactRequireNoActiveContainers {
+	if cfg.Podman.CompactRequireNoActiveContainers && !(p.environment.NeedsVM && !p.environment.VMRunning) {
 		active, err := p.hasActiveContainers(ctx)
 		input.ActiveContainers = active
 		if err != nil {

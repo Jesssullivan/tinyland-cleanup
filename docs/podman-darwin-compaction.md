@@ -29,6 +29,8 @@ tinyland-cleanup --once --dry-run --level critical --output json
 The Podman plan reports:
 
 - provider and running state;
+- stopped-machine VM disk metadata when the Podman CLI is installed but the
+  Podman API socket is unavailable;
 - BuildKit builder cache container, reclaimable bytes, retention policy, and
   protected skip reason when the cache is below threshold or cannot be
   inspected;
@@ -91,6 +93,12 @@ machine directories, `qemu-img` is unavailable, active containers are running,
 the provider is unknown, a rollback backup already exists, or the scratch
 filesystem does not have enough physical free space for the compacted copy and
 any required rollback backup.
+
+When the machine is stopped, online pruning is skipped. Critical dry-run still
+reports the raw VM image path, logical size, physical allocation, scratch
+requirement, and protected offline-compaction target when the local Podman
+machine config can be inspected. That path is evidence only unless offline
+compaction is explicitly enabled and all preflight gates pass.
 
 `compact_scratch_dir` may point at a reviewed scratch directory when the default
 VM disk directory cannot hold the temporary compacted image. Same-filesystem
