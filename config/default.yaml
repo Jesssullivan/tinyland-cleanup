@@ -199,6 +199,12 @@ dev_artifacts:
   temp_scan_max_roots: 128
   temp_artifact_min_mb: 256
   temp_artifact_stale_after: 6h
+  # Stale top-level Nix shell/develop/build scratch roots are rebuildable but
+  # can accumulate quickly under /private/tmp. These are only deleted under
+  # aggressive/critical pressure, never while referenced by active processes.
+  nix_temp_roots: true
+  nix_temp_root_min_mb: 1
+  nix_temp_root_stale_after: 24h
   node_modules: true
   python_venvs: true
   rust_targets: true

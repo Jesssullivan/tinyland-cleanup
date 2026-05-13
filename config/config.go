@@ -305,6 +305,12 @@ type DevArtifactsConfig struct {
 	TempArtifactMinMB int `yaml:"temp_artifact_min_mb"`
 	// TempArtifactStaleAfter is the age after which temp artifacts become review candidates
 	TempArtifactStaleAfter string `yaml:"temp_artifact_stale_after"`
+	// NixTempRoots enables deletion of stale top-level nix-shell/nix-develop temp roots
+	NixTempRoots bool `yaml:"nix_temp_roots"`
+	// NixTempRootMinMB is the minimum physical size for stale Nix temp-root deletion candidates
+	NixTempRootMinMB int `yaml:"nix_temp_root_min_mb"`
+	// NixTempRootStaleAfter is the age after which Nix temp roots become deletion candidates
+	NixTempRootStaleAfter string `yaml:"nix_temp_root_stale_after"`
 	// NodeModules enables node_modules cleanup
 	NodeModules bool `yaml:"node_modules"`
 	// PythonVenvs enables .venv cleanup
@@ -505,6 +511,9 @@ func DefaultConfig() *Config {
 			TempScanMaxRoots:        128,
 			TempArtifactMinMB:       256,
 			TempArtifactStaleAfter:  "6h",
+			NixTempRoots:            true,
+			NixTempRootMinMB:        1,
+			NixTempRootStaleAfter:   "24h",
 			NodeModules:             true,
 			PythonVenvs:             true,
 			RustTargets:             true,

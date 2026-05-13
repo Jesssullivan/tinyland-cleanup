@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
@@ -27,6 +28,7 @@ const devArtifactRecentOutputGrace = 2 * time.Hour
 
 var tempArtifactPathPattern = regexp.MustCompile(`(?:/private)?/tmp/[^\s"'<>]+|/var/tmp/[^\s"'<>]+`)
 var absoluteDevArtifactPathPattern = regexp.MustCompile(`(?:~|/)[^\s"'<>]+`)
+var nixTempRootNamePattern = regexp.MustCompile(`^(?:nix-shell\.[A-Za-z0-9]+|nix-develop-\d+-\d+|nix-\d+-\d+|nix-build-[A-Za-z0-9._+@=-]+-\d+)$`)
 
 var errDevArtifactScanBudgetExceeded = errors.New("dev artifact scan budget exceeded")
 
@@ -263,7 +265,13 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			if !pathExistsAndIsDir(expanded) {
 				continue
 			}
-			p.planTemporaryArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, daCfg.ProtectPaths, activeTempRoots, &targets, scanBudget)
+			nixTempRootMinBytes := nixTempRootMinBytes(daCfg)
+			nixTempRootStaleAfter := parseNixPolicyDuration(daCfg.NixTempRootStaleAfter, 24*time.Hour)
+			nixTempRootDeletes := level >= LevelAggressive
+			if daCfg.NixTempRoots {
+				p.planNixTemporaryRoots(scanCtx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, nixTempRootDeletes, daCfg, activeTempRoots, &targets, scanBudget)
+			}
+			p.planTemporaryArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, daCfg, activeTempRoots, &targets, scanBudget)
 			p.planTemporaryGeneratedArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets, scanBudget)
 		}
 	}
@@ -352,6 +360,42 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 
 	tracker := newDevArtifactGitTracker()
 
+	// Incident-oriented temp roots are cheap to classify and should run before
+	// deep workspace walks so a large ~/git tree cannot starve /private/tmp cleanup.
+	if daCfg.TempArtifacts {
+		activeTempRoots := activeTempArtifactRoots(ctx, daCfg.TempScanPaths, home)
+		tempMinBytes := tempArtifactMinBytes(daCfg)
+		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
+		nixTempRootMinBytes := nixTempRootMinBytes(daCfg)
+		nixTempRootStaleAfter := parseNixPolicyDuration(daCfg.NixTempRootStaleAfter, 24*time.Hour)
+		for _, scanPath := range daCfg.TempScanPaths {
+			expanded := expandHome(scanPath, home)
+			if !pathExistsAndIsDir(expanded) {
+				continue
+			}
+			if daCfg.NixTempRoots && level >= LevelAggressive {
+				freed := p.cleanNixTemporaryRoots(scanCtx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, daCfg.ProtectPaths, activeTempRoots, logger, scanBudget)
+				result.BytesFreed += freed
+				if freed > 0 {
+					result.ItemsCleaned++
+				}
+			}
+			if scanBudget.exhausted() {
+				logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+				return result
+			}
+			freed := p.cleanTemporaryGeneratedArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, daCfg, active, activeTempRoots, tracker, logger, scanBudget)
+			result.BytesFreed += freed
+			if freed > 0 {
+				result.ItemsCleaned++
+			}
+			if scanBudget.exhausted() {
+				logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+				return result
+			}
+		}
+	}
+
 	// Scan configured paths for dev artifacts
 	for _, scanPath := range daCfg.ScanPaths {
 		expanded := expandHome(scanPath, home)
@@ -405,27 +449,6 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		if scanBudget.exhausted() {
 			logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
 			return result
-		}
-	}
-
-	if daCfg.TempArtifacts {
-		activeTempRoots := activeTempArtifactRoots(ctx, daCfg.TempScanPaths, home)
-		tempMinBytes := tempArtifactMinBytes(daCfg)
-		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
-		for _, scanPath := range daCfg.TempScanPaths {
-			expanded := expandHome(scanPath, home)
-			if !pathExistsAndIsDir(expanded) {
-				continue
-			}
-			freed := p.cleanTemporaryGeneratedArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, daCfg, active, activeTempRoots, tracker, logger, scanBudget)
-			result.BytesFreed += freed
-			if freed > 0 {
-				result.ItemsCleaned++
-			}
-			if scanBudget.exhausted() {
-				logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
-				return result
-			}
 		}
 	}
 
@@ -523,7 +546,7 @@ func (p *DevArtifactsPlugin) planLargeLocalArtifacts(ctx context.Context, scanPa
 	}, budget)
 }
 
-func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, daCfg config.DevArtifactsConfig, activeRoots map[string]string, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	entries, err := os.ReadDir(scanPath)
 	if err != nil {
@@ -546,8 +569,9 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 			continue
 		}
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
+		protected := p.isProtected(path, daCfg.ProtectPaths)
 		if activeReason != "" {
-			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), activeReason))
+			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, info.ModTime(), staleAfter, now, protected, activeReason))
 			continue
 		}
 		size, err := getDirAllocatedBytesContext(ctx, path)
@@ -558,8 +582,111 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 		if size < minBytes {
 			continue
 		}
-		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), ""))
+		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, protected, ""))
 	}
+}
+
+func (p *DevArtifactsPlugin) planNixTemporaryRoots(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, canDelete bool, daCfg config.DevArtifactsConfig, activeRoots map[string]string, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+	budget := optionalDevArtifactScanBudget(budgets)
+	entries, err := os.ReadDir(scanPath)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		if !entry.IsDir() || !isNixTemporaryRootName(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(scanPath, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if !canManageDevTempRoot(info) {
+			continue
+		}
+		activeReason := activeRoots[canonicalTempArtifactPath(path)]
+		protected := p.isProtected(path, daCfg.ProtectPaths)
+		target := p.nixTemporaryRootTarget(path, 0, info.ModTime(), staleAfter, now, protected, activeReason, canDelete)
+		if target.Action != "delete" {
+			if err := budget.checkTempRoot(ctx, path); err != nil {
+				return
+			}
+			*targets = append(*targets, target)
+			continue
+		}
+		size, err := getDirAllocatedBytesContext(ctx, path)
+		if err != nil {
+			budget.markContextError(ctx, path)
+			return
+		}
+		if size < minBytes {
+			continue
+		}
+		if err := budget.checkTempRoot(ctx, path); err != nil {
+			return
+		}
+		target.Bytes = size
+		*targets = append(*targets, target)
+	}
+}
+
+func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+	budget := optionalDevArtifactScanBudget(budgets)
+	entries, err := os.ReadDir(scanPath)
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	var totalFreed int64
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return totalFreed
+		}
+		if !entry.IsDir() || !isNixTemporaryRootName(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(scanPath, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if !canManageDevTempRoot(info) {
+			continue
+		}
+		activeReason := activeRoots[canonicalTempArtifactPath(path)]
+		target := p.nixTemporaryRootTarget(path, 0, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), activeReason, true)
+		if target.Action != "delete" {
+			if err := budget.checkTempRoot(ctx, path); err != nil {
+				return totalFreed
+			}
+			continue
+		}
+		size, err := getDirAllocatedBytesContext(ctx, path)
+		if err != nil {
+			budget.markContextError(ctx, path)
+			return totalFreed
+		}
+		if size < minBytes {
+			continue
+		}
+		if err := budget.checkTempRoot(ctx, path); err != nil {
+			return totalFreed
+		}
+		logger.Debug("removing stale Nix temporary root", "path", path, "size_mb", size/(1024*1024))
+		if err := os.RemoveAll(path); err != nil {
+			logger.Debug("failed to remove stale Nix temporary root", "path", path, "error", err)
+			continue
+		}
+		totalFreed += size
+	}
+	if totalFreed > 0 {
+		logger.Info("cleaned stale Nix temporary roots", "freed_mb", totalFreed/(1024*1024))
+	}
+	return totalFreed
 }
 
 func (p *DevArtifactsPlugin) planTemporaryGeneratedArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter, nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active devArtifactActivity, activeRoots map[string]string, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
@@ -676,11 +803,67 @@ func (p *DevArtifactsPlugin) temporaryArtifactTarget(path string, physicalBytes 
 	return target
 }
 
+func (p *DevArtifactsPlugin) nixTemporaryRootTarget(path string, physicalBytes int64, modTime time.Time, staleAfter time.Duration, now time.Time, protected bool, activeReason string, canDelete bool) CleanupTarget {
+	action := "delete"
+	reason := fmt.Sprintf("stale Nix temporary root is older than %s", formatDevArtifactAge(staleAfter))
+	active := activeReason != ""
+	isProtected := false
+	switch {
+	case active:
+		action = "protect"
+		reason = "active process references this temporary path: " + activeReason
+		isProtected = true
+	case protected:
+		action = "protect"
+		reason = "path is covered by dev_artifacts.protect_paths"
+		isProtected = true
+	case staleAfter > 0 && modTime.After(now.Add(-staleAfter)):
+		action = "protect"
+		reason = fmt.Sprintf("Nix temporary root is newer than %s", formatDevArtifactAge(staleAfter))
+		isProtected = true
+	case !canDelete:
+		action = "report"
+		reason = "Nix temporary root deletion requires aggressive or critical cleanup level"
+		isProtected = true
+	}
+	target := CleanupTarget{
+		Type:      "nix-temp-root",
+		Name:      filepath.Base(path),
+		Path:      path,
+		Bytes:     physicalBytes,
+		Active:    active,
+		Protected: isProtected,
+		Action:    action,
+		Reason:    reason,
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(target.Action))
+	return target
+}
+
 func tempArtifactMinBytes(cfg config.DevArtifactsConfig) int64 {
 	if cfg.TempArtifactMinMB <= 0 {
 		return 256 * 1024 * 1024
 	}
 	return int64(cfg.TempArtifactMinMB) * 1024 * 1024
+}
+
+func nixTempRootMinBytes(cfg config.DevArtifactsConfig) int64 {
+	if cfg.NixTempRootMinMB <= 0 {
+		return 1024 * 1024
+	}
+	return int64(cfg.NixTempRootMinMB) * 1024 * 1024
+}
+
+func isNixTemporaryRootName(name string) bool {
+	return nixTempRootNamePattern.MatchString(name)
+}
+
+func canManageDevTempRoot(info os.FileInfo) bool {
+	if os.Geteuid() == 0 {
+		return true
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(stat.Uid) == os.Geteuid()
 }
 
 func (p *DevArtifactsPlugin) findLargeLocalArtifacts(ctx context.Context, scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, callback func(CleanupTarget), budgets ...*devArtifactScanBudget) {

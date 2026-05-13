@@ -908,7 +908,9 @@ func TestPlanTemporaryArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planTemporaryArtifacts(context.Background(), tmpDir, 1, 6*time.Hour, nil, map[string]string{
+	cfg := config.DefaultConfig().DevArtifacts
+	cfg.NixTempRoots = false
+	p.planTemporaryArtifacts(context.Background(), tmpDir, 1, 6*time.Hour, cfg, map[string]string{
 		canonicalTempArtifactPath(activePath): "bazel",
 	}, &targets)
 
@@ -957,7 +959,9 @@ func TestPlanTemporaryArtifactsDoesNotChargeSymlinkTargets(t *testing.T) {
 	}
 
 	var targets []CleanupTarget
-	p.planTemporaryArtifacts(context.Background(), tmpDir, 1024*1024, 6*time.Hour, nil, nil, &targets)
+	cfg := config.DefaultConfig().DevArtifacts
+	cfg.NixTempRoots = false
+	p.planTemporaryArtifacts(context.Background(), tmpDir, 1024*1024, 6*time.Hour, cfg, nil, &targets)
 
 	for _, target := range targets {
 		if target.Path == root {
@@ -1042,6 +1046,105 @@ func TestCleanupPrunesGeneratedArtifactsInsideStaleTemporaryRoots(t *testing.T) 
 	}
 }
 
+func TestPlanCleanupDeletesStaleNixTemporaryRoots(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nix-shell.Abc123")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := nixTempRootConfig(tmpDir)
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, slog.Default())
+
+	target := findDevArtifactTarget(t, plan.Targets, "nix-temp-root", root)
+	if target.Action != "delete" || target.Protected {
+		t.Fatalf("expected stale Nix temp root to be deletable, got %#v", target)
+	}
+	if plan.EstimatedBytesFreed <= 0 {
+		t.Fatal("expected stale Nix temp root to contribute to reclaim estimate")
+	}
+}
+
+func TestCleanupPrunesNixTemporaryRootsBeforeWorkspaceScanBudget(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nix-develop-1234-5678")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "project", "node_modules", "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "project", "package.json"), []byte(`{"name":"budget"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := nixTempRootConfig(tmpDir)
+	cfg.DevArtifacts.ScanPaths = []string{workspace}
+	cfg.DevArtifacts.ScanMaxEntries = 1
+	cfg.DevArtifacts.NodeModules = true
+
+	result := p.Cleanup(context.Background(), LevelCritical, cfg, logger)
+	if pathExists(root) {
+		t.Fatal("expected stale Nix temp root to be removed before workspace scan budget is exhausted")
+	}
+	if result.BytesFreed <= 0 {
+		t.Fatalf("expected cleanup to report freed bytes, got %#v", result)
+	}
+}
+
+func TestPlanCleanupProtectsActiveNixTemporaryRoots(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nix-1234-0")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	var targets []CleanupTarget
+	p.planNixTemporaryRoots(
+		context.Background(),
+		tmpDir,
+		1024*1024,
+		24*time.Hour,
+		true,
+		nixTempRootConfig(tmpDir).DevArtifacts,
+		map[string]string{canonicalTempArtifactPath(root): "nix-daemon"},
+		&targets,
+		newDevArtifactScanBudget(config.DefaultConfig().DevArtifacts),
+	)
+
+	target := findDevArtifactTarget(t, targets, "nix-temp-root", root)
+	if target.Action != "protect" || !target.Active || !target.Protected {
+		t.Fatalf("expected active Nix temp root to be protected, got %#v", target)
+	}
+}
+
 func tempGeneratedArtifactConfig(tmpDir string) *config.Config {
 	cfg := config.DefaultConfig()
 	cfg.DevArtifacts.ScanPaths = nil
@@ -1051,6 +1154,27 @@ func tempGeneratedArtifactConfig(tmpDir string) *config.Config {
 	cfg.DevArtifacts.NodeModules = false
 	cfg.DevArtifacts.PythonVenvs = false
 	cfg.DevArtifacts.RustTargets = true
+	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.GoBuildCache = false
+	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.LargeLocalArtifacts = false
+	cfg.DevArtifacts.LMStudioModels = false
+	return cfg
+}
+
+func nixTempRootConfig(tmpDir string) *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DevArtifacts.ScanPaths = nil
+	cfg.DevArtifacts.TempScanPaths = []string{tmpDir}
+	cfg.DevArtifacts.TempScanMaxRoots = 20
+	cfg.DevArtifacts.TempArtifactMinMB = 256
+	cfg.DevArtifacts.TempArtifactStaleAfter = "6h"
+	cfg.DevArtifacts.NixTempRoots = true
+	cfg.DevArtifacts.NixTempRootMinMB = 1
+	cfg.DevArtifacts.NixTempRootStaleAfter = "24h"
+	cfg.DevArtifacts.NodeModules = false
+	cfg.DevArtifacts.PythonVenvs = false
+	cfg.DevArtifacts.RustTargets = false
 	cfg.DevArtifacts.ZigArtifacts = false
 	cfg.DevArtifacts.GoBuildCache = false
 	cfg.DevArtifacts.HaskellCache = false
