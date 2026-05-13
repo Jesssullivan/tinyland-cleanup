@@ -1,12 +1,85 @@
 package plugins
 
 import (
+	"context"
+	"io"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
+
+func TestParsePodmanMachineListSelectsStoppedDefault(t *testing.T) {
+	running, name := parsePodmanMachineList("other-machine\tfalse\npodman-machine-default*\tfalse\n")
+
+	if running {
+		t.Fatal("expected no running machine")
+	}
+	if name != "podman-machine-default" {
+		t.Fatalf("expected stopped default machine name, got %q", name)
+	}
+}
+
+func TestPodmanCriticalPlanReportsStoppedMachineDisk(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "")
+
+	diskDir := filepath.Join(home, ".local/share/containers/podman/machine/applehv")
+	if err := os.MkdirAll(diskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diskPath := filepath.Join(diskDir, "podman-machine-default-arm64.raw")
+	if err := os.WriteFile(diskPath, []byte("raw disk placeholder"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configDir := filepath.Join(home, ".config/containers/podman/machine/applehv")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(configDir, "podman-machine-default.json")
+	configJSON := `{"ImagePath":{"Path":"` + diskPath + `"}}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Podman.BuildKitPrune = false
+	p := &PodmanPlugin{environment: &PodmanEnvironment{
+		Runtime:     "podman",
+		NeedsVM:     true,
+		VMProvider:  "applehv",
+		VMRunning:   false,
+		MachineName: "podman-machine-default",
+	}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, logger)
+	if plan.SkipReason != "podman_machine_not_running" {
+		t.Fatalf("expected stopped-machine skip reason, got %q", plan.SkipReason)
+	}
+	if plan.Metadata["offline_compaction_disk_path"] != diskPath {
+		t.Fatalf("expected stopped-machine disk path %q, got metadata %#v", diskPath, plan.Metadata)
+	}
+	if plan.Metadata["offline_compaction_provider"] != "applehv" {
+		t.Fatalf("expected applehv provider metadata, got %#v", plan.Metadata)
+	}
+
+	disk := findPodmanTarget(t, plan.Targets, "podman_vm_disk")
+	if disk.Path != diskPath {
+		t.Fatalf("expected VM disk target path %q, got %#v", diskPath, disk)
+	}
+	if disk.Action != "protect_offline_compaction" || !disk.Protected {
+		t.Fatalf("expected protected offline compaction target for stopped-machine dry-run, got %#v", disk)
+	}
+	if !strings.Contains(strings.Join(plan.Steps, "\n"), "Skip online Podman pruning") {
+		t.Fatalf("expected online cleanup skip step, got %#v", plan.Steps)
+	}
+}
 
 func TestPodmanCompactionPlanUsesPhysicalAllocationForAppleHVRaw(t *testing.T) {
 	cfg := testPodmanCompactionConfig()
