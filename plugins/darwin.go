@@ -23,6 +23,11 @@ const darwinDevCacheGiB = int64(1024 * 1024 * 1024)
 // HomebrewPlugin handles Homebrew cleanup operations.
 type HomebrewPlugin struct{}
 
+const (
+	homebrewPruneTimeout    = 10 * time.Minute
+	homebrewCriticalTimeout = 5 * time.Minute
+)
+
 // NewHomebrewPlugin creates a new Homebrew cleanup plugin.
 func NewHomebrewPlugin() *HomebrewPlugin {
 	return &HomebrewPlugin{}
@@ -145,7 +150,7 @@ func (p *HomebrewPlugin) cleanupPrune(ctx context.Context, logger *slog.Logger) 
 	result := CleanupResult{Plugin: p.Name(), Level: LevelModerate}
 
 	logger.Debug("running brew cleanup --prune=0")
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, homebrewPruneTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "brew", "cleanup", "--prune=0")
@@ -161,13 +166,22 @@ func (p *HomebrewPlugin) cleanupCritical(ctx context.Context, logger *slog.Logge
 
 	// First autoremove unused dependencies
 	logger.Warn("CRITICAL: running brew autoremove")
-	autoremoveCmd := exec.CommandContext(ctx, "brew", "autoremove")
-	autoremoveCmd.Run()
+	autoremoveCtx, autoremoveCancel := context.WithTimeout(ctx, homebrewCriticalTimeout)
+	autoremoveCmd := exec.CommandContext(autoremoveCtx, "brew", "autoremove")
+	if err := autoremoveCmd.Run(); err != nil {
+		logger.Warn("brew autoremove failed or timed out", "error", err)
+	}
+	autoremoveCancel()
 
 	// Then full cleanup
 	logger.Warn("CRITICAL: running brew cleanup --prune=0")
-	cleanupCmd := exec.CommandContext(ctx, "brew", "cleanup", "--prune=0")
-	output, _ := cleanupCmd.CombinedOutput()
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, homebrewCriticalTimeout)
+	cleanupCmd := exec.CommandContext(cleanupCtx, "brew", "cleanup", "--prune=0")
+	output, err := cleanupCmd.CombinedOutput()
+	if err != nil {
+		logger.Warn("brew cleanup --prune=0 failed or timed out", "error", err)
+	}
+	cleanupCancel()
 
 	result.BytesFreed = parseBrewCleanupOutput(string(output))
 	return result
