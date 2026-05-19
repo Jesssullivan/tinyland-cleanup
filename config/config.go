@@ -157,6 +157,8 @@ type EnableFlags struct {
 type PolicyConfig struct {
 	// Cooldown skips repeated non-critical daemon-triggered plugin cleanup within this duration.
 	Cooldown string `yaml:"cooldown"`
+	// CooldownBypassLevel is the minimum cleanup level that ignores cooldown.
+	CooldownBypassLevel string `yaml:"cooldown_bypass_level"`
 	// StateFile stores daemon cleanup state such as per-plugin last-run timestamps.
 	StateFile string `yaml:"state_file"`
 }
@@ -422,8 +424,9 @@ func DefaultConfig() *Config {
 		},
 		TargetFree: 70,
 		Policy: PolicyConfig{
-			Cooldown:  "30m",
-			StateFile: stateFile,
+			Cooldown:            "30m",
+			CooldownBypassLevel: "critical",
+			StateFile:           stateFile,
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{

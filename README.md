@@ -14,7 +14,8 @@ builder and runner machines.
 - Cleanup policy should explain what it plans to remove and why.
 - Host free-space accounting should be measured before and after cleanup.
 - Real cleanup should stop once the configured host free-space target is met.
-- Daemon-triggered non-critical cleanup should honor cooldown state.
+- Daemon-triggered cleanup should honor cooldown state below the configured
+  bypass severity.
 - Privileged actions, offline compaction, and service disruption must remain
   explicit policy choices.
 

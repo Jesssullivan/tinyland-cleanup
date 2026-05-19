@@ -541,6 +541,79 @@ func TestRunOnceCriticalBypassesCooldown(t *testing.T) {
 	}
 }
 
+func TestRunOnceConfiguredAggressiveBypassesCooldown(t *testing.T) {
+	var output bytes.Buffer
+	mock := &reportingPlugin{}
+	daemon := newTestDaemon(t, mock, &output)
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	daemon.now = func() time.Time { return now }
+	daemon.config.Policy.Cooldown = "30m"
+	daemon.config.Policy.CooldownBypassLevel = "aggressive"
+	daemon.config.Policy.StateFile = filepath.Join(t.TempDir(), "state.json")
+	state := newCleanupState()
+	state.recordPluginRun("reporting", plugins.LevelAggressive, now.Add(-10*time.Minute), plugins.CleanupResult{
+		Plugin: "reporting",
+		Level:  plugins.LevelAggressive,
+	})
+	if err := saveCleanupState(daemon.config.Policy.StateFile, state); err != nil {
+		t.Fatal(err)
+	}
+	daemon.diskStats = sequenceDiskStats(t,
+		diskStats(1000, 100, 90),
+		diskStats(1000, 100, 90),
+		diskStats(1000, 100, 90),
+		diskStats(1000, 100, 90),
+	)
+
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatalf("runOnce failed: %v", err)
+	}
+
+	if !mock.called {
+		t.Fatal("configured aggressive cleanup should bypass cooldown")
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	if report.Plugins[0].SkipReason == "cooldown" {
+		t.Fatal("aggressive cleanup should not report cooldown skip when configured as bypass level")
+	}
+}
+
+func TestRunOnceInvalidCooldownBypassLevelDefaultsToCritical(t *testing.T) {
+	var output bytes.Buffer
+	mock := &reportingPlugin{}
+	daemon := newTestDaemon(t, mock, &output)
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	daemon.now = func() time.Time { return now }
+	daemon.config.Policy.Cooldown = "30m"
+	daemon.config.Policy.CooldownBypassLevel = "invalid"
+	daemon.config.Policy.StateFile = filepath.Join(t.TempDir(), "state.json")
+	state := newCleanupState()
+	state.recordPluginRun("reporting", plugins.LevelAggressive, now.Add(-10*time.Minute), plugins.CleanupResult{
+		Plugin: "reporting",
+		Level:  plugins.LevelAggressive,
+	})
+	if err := saveCleanupState(daemon.config.Policy.StateFile, state); err != nil {
+		t.Fatal(err)
+	}
+	daemon.diskStats = sequenceDiskStats(t,
+		diskStats(1000, 100, 90),
+		diskStats(1000, 100, 90),
+		diskStats(1000, 100, 90),
+	)
+
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatalf("runOnce failed: %v", err)
+	}
+
+	if mock.called {
+		t.Fatal("invalid cooldown bypass level should preserve critical-only cooldown behavior")
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	if report.Plugins[0].SkipReason != "cooldown" {
+		t.Fatalf("expected cooldown skip reason, got %q", report.Plugins[0].SkipReason)
+	}
+}
+
 func newTestDaemon(t *testing.T, plugin plugins.Plugin, output io.Writer) *daemon {
 	t.Helper()
 

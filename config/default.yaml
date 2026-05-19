@@ -18,9 +18,12 @@ target_free: 70
 
 # Daemon-level cleanup policy
 policy:
-  # Skip repeated non-critical daemon-triggered plugin cleanup within this window.
-  # Explicit --level runs and critical pressure bypass cooldown.
+  # Skip repeated daemon-triggered plugin cleanup below cooldown_bypass_level.
+  # Explicit --level runs always bypass cooldown.
   cooldown: 30m
+  # Conservative default preserves the historical behavior: only critical
+  # pressure bypasses cooldown. Incident-prone hosts can set "aggressive".
+  cooldown_bypass_level: critical
   state_file: ~/.local/state/tinyland-cleanup/state.json
 
 # Enable/disable specific cleanup plugins

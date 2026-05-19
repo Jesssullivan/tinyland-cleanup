@@ -7,6 +7,7 @@ thresholds:
 target_free: 70
 policy:
   cooldown: 30m
+  cooldown_bypass_level: aggressive
   state_file: /home/jess/.local/state/tinyland-cleanup/state.json
 log_file: /home/jess/.local/log/disk-cleanup.log
 enable:

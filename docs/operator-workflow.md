@@ -255,7 +255,10 @@ only.
 This is the first stable reporting surface. It now exposes typed targets for
 selected plugins, but not per-file cleanup candidates for every plugin. Real
 cleanup cycles stop remaining plugins after the host reaches the configured
-target. Daemon-triggered non-critical cleanup also honors per-plugin cooldown
-state; explicit `--level` runs and critical pressure bypass cooldown. Treat
-broader active-use evidence and CLI target-free overrides as the next policy
-layer.
+target. Daemon-triggered cleanup honors per-plugin cooldown below
+`policy.cooldown_bypass_level`; explicit `--level` runs always bypass cooldown.
+The default bypass level is `critical`, preserving conservative behavior. Hosts
+with recurring aggressive pressure can set `cooldown_bypass_level: aggressive`
+so the daemon keeps attempting eligible cleanup while still below the critical
+threshold. Treat broader active-use evidence and CLI target-free overrides as
+the next policy layer.
