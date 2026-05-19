@@ -690,8 +690,27 @@ func (d *daemon) loadStateForCycle() (*cleanupState, error) {
 func (d *daemon) shouldApplyCooldown(report cycleReport, level monitor.CleanupLevel) bool {
 	return !d.dryRun &&
 		!report.ForcedLevel &&
-		level != monitor.LevelCritical &&
+		level < d.cooldownBypassLevel() &&
 		d.cleanupCooldown() > 0
+}
+
+func (d *daemon) cooldownBypassLevel() monitor.CleanupLevel {
+	if d.config == nil {
+		return monitor.LevelCritical
+	}
+	switch strings.TrimSpace(strings.ToLower(d.config.Policy.CooldownBypassLevel)) {
+	case "warning":
+		return monitor.LevelWarning
+	case "moderate":
+		return monitor.LevelModerate
+	case "aggressive":
+		return monitor.LevelAggressive
+	case "critical", "":
+		return monitor.LevelCritical
+	default:
+		d.logger.Warn("invalid policy.cooldown_bypass_level, defaulting to critical", "value", d.config.Policy.CooldownBypassLevel)
+		return monitor.LevelCritical
+	}
 }
 
 func (d *daemon) updateHostFreeAfter(report *cycleReport, beforeStats *monitor.DiskStats, beforeErr error) {

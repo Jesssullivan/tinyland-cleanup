@@ -32,6 +32,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Policy.Cooldown != "30m" {
 		t.Errorf("expected cooldown=30m, got %q", cfg.Policy.Cooldown)
 	}
+	if cfg.Policy.CooldownBypassLevel != "critical" {
+		t.Errorf("expected cooldown_bypass_level=critical, got %q", cfg.Policy.CooldownBypassLevel)
+	}
 	if cfg.Policy.StateFile == "" {
 		t.Error("expected default state file")
 	}
@@ -191,6 +194,9 @@ func TestLoadHomeManagerContract(t *testing.T) {
 	}
 	if cfg.Policy.Cooldown != "30m" {
 		t.Errorf("expected policy.cooldown=30m, got %q", cfg.Policy.Cooldown)
+	}
+	if cfg.Policy.CooldownBypassLevel != "aggressive" {
+		t.Errorf("expected policy.cooldown_bypass_level=aggressive, got %q", cfg.Policy.CooldownBypassLevel)
 	}
 	if !cfg.Enable.GitHubRunner {
 		t.Error("expected github runner cleanup enabled")
