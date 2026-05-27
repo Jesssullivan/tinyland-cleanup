@@ -837,10 +837,51 @@ func stopIdleBazelServerThenDeleteOutputBase(ctx context.Context, path string, l
 	if err := shutdownBazelOutputBase(ctx, path, logger); err != nil {
 		return err
 	}
-	if activity := bazelOutputBaseActivity(path); activity.Active {
+	if activity := bazelOutputBasePostShutdownActivity(ctx, path); activity.Active {
 		return fmt.Errorf("refusing to delete output base after shutdown because it is still active: %s", activity.Reason)
 	}
 	return deleteBazelOutputBase(path, logger)
+}
+
+func bazelOutputBasePostShutdownActivity(ctx context.Context, path string) bazelOutputBaseActivityInfo {
+	if bazelServerPIDIsAlive(filepath.Join(path, "server", "server.pid")) {
+		return bazelOutputBaseActivityInfo{
+			Active:     true,
+			IdleServer: true,
+			Reason:     "idle Bazel server pid is alive",
+		}
+	}
+
+	info, err := NewBazelPlugin().activeBazelProcessInfo(ctx)
+	if err != nil {
+		return bazelOutputBaseActivityInfo{
+			Active: true,
+			Reason: "could not verify Bazel process activity after shutdown",
+		}
+	}
+
+	switch bazelProcessOutputBaseKinds(info)[filepath.Clean(path)] {
+	case "client":
+		return bazelOutputBaseActivityInfo{
+			Active:       true,
+			ActiveClient: true,
+			Reason:       "active Bazel client still references output base",
+		}
+	case "server":
+		return bazelOutputBaseActivityInfo{
+			Active:        true,
+			IdleServer:    true,
+			ProcessServer: true,
+			Reason:        "idle Bazel server process still references output base",
+		}
+	case "unknown":
+		return bazelOutputBaseActivityInfo{
+			Active: true,
+			Reason: "Bazel process still references output base",
+		}
+	default:
+		return bazelOutputBaseActivityInfo{}
+	}
 }
 
 func shutdownBazelOutputBase(ctx context.Context, path string, logger *slog.Logger) error {

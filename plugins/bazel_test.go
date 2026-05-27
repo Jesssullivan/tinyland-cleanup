@@ -644,12 +644,19 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 	root := t.TempDir()
 	outputBase := filepath.Join(root, "_bazel_jess", "stale-idle")
 	makeBazelOutputBase(t, outputBase)
+	if err := os.WriteFile(filepath.Join(outputBase, "lock"), []byte("shutdown-touched lock\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	binDir := filepath.Join(root, "bin")
 	mustMkdir(t, binDir)
 	argsPath := filepath.Join(root, "bazel-args")
 	fakeBazel := filepath.Join(binDir, "bazel")
 	if err := os.WriteFile(fakeBazel, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BAZEL_SHUTDOWN_ARGS\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakePS := filepath.Join(binDir, "ps")
+	if err := os.WriteFile(fakePS, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("BAZEL_SHUTDOWN_ARGS", argsPath)
