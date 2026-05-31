@@ -655,6 +655,7 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 	if runtime.GOOS == "windows" {
 		t.Skip("fake bazel shell script is Unix-only")
 	}
+	requireProcessTable(t)
 	root := t.TempDir()
 	outputBase := filepath.Join(root, "_bazel_jess", "stale-idle")
 	makeBazelOutputBase(t, outputBase)
@@ -719,6 +720,7 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 }
 
 func TestApplyBazelCleanupTargetsDeletesIdleOutputBaseWithoutPIDFile(t *testing.T) {
+	requireProcessTable(t)
 	root := t.TempDir()
 	outputBase := filepath.Join(root, "_bazel_jess", "stale-idle-no-pid")
 	makeBazelOutputBase(t, outputBase)
@@ -746,6 +748,13 @@ func TestApplyBazelCleanupTargetsDeletesIdleOutputBaseWithoutPIDFile(t *testing.
 	}
 	if _, err := os.Stat(outputBase); !os.IsNotExist(err) {
 		t.Fatalf("expected output base to be deleted, stat err=%v", err)
+	}
+}
+
+func requireProcessTable(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("process-table integration test requires ps")
 	}
 }
 
