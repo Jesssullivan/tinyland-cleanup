@@ -5,8 +5,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -648,18 +650,30 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 		t.Fatal(err)
 	}
 
+	server := exec.Command("sleep", "60")
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = server.Process.Kill()
+		_ = server.Wait()
+	}()
+	if err := os.WriteFile(filepath.Join(outputBase, "server", "server.pid"), []byte(strconv.Itoa(server.Process.Pid)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	binDir := filepath.Join(root, "bin")
 	mustMkdir(t, binDir)
-	argsPath := filepath.Join(root, "bazel-args")
+	bazelMarker := filepath.Join(root, "bazel-invoked")
 	fakeBazel := filepath.Join(binDir, "bazel")
-	if err := os.WriteFile(fakeBazel, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BAZEL_SHUTDOWN_ARGS\"\n"), 0755); err != nil {
+	if err := os.WriteFile(fakeBazel, []byte("#!/bin/sh\ntouch \"$BAZEL_INVOKED\"\nexit 42\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	fakePS := filepath.Join(binDir, "ps")
-	if err := os.WriteFile(fakePS, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+	fakeBazelisk := filepath.Join(binDir, "bazelisk")
+	if err := os.WriteFile(fakeBazelisk, []byte("#!/bin/sh\ntouch \"$BAZEL_INVOKED\"\nexit 42\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("BAZEL_SHUTDOWN_ARGS", argsPath)
+	t.Setenv("BAZEL_INVOKED", bazelMarker)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -683,13 +697,8 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 	if _, err := os.Stat(outputBase); !os.IsNotExist(err) {
 		t.Fatalf("expected output base to be deleted, stat err=%v", err)
 	}
-	args, err := os.ReadFile(argsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantArgs := "--output_base=" + outputBase + "\nshutdown\n"
-	if string(args) != wantArgs {
-		t.Fatalf("shutdown args = %q, want %q", string(args), wantArgs)
+	if _, err := os.Stat(bazelMarker); !os.IsNotExist(err) {
+		t.Fatalf("cleanup must not invoke bazel/bazelisk during idle-server stop, marker err=%v", err)
 	}
 }
 
