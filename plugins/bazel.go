@@ -311,6 +311,9 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 	if isBazelOutputBase(root) {
 		return []bazelCandidate{newBazelCandidate("output_base", filepath.Base(root), root, info.ModTime())}
 	}
+	if isBazelRemoteCacheRoot(root) {
+		return []bazelCandidate{newBazelCandidate("remote_cache", filepath.Base(root), root, info.ModTime())}
+	}
 
 	base := filepath.Base(root)
 	if strings.HasPrefix(base, "_bazel_") {
@@ -341,6 +344,10 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 		case entry.Name() == "disk_cache":
 			if info, err := entry.Info(); err == nil {
 				candidates = append(candidates, newBazelCandidate("disk_cache", entry.Name(), path, info.ModTime()))
+			}
+		case isBazelRemoteCacheRoot(path):
+			if info, err := entry.Info(); err == nil {
+				candidates = append(candidates, newBazelCandidate("remote_cache", entry.Name(), path, info.ModTime()))
 			}
 		}
 	}
@@ -465,7 +472,7 @@ func refineBazelOutputBaseCandidateBytes(ctx context.Context, candidates []bazel
 
 	refined := false
 	for i := range candidates {
-		if candidates[i].Type != "output_base" {
+		if candidates[i].Type != "output_base" && candidates[i].Type != "remote_cache" {
 			continue
 		}
 		logical, physical, err := estimateBazelCandidateBytesRecursive(estimateCtx, candidates[i].Path)
@@ -531,6 +538,11 @@ func isBazelOutputBase(path string) bool {
 		}
 	}
 	return true
+}
+
+func isBazelRemoteCacheRoot(path string) bool {
+	base := filepath.Base(filepath.Clean(path))
+	return strings.HasPrefix(base, "bazel-") && pathExistsAndIsDir(filepath.Join(path, "cas"))
 }
 
 type bazelOutputBaseActivityInfo struct {
@@ -735,7 +747,7 @@ func bazelCandidateTier(candidateType string) string {
 	switch candidateType {
 	case "bazelisk":
 		return CleanupTierSafe
-	case "repository_cache", "disk_cache", "output_base":
+	case "repository_cache", "disk_cache", "remote_cache", "output_base":
 		return CleanupTierWarm
 	default:
 		return CleanupTierWarm
@@ -803,7 +815,7 @@ func bazelTargetEligibleForDeletion(target CleanupTarget) bool {
 	case "stop_idle_server_then_delete_output_base":
 		return target.Type == "output_base"
 	case "delete_cache_tier":
-		return target.Type == "repository_cache" || target.Type == "disk_cache" || target.Type == "bazelisk"
+		return target.Type == "repository_cache" || target.Type == "disk_cache" || target.Type == "remote_cache" || target.Type == "bazelisk"
 	default:
 		return false
 	}
@@ -816,7 +828,7 @@ func deleteBazelTarget(ctx context.Context, target CleanupTarget, logger *slog.L
 	switch target.Type {
 	case "output_base":
 		return deleteBazelOutputBase(target.Path, logger)
-	case "repository_cache", "disk_cache", "bazelisk":
+	case "repository_cache", "disk_cache", "remote_cache", "bazelisk":
 		return deleteBazelCacheTier(target.Type, target.Path, logger)
 	default:
 		return fmt.Errorf("refusing to delete unsupported Bazel target type %q", target.Type)
@@ -1161,6 +1173,8 @@ func bazelCacheTierPathAllowed(targetType, path string) bool {
 		return filepath.Base(path) == "repository_cache"
 	case "disk_cache":
 		return filepath.Base(path) == "disk_cache"
+	case "remote_cache":
+		return isBazelRemoteCacheRoot(path)
 	case "bazelisk":
 		parts := strings.Split(path, string(os.PathSeparator))
 		for idx := 0; idx < len(parts)-1; idx++ {
