@@ -5,8 +5,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -588,6 +590,18 @@ bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --work
 	}
 }
 
+func TestBazelServerPIDsForOutputBaseFromPSSkipsActiveClients(t *testing.T) {
+	ps := `
+18473 bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --workspace_directory=/Users/test/workspace
+777 /nix/store/abc/bin/bazel bazel test //... --output_base /private/tmp/workspace-ob
+888 bazel(other) bazel(other) --output_base=/private/tmp/other-ob
+`
+	pids := bazelServerPIDsForOutputBaseFromPS(ps, "/private/tmp/workspace-ob")
+	if len(pids) != 1 || pids[0] != 18473 {
+		t.Fatalf("got pids %v, want [18473]", pids)
+	}
+}
+
 func TestApplyBazelCleanupTargetsDeletesEligibleOutputBase(t *testing.T) {
 	root := t.TempDir()
 	outputBase := filepath.Join(root, "_bazel_jess", "stale")
@@ -641,6 +655,7 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 	if runtime.GOOS == "windows" {
 		t.Skip("fake bazel shell script is Unix-only")
 	}
+	requireProcessTable(t)
 	root := t.TempDir()
 	outputBase := filepath.Join(root, "_bazel_jess", "stale-idle")
 	makeBazelOutputBase(t, outputBase)
@@ -648,18 +663,34 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 		t.Fatal(err)
 	}
 
+	server := exec.Command("sleep", "60")
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Wait()
+	}()
+	defer func() {
+		_ = server.Process.Kill()
+		<-serverDone
+	}()
+	if err := os.WriteFile(filepath.Join(outputBase, "server", "server.pid"), []byte(strconv.Itoa(server.Process.Pid)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	binDir := filepath.Join(root, "bin")
 	mustMkdir(t, binDir)
-	argsPath := filepath.Join(root, "bazel-args")
+	bazelMarker := filepath.Join(root, "bazel-invoked")
 	fakeBazel := filepath.Join(binDir, "bazel")
-	if err := os.WriteFile(fakeBazel, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BAZEL_SHUTDOWN_ARGS\"\n"), 0755); err != nil {
+	if err := os.WriteFile(fakeBazel, []byte("#!/bin/sh\ntouch \"$BAZEL_INVOKED\"\nexit 42\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	fakePS := filepath.Join(binDir, "ps")
-	if err := os.WriteFile(fakePS, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+	fakeBazelisk := filepath.Join(binDir, "bazelisk")
+	if err := os.WriteFile(fakeBazelisk, []byte("#!/bin/sh\ntouch \"$BAZEL_INVOKED\"\nexit 42\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("BAZEL_SHUTDOWN_ARGS", argsPath)
+	t.Setenv("BAZEL_INVOKED", bazelMarker)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -683,13 +714,47 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 	if _, err := os.Stat(outputBase); !os.IsNotExist(err) {
 		t.Fatalf("expected output base to be deleted, stat err=%v", err)
 	}
-	args, err := os.ReadFile(argsPath)
-	if err != nil {
+	if _, err := os.Stat(bazelMarker); !os.IsNotExist(err) {
+		t.Fatalf("cleanup must not invoke bazel/bazelisk during idle-server stop, marker err=%v", err)
+	}
+}
+
+func TestApplyBazelCleanupTargetsDeletesIdleOutputBaseWithoutPIDFile(t *testing.T) {
+	requireProcessTable(t)
+	root := t.TempDir()
+	outputBase := filepath.Join(root, "_bazel_jess", "stale-idle-no-pid")
+	makeBazelOutputBase(t, outputBase)
+	if err := os.Remove(filepath.Join(outputBase, "server", "server.pid")); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	wantArgs := "--output_base=" + outputBase + "\nshutdown\n"
-	if string(args) != wantArgs {
-		t.Fatalf("shutdown args = %q, want %q", string(args), wantArgs)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := applyBazelCleanupTargets(context.Background(), "bazel", LevelAggressive, []CleanupTarget{
+		{
+			Type:   "output_base",
+			Name:   "stale-idle-no-pid",
+			Path:   outputBase,
+			Bytes:  123,
+			Active: true,
+			Action: "stop_idle_server_then_delete_output_base",
+		},
+	}, nil, root, logger)
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("items cleaned = %d, want 1", result.ItemsCleaned)
+	}
+	if _, err := os.Stat(outputBase); !os.IsNotExist(err) {
+		t.Fatalf("expected output base to be deleted, stat err=%v", err)
+	}
+}
+
+func requireProcessTable(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("process-table integration test requires ps")
 	}
 }
 

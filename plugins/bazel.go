@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -560,22 +561,11 @@ func bazelOutputBaseActivity(path string) bazelOutputBaseActivityInfo {
 }
 
 func bazelServerPIDIsAlive(path string) bool {
-	data, err := os.ReadFile(path)
+	pid, err := bazelServerPID(path)
 	if err != nil {
 		return false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
-		return false
-	}
-	err = syscall.Kill(pid, 0)
-	if err == nil {
-		return true
-	}
-	if err == syscall.EPERM {
-		return true
-	}
-	return false
+	return bazelProcessPIDIsActive(pid)
 }
 
 func outputBasesProtectedByWorkspaces(workspaces []string, home string) map[string]bool {
@@ -692,7 +682,7 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 	case idleServerStopEligible:
 		action = "stop_idle_server_then_delete_output_base"
 		protected = false
-		reason = "stale output base has only an idle Bazel server; allow_stop_idle_servers permits shutdown before deletion"
+		reason = "stale output base has only an idle Bazel server; allow_stop_idle_servers permits PID-file signaling before deletion"
 	case active && !cfg.AllowDeleteActiveOutputBases:
 		action = "keep"
 		if candidate.Reason != "" {
@@ -885,24 +875,181 @@ func bazelOutputBasePostShutdownActivity(ctx context.Context, path string) bazel
 }
 
 func shutdownBazelOutputBase(ctx context.Context, path string, logger *slog.Logger) error {
-	bin, err := exec.LookPath("bazel")
+	pid, err := bazelServerPID(filepath.Join(path, "server", "server.pid"))
 	if err != nil {
-		bin, err = exec.LookPath("bazelisk")
+		if errors.Is(err, os.ErrNotExist) {
+			pids, lookupErr := bazelServerPIDsForOutputBase(ctx, path)
+			if lookupErr != nil {
+				return fmt.Errorf("cannot find idle Bazel server pid for %s after missing pid file: %w", path, lookupErr)
+			}
+			if len(pids) == 0 {
+				logger.Info("Bazel output base has no server pid file and no matching idle server process", "output_base", path)
+				return nil
+			}
+			for _, pid := range pids {
+				if err := shutdownBazelServerPID(ctx, path, pid, logger); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		return err
 	}
-	if err != nil {
-		return fmt.Errorf("cannot stop idle Bazel server because neither bazel nor bazelisk is on PATH")
-	}
+	return shutdownBazelServerPID(ctx, path, pid, logger)
+}
 
+func shutdownBazelServerPID(ctx context.Context, path string, pid int, logger *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(shutdownCtx, bin, "--output_base="+path, "shutdown")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("bazel shutdown failed for %s: %w: %s", path, err, strings.TrimSpace(string(output)))
+	if !bazelProcessPIDIsActive(pid) {
+		logger.Info("idle Bazel server already stopped", "output_base", path, "pid", pid)
+		return nil
 	}
-	logger.Info("stopped idle Bazel server", "output_base", path)
-	return nil
+
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		if err == syscall.ESRCH {
+			logger.Info("idle Bazel server already stopped", "output_base", path, "pid", pid)
+			return nil
+		}
+		return fmt.Errorf("failed to signal idle Bazel server pid %d for %s: %w", pid, path, err)
+	}
+	logger.Info("sent SIGTERM to idle Bazel server", "output_base", path, "pid", pid)
+
+	if waitForBazelPIDExit(shutdownCtx, pid, 5*time.Second) {
+		logger.Info("stopped idle Bazel server", "output_base", path, "pid", pid)
+		return nil
+	}
+
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		if err == syscall.ESRCH {
+			logger.Info("idle Bazel server stopped before forced kill", "output_base", path, "pid", pid)
+			return nil
+		}
+		return fmt.Errorf("failed to force-stop idle Bazel server pid %d for %s: %w", pid, path, err)
+	}
+	logger.Warn("sent SIGKILL to idle Bazel server after graceful stop timed out", "output_base", path, "pid", pid)
+
+	if waitForBazelPIDExit(shutdownCtx, pid, 2*time.Second) {
+		logger.Info("force-stopped idle Bazel server", "output_base", path, "pid", pid)
+		return nil
+	}
+	return fmt.Errorf("idle Bazel server pid %d still appears active after signal escalation for %s", pid, path)
+}
+
+func bazelServerPIDsForOutputBase(ctx context.Context, path string) ([]int, error) {
+	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(psCtx, "ps", "-axo", "pid=,comm=,args=")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return bazelServerPIDsForOutputBaseFromPS(string(output), path), nil
+}
+
+func bazelServerPIDsForOutputBaseFromPS(output, path string) []int {
+	want := filepath.Clean(path)
+	seen := map[int]bool{}
+	var pids []int
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		originalFields := fields[1:]
+		if !bazelProcessLineHasBazel(originalFields) {
+			continue
+		}
+		lineOutputBases := bazelOutputBaseArgs(originalFields)
+		matchesOutputBase := false
+		for _, outputBase := range lineOutputBases {
+			if filepath.Clean(outputBase) == want {
+				matchesOutputBase = true
+				break
+			}
+		}
+		if !matchesOutputBase {
+			continue
+		}
+		lowerFields := make([]string, 0, len(originalFields))
+		for _, field := range originalFields {
+			lowerFields = append(lowerFields, strings.ToLower(field))
+		}
+		command := filepath.Base(lowerFields[0])
+		arg0 := filepath.Base(lowerFields[1])
+		if !bazelCommandName(command) && !bazelCommandName(arg0) {
+			continue
+		}
+		normalized := strings.Join(lowerFields[1:], " ")
+		if matches := bazelCommandPattern.FindStringSubmatch(normalized); len(matches) >= 3 {
+			continue
+		}
+		if !seen[pid] {
+			seen[pid] = true
+			pids = append(pids, pid)
+		}
+	}
+	sort.Ints(pids)
+	return pids
+}
+
+func bazelServerPID(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("cannot read Bazel server pid file %s: %w", path, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("invalid Bazel server pid in %s", path)
+	}
+	return pid, nil
+}
+
+func waitForBazelPIDExit(ctx context.Context, pid int, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if !bazelProcessPIDIsActive(pid) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return !bazelProcessPIDIsActive(pid)
+		case <-ticker.C:
+		}
+	}
+}
+
+func bazelProcessPIDIsActive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	if err == syscall.ESRCH {
+		return false
+	}
+	if err != nil && err != syscall.EPERM {
+		return false
+	}
+
+	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=")
+	output, psErr := cmd.Output()
+	if psErr != nil {
+		return err == nil || err == syscall.EPERM
+	}
+	stat := strings.TrimSpace(string(output))
+	return stat != "" && !strings.Contains(stat, "Z")
 }
 
 func deleteBazelOutputBase(path string, logger *slog.Logger) error {
