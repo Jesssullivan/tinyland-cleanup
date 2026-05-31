@@ -153,6 +153,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- APFS snapshot dry-run estimates now exclude protected OS-update snapshots
+  from the aggregate thinning reclaim target when no date-form Time Machine
+  local snapshots are present.
 - Active Bazel client processes no longer globally protect unrelated stale
   output bases; active clients still protect their own output base, and shared
   cache-tier cleanup remains deferred while Bazel client work is visible.
