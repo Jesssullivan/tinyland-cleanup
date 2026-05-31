@@ -288,8 +288,41 @@ func TestAPFSPlanTargetsReportsOSUpdateSnapshotsConservatively(t *testing.T) {
 	if osUpdateTarget.Action != "keep" || !osUpdateTarget.Protected {
 		t.Fatalf("OS-update snapshot should be protected review-only evidence, got %#v", osUpdateTarget)
 	}
-	if got := apfsEstimatedCandidateBytes(targets); got != 10*apfsGiB {
+	if got := apfsEstimatedCandidateBytes(targets); got != 5*apfsGiB {
 		t.Fatalf("estimated candidate bytes = %d, want thinning estimate only", got)
+	}
+}
+
+func TestAPFSPlanTargetsDoesNotEstimateOSUpdateOnlySnapshots(t *testing.T) {
+	now := time.Date(2026, 1, 16, 12, 0, 0, 0, time.UTC)
+	snapshots := []snapshotInfo{
+		{
+			Date:       "com.apple.os.update-DEDECEC55622993FB7EF1CB6A97E976433E7F84ECCE5514C9C380AF59534732D",
+			Kind:       "os-update",
+			Identifier: "com.apple.os.update-DEDECEC55622993FB7EF1CB6A97E976433E7F84ECCE5514C9C380AF59534732D",
+		},
+		{
+			Date:       "com.apple.os.update-MSUPrepareUpdate",
+			Kind:       "os-update",
+			Identifier: "com.apple.os.update-MSUPrepareUpdate",
+		},
+	}
+	cfg := config.APFSConfig{
+		ThinEnabled:     true,
+		MaxThinGB:       50,
+		KeepRecentDays:  1,
+		DeleteOSUpdates: true,
+	}
+
+	targets := apfsPlanTargets(snapshots, LevelCritical, cfg, 50, false, true, now)
+	if len(targets) != 3 {
+		t.Fatalf("expected aggregate target plus 2 snapshots, got %d", len(targets))
+	}
+	if targets[0].Action != "protect" || !targets[0].Protected || targets[0].Bytes != 0 {
+		t.Fatalf("OS-update-only thinning target should be protected with no estimate, got %#v", targets[0])
+	}
+	if got := apfsEstimatedCandidateBytes(targets); got != 0 {
+		t.Fatalf("estimated candidate bytes = %d, want 0", got)
 	}
 }
 

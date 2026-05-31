@@ -434,9 +434,19 @@ func apfsSnapshotEstimateBytes(snapshots []snapshotInfo) (int64, int64) {
 	return count * 5 * apfsGiB, count * 15 * apfsGiB
 }
 
+func apfsThinnableSnapshotEstimateBytes(snapshots []snapshotInfo) (int64, int64) {
+	var count int64
+	for _, snapshot := range snapshots {
+		if apfsSnapshotHasTime(snapshot) && apfsSnapshotKind(snapshot) != "os-update" {
+			count++
+		}
+	}
+	return count * 5 * apfsGiB, count * 15 * apfsGiB
+}
+
 func apfsPlanTargets(snapshots []snapshotInfo, level CleanupLevel, cfg config.APFSConfig, requestGB int, backupActive bool, sudoPasswordless bool, now time.Time) []CleanupTarget {
 	var targets []CleanupTarget
-	low, _ := apfsSnapshotEstimateBytes(snapshots)
+	low, _ := apfsThinnableSnapshotEstimateBytes(snapshots)
 	requestBytes := int64(requestGB) * apfsGiB
 	thinEstimate := low
 	if requestBytes > 0 && requestBytes < thinEstimate {
@@ -448,13 +458,16 @@ func apfsPlanTargets(snapshots []snapshotInfo, level CleanupLevel, cfg config.AP
 		Tier:      CleanupTierPrivileged,
 		Name:      "local snapshot thinning",
 		Bytes:     thinEstimate,
-		Protected: level < LevelModerate || !cfg.ThinEnabled || !sudoPasswordless || backupActive,
+		Protected: thinEstimate == 0 || level < LevelModerate || !cfg.ThinEnabled || !sudoPasswordless || backupActive,
 		Action:    "thin_local_snapshots",
 		Reason:    "request APFS local snapshot thinning through tmutil",
 	}
 	if thinTarget.Protected {
 		thinTarget.Action = "protect"
 		thinTarget.Reason = "snapshot thinning is not currently eligible"
+		if thinEstimate == 0 {
+			thinTarget.Reason = "no date-form Time Machine local snapshots are eligible for thinning"
+		}
 	}
 	annotateCleanupTargetPolicy(&thinTarget, thinTarget.Tier, hostReclaimForAction(thinTarget.Action))
 	targets = append(targets, thinTarget)
