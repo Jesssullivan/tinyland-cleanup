@@ -654,9 +654,13 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 	if err := server.Start(); err != nil {
 		t.Fatal(err)
 	}
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- server.Wait()
+	}()
 	defer func() {
 		_ = server.Process.Kill()
-		_ = server.Wait()
+		<-serverDone
 	}()
 	if err := os.WriteFile(filepath.Join(outputBase, "server", "server.pid"), []byte(strconv.Itoa(server.Process.Pid)), 0644); err != nil {
 		t.Fatal(err)
