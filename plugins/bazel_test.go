@@ -706,6 +706,37 @@ func TestApplyBazelCleanupTargetsStopsIdleServerBeforeDeletingOutputBase(t *test
 	}
 }
 
+func TestApplyBazelCleanupTargetsDeletesIdleOutputBaseWithoutPIDFile(t *testing.T) {
+	root := t.TempDir()
+	outputBase := filepath.Join(root, "_bazel_jess", "stale-idle-no-pid")
+	makeBazelOutputBase(t, outputBase)
+	if err := os.Remove(filepath.Join(outputBase, "server", "server.pid")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := applyBazelCleanupTargets(context.Background(), "bazel", LevelAggressive, []CleanupTarget{
+		{
+			Type:   "output_base",
+			Name:   "stale-idle-no-pid",
+			Path:   outputBase,
+			Bytes:  123,
+			Active: true,
+			Action: "stop_idle_server_then_delete_output_base",
+		},
+	}, nil, root, logger)
+
+	if result.Error != nil {
+		t.Fatalf("unexpected error: %v", result.Error)
+	}
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("items cleaned = %d, want 1", result.ItemsCleaned)
+	}
+	if _, err := os.Stat(outputBase); !os.IsNotExist(err) {
+		t.Fatalf("expected output base to be deleted, stat err=%v", err)
+	}
+}
+
 func TestCleanupRepoLocalBazelSymlinksOnlyRemovesLinksIntoDeletedOutputBase(t *testing.T) {
 	root := t.TempDir()
 	deletedOutputBase := filepath.Join(root, "_bazel_jess", "deleted")

@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -876,6 +877,10 @@ func bazelOutputBasePostShutdownActivity(ctx context.Context, path string) bazel
 func shutdownBazelOutputBase(ctx context.Context, path string, logger *slog.Logger) error {
 	pid, err := bazelServerPID(filepath.Join(path, "server", "server.pid"))
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Info("Bazel output base has no server pid file; deleting without shutdown", "output_base", path)
+			return nil
+		}
 		return err
 	}
 
