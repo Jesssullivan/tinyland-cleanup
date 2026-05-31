@@ -590,6 +590,18 @@ bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --work
 	}
 }
 
+func TestBazelServerPIDsForOutputBaseFromPSSkipsActiveClients(t *testing.T) {
+	ps := `
+18473 bazel(workspace) bazel(workspace) --output_base=/private/tmp/workspace-ob --workspace_directory=/Users/test/workspace
+777 /nix/store/abc/bin/bazel bazel test //... --output_base /private/tmp/workspace-ob
+888 bazel(other) bazel(other) --output_base=/private/tmp/other-ob
+`
+	pids := bazelServerPIDsForOutputBaseFromPS(ps, "/private/tmp/workspace-ob")
+	if len(pids) != 1 || pids[0] != 18473 {
+		t.Fatalf("got pids %v, want [18473]", pids)
+	}
+}
+
 func TestApplyBazelCleanupTargetsDeletesEligibleOutputBase(t *testing.T) {
 	root := t.TempDir()
 	outputBase := filepath.Join(root, "_bazel_jess", "stale")

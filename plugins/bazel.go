@@ -878,12 +878,27 @@ func shutdownBazelOutputBase(ctx context.Context, path string, logger *slog.Logg
 	pid, err := bazelServerPID(filepath.Join(path, "server", "server.pid"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			logger.Info("Bazel output base has no server pid file; deleting without shutdown", "output_base", path)
+			pids, lookupErr := bazelServerPIDsForOutputBase(ctx, path)
+			if lookupErr != nil {
+				return fmt.Errorf("cannot find idle Bazel server pid for %s after missing pid file: %w", path, lookupErr)
+			}
+			if len(pids) == 0 {
+				logger.Info("Bazel output base has no server pid file and no matching idle server process", "output_base", path)
+				return nil
+			}
+			for _, pid := range pids {
+				if err := shutdownBazelServerPID(ctx, path, pid, logger); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 		return err
 	}
+	return shutdownBazelServerPID(ctx, path, pid, logger)
+}
 
+func shutdownBazelServerPID(ctx context.Context, path string, pid int, logger *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -920,6 +935,68 @@ func shutdownBazelOutputBase(ctx context.Context, path string, logger *slog.Logg
 		return nil
 	}
 	return fmt.Errorf("idle Bazel server pid %d still appears active after signal escalation for %s", pid, path)
+}
+
+func bazelServerPIDsForOutputBase(ctx context.Context, path string) ([]int, error) {
+	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(psCtx, "ps", "-axo", "pid=,comm=,args=")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return bazelServerPIDsForOutputBaseFromPS(string(output), path), nil
+}
+
+func bazelServerPIDsForOutputBaseFromPS(output, path string) []int {
+	want := filepath.Clean(path)
+	seen := map[int]bool{}
+	var pids []int
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		originalFields := fields[1:]
+		if !bazelProcessLineHasBazel(originalFields) {
+			continue
+		}
+		lineOutputBases := bazelOutputBaseArgs(originalFields)
+		matchesOutputBase := false
+		for _, outputBase := range lineOutputBases {
+			if filepath.Clean(outputBase) == want {
+				matchesOutputBase = true
+				break
+			}
+		}
+		if !matchesOutputBase {
+			continue
+		}
+		lowerFields := make([]string, 0, len(originalFields))
+		for _, field := range originalFields {
+			lowerFields = append(lowerFields, strings.ToLower(field))
+		}
+		command := filepath.Base(lowerFields[0])
+		arg0 := filepath.Base(lowerFields[1])
+		if !bazelCommandName(command) && !bazelCommandName(arg0) {
+			continue
+		}
+		normalized := strings.Join(lowerFields[1:], " ")
+		if matches := bazelCommandPattern.FindStringSubmatch(normalized); len(matches) >= 3 {
+			continue
+		}
+		if !seen[pid] {
+			seen[pid] = true
+			pids = append(pids, pid)
+		}
+	}
+	sort.Ints(pids)
+	return pids
 }
 
 func bazelServerPID(path string) (int, error) {
