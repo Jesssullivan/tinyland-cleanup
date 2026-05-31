@@ -23,6 +23,7 @@ func TestDiscoverBazelRootCandidates(t *testing.T) {
 	makeBazelOutputBase(t, explicitOutputBase)
 	mustMkdir(t, filepath.Join(root, "repository_cache"))
 	mustMkdir(t, filepath.Join(root, "disk_cache"))
+	mustMkdir(t, filepath.Join(root, "bazel-tinyland", "cas", "aa"))
 
 	candidates := discoverBazelRootCandidates(root)
 	byType := map[string]bool{}
@@ -36,7 +37,7 @@ func TestDiscoverBazelRootCandidates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, candidateType := range []string{"output_base", "repository_cache", "disk_cache"} {
+	for _, candidateType := range []string{"output_base", "repository_cache", "disk_cache", "remote_cache"} {
 		if !byType[candidateType] {
 			t.Fatalf("expected %s candidate, got %#v", candidateType, candidates)
 		}
@@ -267,6 +268,13 @@ func TestBazelPlanTargetsDeletesCacheTiersOnlyWhenBudgetExceeded(t *testing.T) {
 			Physical: 2 * bazelGiB,
 		},
 		{
+			Type:     "remote_cache",
+			Name:     "bazel-tinyland",
+			Path:     "/tmp/.cache/bazel-tinyland",
+			ModTime:  now.Add(-30 * 24 * time.Hour),
+			Physical: 2 * bazelGiB,
+		},
+		{
 			Type:     "repository_cache",
 			Name:     "fresh_repository_cache",
 			Path:     "/tmp/fresh_repository_cache",
@@ -276,8 +284,8 @@ func TestBazelPlanTargetsDeletesCacheTiersOnlyWhenBudgetExceeded(t *testing.T) {
 	}
 
 	targets, total := bazelPlanTargets(candidates, cfg, LevelModerate, now, false)
-	if total != 8*bazelGiB {
-		t.Fatalf("total physical = %d, want %d", total, 8*bazelGiB)
+	if total != 10*bazelGiB {
+		t.Fatalf("total physical = %d, want %d", total, 10*bazelGiB)
 	}
 
 	actions := map[string]CleanupTarget{}
@@ -285,7 +293,7 @@ func TestBazelPlanTargetsDeletesCacheTiersOnlyWhenBudgetExceeded(t *testing.T) {
 		actions[target.Name] = target
 	}
 
-	for _, name := range []string{"repository_cache", "disk_cache", "sha256/hash"} {
+	for _, name := range []string{"repository_cache", "disk_cache", "sha256/hash", "bazel-tinyland"} {
 		if actions[name].Action != "delete_cache_tier" || actions[name].Protected {
 			t.Fatalf("%s target should be a cache-tier deletion candidate: %#v", name, actions[name])
 		}
