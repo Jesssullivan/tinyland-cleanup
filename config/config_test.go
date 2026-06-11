@@ -251,6 +251,33 @@ func TestPackagedLinuxConfigParsesCurrentNixPolicy(t *testing.T) {
 	if cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan != "3d" {
 		t.Errorf("expected home_manager_critical_delete_generations_older_than=3d, got %q", cfg.Nix.HomeManagerCriticalDeleteGenerationsOlderThan)
 	}
+	if cfg.Policy.CooldownBypassLevel != "critical" {
+		t.Errorf("expected policy.cooldown_bypass_level=critical, got %q", cfg.Policy.CooldownBypassLevel)
+	}
+	if !cfg.Podman.BuildKitPrune {
+		t.Error("expected podman.buildkit_prune=true")
+	}
+	if cfg.Podman.BuildKitPruneKeepStorageMB != 8192 {
+		t.Errorf("expected podman.buildkit_prune_keep_storage_mb=8192, got %d", cfg.Podman.BuildKitPruneKeepStorageMB)
+	}
+	if cfg.Podman.CriticalSystemPrune {
+		t.Error("expected podman.critical_system_prune=false")
+	}
+	if len(cfg.Bazel.WorkspaceRoots) != 3 {
+		t.Errorf("expected 3 bazel.workspace_roots, got %d", len(cfg.Bazel.WorkspaceRoots))
+	}
+	if cfg.DevArtifacts.ScanMaxDuration != "30s" {
+		t.Errorf("expected dev_artifacts.scan_max_duration=30s, got %q", cfg.DevArtifacts.ScanMaxDuration)
+	}
+	if cfg.DevArtifacts.ScanMaxEntries != 250000 {
+		t.Errorf("expected dev_artifacts.scan_max_entries=250000, got %d", cfg.DevArtifacts.ScanMaxEntries)
+	}
+	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
+		t.Errorf("expected dev_artifacts.temp_scan_max_roots=128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
+	}
+	if !cfg.DevArtifacts.NixTempRoots {
+		t.Error("expected dev_artifacts.nix_temp_roots=true")
+	}
 }
 
 func homeManagerContractPath(t *testing.T) string {

@@ -11,6 +11,7 @@ target_free: 70
 
 policy:
   cooldown: 30m
+  cooldown_bypass_level: critical
   state_file: /var/lib/tinyland-cleanup/state.json
 
 thresholds:
@@ -47,6 +48,12 @@ docker:
 podman:
   prune_images_age: 24h
   protect_running_containers: true
+  machine_names: []
+  buildkit_prune: true
+  buildkit_prune_keep_duration: 24h
+  buildkit_prune_keep_storage_mb: 8192
+  buildkit_prune_min_reclaim_gb: 4
+  critical_system_prune: false
   clean_inside_vm: false
   trim_vm_disk: false
   compact_disk_offline: false
@@ -54,7 +61,9 @@ podman:
   compact_require_no_active_containers: true
   compact_keep_backup_until_restart: true
   compact_provider_allowlist:
-    - applehv
+    - qemu
+  compact_scratch_dir: ""
+  compact_qemu_img_path: ""
 
 nix:
   min_user_generations: 5
@@ -77,6 +86,10 @@ nix:
 bazel:
   roots:
     - ~/.cache/bazel
+  workspace_roots:
+    - ~/git
+    - ~/src
+    - ~/projects
   bazelisk_cache: ~/.cache/bazelisk
   max_total_gb: 20
   keep_recent_output_bases: 5
@@ -97,12 +110,18 @@ dev_artifacts:
     - ~/git
     - ~/src
     - ~/projects
+  scan_max_duration: 30s
+  scan_max_entries: 250000
   temp_artifacts: true
   temp_scan_paths:
     - /tmp
     - /var/tmp
+  temp_scan_max_roots: 128
   temp_artifact_min_mb: 512
   temp_artifact_stale_after: 12h
+  nix_temp_roots: true
+  nix_temp_root_min_mb: 1
+  nix_temp_root_stale_after: 24h
   node_modules: true
   python_venvs: true
   rust_targets: false
