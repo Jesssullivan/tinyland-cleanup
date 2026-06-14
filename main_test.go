@@ -578,6 +578,52 @@ func TestRunOnceConfiguredAggressiveBypassesCooldown(t *testing.T) {
 	}
 }
 
+func TestRunOnceMinimumFreeRunwayBypassesCooldown(t *testing.T) {
+	var output bytes.Buffer
+	mock := &reportingPlugin{}
+	daemon := newTestDaemon(t, mock, &output)
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	daemon.now = func() time.Time { return now }
+	daemon.config.Policy.Cooldown = "30m"
+	daemon.config.Policy.MinimumFreeGB = 25
+	daemon.config.Policy.StateFile = filepath.Join(t.TempDir(), "state.json")
+	state := newCleanupState()
+	state.recordPluginRun("reporting", plugins.LevelAggressive, now.Add(-10*time.Minute), plugins.CleanupResult{
+		Plugin: "reporting",
+		Level:  plugins.LevelAggressive,
+	})
+	if err := saveCleanupState(daemon.config.Policy.StateFile, state); err != nil {
+		t.Fatal(err)
+	}
+
+	total := uint64(100 * 1024 * 1024 * 1024)
+	free := uint64(10 * 1024 * 1024 * 1024)
+	daemon.diskStats = sequenceDiskStats(t,
+		diskStats(total, free, 90),
+		diskStats(total, free, 90),
+		diskStats(total, free, 90),
+		diskStats(total, free, 90),
+	)
+
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatalf("runOnce failed: %v", err)
+	}
+
+	if !mock.called {
+		t.Fatal("minimum free runway should bypass cooldown while unmet")
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	if report.MinimumFreeBytes != 25*1024*1024*1024 {
+		t.Fatalf("minimum free bytes = %d, want 25GiB", report.MinimumFreeBytes)
+	}
+	if report.MinimumFreeMet {
+		t.Fatal("minimum free runway should be unmet")
+	}
+	if report.Plugins[0].SkipReason == "cooldown" {
+		t.Fatal("plugin should not be skipped by cooldown while minimum free runway is unmet")
+	}
+}
+
 func TestRunOnceInvalidCooldownBypassLevelDefaultsToCritical(t *testing.T) {
 	var output bytes.Buffer
 	mock := &reportingPlugin{}

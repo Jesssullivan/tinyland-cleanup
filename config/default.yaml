@@ -24,6 +24,9 @@ policy:
   # Conservative default preserves the historical behavior: only critical
   # pressure bypasses cooldown. Incident-prone hosts can set "aggressive".
   cooldown_bypass_level: critical
+  # Optional absolute runway. When set, plugin cooldown is bypassed until the
+  # monitored filesystem has at least this many GiB free.
+  minimum_free_gb: 0
   state_file: ~/.local/state/tinyland-cleanup/state.json
 
 # Enable/disable specific cleanup plugins
@@ -212,6 +215,10 @@ dev_artifacts:
   python_venvs: true
   rust_targets: true
   zig_artifacts: true
+  # Host-specific pressure profiles can opt into these global/agent-local
+  # surfaces after reviewing active-process protection and store semantics.
+  agent_worktree_artifacts: false
+  pnpm_store: false
   go_build_cache: true
   haskell_cache: true
   lmstudio_models: false
@@ -238,6 +245,18 @@ darwin_dev_caches:
     enabled: true
     keep_latest: 2
   pip:
+    enabled: true
+    stale_after_days: 14
+  npm:
+    enabled: true
+    stale_after_days: 14
+  uv:
+    enabled: true
+    stale_after_days: 14
+  bun:
+    enabled: true
+    stale_after_days: 14
+  opencode:
     enabled: true
     stale_after_days: 14
   vscode:

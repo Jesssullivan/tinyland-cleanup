@@ -1223,28 +1223,39 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 	}
 
 	if cfg.Pip.Enabled {
-		for _, pipPath := range []string{
+		targets = append(targets, p.darwinDirectoryCacheTargets(home, cfg.Pip, level, enforce, "pip", "pip cache", []string{
 			filepath.Join(home, "Library", "Caches", "pip"),
 			filepath.Join(home, ".cache", "pip"),
-		} {
-			if !pathExistsAndIsDir(pipPath) {
-				continue
-			}
-			stale := dirModTimeStale(pipPath, cfg.Pip.StaleAfterDays)
-			eligible := level >= LevelModerate && stale
-			action := darwinCacheAction(false, enforce, eligible)
-			target := CleanupTarget{
-				Type:      "pip",
-				Name:      filepath.Base(pipPath),
-				Path:      pipPath,
-				Bytes:     getDirAllocatedBytes(pipPath),
-				Protected: darwinCacheProtected(false, enforce, eligible),
-				Action:    action,
-				Reason:    darwinCacheReason(false, enforce, eligible, "pip cache", fmt.Sprintf("stale-after policy is %d days", cfg.Pip.StaleAfterDays)),
-			}
-			annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(action))
-			targets = append(targets, target)
-		}
+		})...)
+	}
+
+	if cfg.NPM.Enabled {
+		targets = append(targets, p.darwinDirectoryCacheTargets(home, cfg.NPM, level, enforce, "npm-cache", "npm cache", []string{
+			filepath.Join(home, ".npm", "_cacache"),
+			filepath.Join(home, "Library", "Caches", "npm"),
+		})...)
+	}
+
+	if cfg.UV.Enabled {
+		targets = append(targets, p.darwinDirectoryCacheTargets(home, cfg.UV, level, enforce, "uv-cache", "uv cache", []string{
+			filepath.Join(home, ".cache", "uv"),
+			filepath.Join(home, "Library", "Caches", "uv"),
+		})...)
+	}
+
+	if cfg.Bun.Enabled {
+		targets = append(targets, p.darwinDirectoryCacheTargets(home, cfg.Bun, level, enforce, "bun-cache", "Bun cache", []string{
+			filepath.Join(home, ".cache", "bun"),
+			filepath.Join(home, ".cache", ".bun"),
+			filepath.Join(home, "Library", "Caches", "bun"),
+		})...)
+	}
+
+	if cfg.OpenCode.Enabled {
+		targets = append(targets, p.darwinDirectoryCacheTargets(home, cfg.OpenCode, level, enforce, "opencode-cache", "opencode cache", []string{
+			filepath.Join(home, ".cache", "opencode"),
+			filepath.Join(home, "Library", "Caches", "opencode"),
+		})...)
 	}
 
 	if cfg.VSCode.Enabled {
@@ -1262,6 +1273,39 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 	}
 
 	return targets
+}
+
+func (p *CachePlugin) darwinDirectoryCacheTargets(home string, cfg config.DarwinDevCacheToolConfig, level CleanupLevel, enforce bool, targetType string, displayName string, paths []string) []CleanupTarget {
+	targets := make([]CleanupTarget, 0, len(paths))
+	for _, path := range paths {
+		if !pathExistsAndIsDir(path) {
+			continue
+		}
+		stale := dirModTimeStale(path, cfg.StaleAfterDays)
+		eligible := level >= LevelCritical || (level >= LevelModerate && stale)
+		action := darwinCacheAction(false, enforce, eligible)
+		target := CleanupTarget{
+			Type:      targetType,
+			Name:      darwinHomeRelativePath(home, path),
+			Path:      path,
+			Bytes:     getDirAllocatedBytes(path),
+			Protected: darwinCacheProtected(false, enforce, eligible),
+			Action:    action,
+			Reason: darwinCacheReason(false, enforce, eligible,
+				displayName,
+				fmt.Sprintf("stale-after policy is %d days; critical pressure can delete rebuildable package caches", cfg.StaleAfterDays)),
+		}
+		annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(action))
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func darwinHomeRelativePath(home string, path string) string {
+	if rel, err := filepath.Rel(home, path); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return filepath.Base(path)
 }
 
 func (p *CachePlugin) darwinEditorCacheTargets(home string, cfg config.DarwinDevCacheToolConfig, activeProcesses map[string]bool, level CleanupLevel, enforce bool, targetType, displayName, appSupportName string, processNames []string) []CleanupTarget {

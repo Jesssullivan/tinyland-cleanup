@@ -1,7 +1,8 @@
 // Package plugins provides cleanup plugin implementations.
 // devartifacts.go scans for stale development artifacts like node_modules,
-// .venv, Rust target/, Zig artifacts, Go build cache, Haskell caches,
-// LM Studio models, and review-only large local artifacts.
+// .venv, Rust target/, Zig artifacts, agent worktree outputs, pnpm store,
+// Go build cache, Haskell caches, LM Studio models, and review-only large
+// local artifacts.
 package plugins
 
 import (
@@ -29,6 +30,7 @@ const devArtifactRecentOutputGrace = 2 * time.Hour
 var tempArtifactPathPattern = regexp.MustCompile(`(?:/private)?/tmp/[^\s"'<>]+|/var/tmp/[^\s"'<>]+`)
 var absoluteDevArtifactPathPattern = regexp.MustCompile(`(?:~|/)[^\s"'<>]+`)
 var nixTempRootNamePattern = regexp.MustCompile(`^(?:nix-shell\.[A-Za-z0-9]+|nix-develop-\d+-\d+|nix-\d+-\d+|nix-build-[A-Za-z0-9._+@=-]+-\d+)$`)
+var temporaryProofLaneNamePattern = regexp.MustCompile(`^t[0-9]+[A-Za-z]*-[A-Za-z0-9._-]+$`)
 
 var errDevArtifactScanBudgetExceeded = errors.New("dev artifact scan budget exceeded")
 
@@ -296,9 +298,15 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			p.planLargeLocalArtifacts(scanCtx, expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, mountedImages, &targets, scanBudget)
 		}
 	}
+	if daCfg.AgentWorktreeArtifacts && daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
+		p.planAgentWorktreeArtifacts(scanCtx, home, rustAge, mutates, daCfg, active, tracker, &targets, scanBudget)
+	}
 
 	if daCfg.GoBuildCache {
 		p.planGoBuildCache(ctx, level, active, &targets)
+	}
+	if daCfg.PnpmStore {
+		p.planPnpmStore(ctx, home, level, active, &targets)
 	}
 	if daCfg.HaskellCache {
 		p.planHaskellCaches(ctx, home, level, active, &targets)
@@ -451,10 +459,29 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			return result
 		}
 	}
+	if daCfg.AgentWorktreeArtifacts && daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
+		freed := p.cleanAgentWorktreeArtifacts(scanCtx, home, rustAge, daCfg, active, tracker, logger, scanBudget)
+		result.BytesFreed += freed
+		if freed > 0 {
+			result.ItemsCleaned++
+		}
+	}
+	if scanBudget.exhausted() {
+		logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+		return result
+	}
 
 	// Go build cache (not path-dependent - it's a global cache)
 	if daCfg.GoBuildCache && !active.GlobalFamilyActive("go-build-cache") {
 		freed := p.cleanGoBuildCache(ctx, level, logger)
+		result.BytesFreed += freed
+		if freed > 0 {
+			result.ItemsCleaned++
+		}
+	}
+
+	if daCfg.PnpmStore && !active.GlobalFamilyActive("node_modules") {
+		freed := p.cleanPnpmStore(ctx, home, level, logger)
 		result.BytesFreed += freed
 		if freed > 0 {
 			result.ItemsCleaned++
@@ -539,11 +566,74 @@ func (p *DevArtifactsPlugin) planZigArtifacts(ctx context.Context, scanPath stri
 	}
 }
 
+func (p *DevArtifactsPlugin) planAgentWorktreeArtifacts(ctx context.Context, home string, rustAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active devArtifactActivity, tracker *devArtifactGitTracker, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+	for _, root := range agentWorktreeRoots(home) {
+		if !pathExistsAndIsDir(root) {
+			continue
+		}
+		p.planRustTargets(ctx, root, rustAge, mutates, daCfg.ProtectPaths, active, tracker, targets, budgets...)
+	}
+}
+
 func (p *DevArtifactsPlugin) planLargeLocalArtifacts(ctx context.Context, scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	p.findLargeLocalArtifacts(ctx, scanPath, minBytes, protectPaths, mountedImages, func(target CleanupTarget) {
 		*targets = append(*targets, target)
 	}, budget)
+}
+
+func agentWorktreeRoots(home string) []string {
+	return []string{
+		filepath.Join(home, ".claude", "worktrees"),
+	}
+}
+
+func (p *DevArtifactsPlugin) planPnpmStore(ctx context.Context, home string, level CleanupLevel, active devArtifactActivity, targets *[]CleanupTarget) {
+	path := pnpmStorePath(home)
+	if !pathExistsAndIsDir(path) {
+		return
+	}
+	size, err := getDirAllocatedBytesContext(ctx, path)
+	if err != nil || size == 0 {
+		return
+	}
+
+	target := CleanupTarget{
+		Type:  "pnpm-store",
+		Name:  ".local/share/pnpm",
+		Path:  path,
+		Bytes: size,
+	}
+	if activeReason, ok := active.FamilyReason("node_modules"); ok {
+		target.Action = "protect"
+		target.Active = true
+		target.Protected = true
+		target.Reason = "active package manager or Node process detected: " + activeReason
+	} else if level >= LevelModerate {
+		target.Action = "clean-cache"
+		target.Reason = "pnpm store prune removes unreferenced rebuildable package-store entries"
+	} else {
+		target.Action = "report"
+		target.Protected = true
+		target.Reason = "warning level reports pnpm store without pruning it"
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(target.Action))
+	*targets = append(*targets, target)
+}
+
+func pnpmStorePath(home string) string {
+	return filepath.Join(home, ".local", "share", "pnpm")
+}
+
+func (p *DevArtifactsPlugin) cleanAgentWorktreeArtifacts(ctx context.Context, home string, rustAge time.Duration, daCfg config.DevArtifactsConfig, active devArtifactActivity, tracker *devArtifactGitTracker, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+	var totalFreed int64
+	for _, root := range agentWorktreeRoots(home) {
+		if !pathExistsAndIsDir(root) {
+			continue
+		}
+		totalFreed += p.cleanRustTargets(ctx, root, rustAge, daCfg.ProtectPaths, active, tracker, logger, budgets...)
+	}
+	return totalFreed
 }
 
 func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, daCfg config.DevArtifactsConfig, activeRoots map[string]string, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
@@ -776,6 +866,12 @@ func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(ctx context.Context, scan
 func (p *DevArtifactsPlugin) temporaryArtifactTarget(path string, physicalBytes int64, modTime time.Time, staleAfter time.Duration, now time.Time, protected bool, activeReason string) CleanupTarget {
 	action := "review_temp_artifact"
 	reason := fmt.Sprintf("large top-level temporary artifact is older than %s; manual review required before deletion", formatDevArtifactAge(staleAfter))
+	targetType := "temporary-dev-artifact"
+	if isTemporaryProofLaneName(filepath.Base(path)) {
+		targetType = "temporary-proof-lane"
+		action = "review_temp_proof_lane"
+		reason = fmt.Sprintf("known temporary proof lane is older than %s; root deletion requires manual review, nested rebuildable artifacts may be cleaned separately", formatDevArtifactAge(staleAfter))
+	}
 	active := activeReason != ""
 	isProtected := true
 	switch {
@@ -790,7 +886,7 @@ func (p *DevArtifactsPlugin) temporaryArtifactTarget(path string, physicalBytes 
 		reason = fmt.Sprintf("temporary artifact is newer than %s", formatDevArtifactAge(staleAfter))
 	}
 	target := CleanupTarget{
-		Type:      "temporary-dev-artifact",
+		Type:      targetType,
 		Name:      filepath.Base(path),
 		Path:      path,
 		Bytes:     physicalBytes,
@@ -801,6 +897,10 @@ func (p *DevArtifactsPlugin) temporaryArtifactTarget(path string, physicalBytes 
 	}
 	annotateCleanupTargetPolicy(&target, CleanupTierDestructive, CleanupReclaimNone)
 	return target
+}
+
+func isTemporaryProofLaneName(name string) bool {
+	return temporaryProofLaneNamePattern.MatchString(name)
 }
 
 func (p *DevArtifactsPlugin) nixTemporaryRootTarget(path string, physicalBytes int64, modTime time.Time, staleAfter time.Duration, now time.Time, protected bool, activeReason string, canDelete bool) CleanupTarget {
@@ -1148,9 +1248,9 @@ func (p *DevArtifactsPlugin) devArtifactTarget(targetType, name, path string, by
 
 func devArtifactTier(targetType string) string {
 	switch targetType {
-	case "go-build-cache", "haskell-ghcup-cache":
+	case "go-build-cache", "haskell-ghcup-cache", "pnpm-store":
 		return CleanupTierSafe
-	case "lmstudio-models", "large-local-artifact":
+	case "lmstudio-models", "large-local-artifact", "temporary-proof-lane":
 		return CleanupTierDestructive
 	default:
 		return CleanupTierWarm
@@ -2341,6 +2441,34 @@ func (p *DevArtifactsPlugin) cleanGoBuildCache(ctx context.Context, level Cleanu
 	freed := safeBytesDiff(sizeBefore, sizeAfter)
 	if freed > 0 {
 		logger.Info("cleaned Go build cache", "freed_mb", freed/(1024*1024))
+	}
+	return freed
+}
+
+func (p *DevArtifactsPlugin) cleanPnpmStore(ctx context.Context, home string, level CleanupLevel, logger *slog.Logger) int64 {
+	if level < LevelModerate {
+		return 0
+	}
+	if _, err := exec.LookPath("pnpm"); err != nil {
+		return 0
+	}
+
+	storePath := pnpmStorePath(home)
+	sizeBefore := getDirSize(storePath)
+	if sizeBefore == 0 {
+		return 0
+	}
+
+	logger.Debug("pruning pnpm store", "path", storePath)
+	if output, err := exec.CommandContext(ctx, "pnpm", "store", "prune").CombinedOutput(); err != nil {
+		logger.Debug("pnpm store prune failed", "error", err, "output", strings.TrimSpace(string(output)))
+		return 0
+	}
+
+	sizeAfter := getDirSize(storePath)
+	freed := safeBytesDiff(sizeBefore, sizeAfter)
+	if freed > 0 {
+		logger.Info("pruned pnpm store", "freed_mb", freed/(1024*1024))
 	}
 	return freed
 }

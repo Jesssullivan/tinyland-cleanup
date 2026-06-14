@@ -69,13 +69,23 @@ Runtime boundary:
 - moderate, aggressive, and critical classify stale repository cache, disk
   cache, and Bazelisk download entries as `delete_cache_tier` only when the
   total Bazel footprint exceeds `max_total_gb`;
-- real cleanup skips Bazel mutation if active Bazel process inspection fails;
 - cache-tier cleanup is skipped while active Bazel or Bazelisk client commands
   are visible;
 - process-visible explicit `--output_base` directories are included in the plan
   even when they are outside configured output-user roots; active clients and
   idle/server-only output-base visibility protect only their own output base and
   do not globally block stale unrelated output-base cleanup;
+- partial output-base directories with `execroot/` but missing the full
+  `action_cache/` + `server/` shape are reported as
+  `partial_output_base` and can be deleted when stale, inactive, and outside
+  retention;
+- output-user-root repository caches such as `_bazel_$USER/cache/repos/v1` are
+  reported as `repository_cache` candidates instead of being hidden under the
+  parent `_bazel_$USER` tree;
+- if active Bazel process inspection fails, cleanup continues with
+  candidate-local evidence only; idle-server shutdown remains unavailable
+  without process visibility, but stale inactive output bases and cache tiers
+  can still be handled when their own local activity checks are clear;
 - aggressive and critical cleanup may classify stale idle-server-only output
   bases as `stop_idle_server_then_delete_output_base` when
   `allow_stop_idle_servers` is enabled; real cleanup runs

@@ -328,6 +328,12 @@ func TestDevArtifactsConfigDefaults(t *testing.T) {
 	if !cfg.DevArtifacts.ZigArtifacts {
 		t.Error("DevArtifacts.ZigArtifacts should be true by default")
 	}
+	if cfg.DevArtifacts.AgentWorktreeArtifacts {
+		t.Error("DevArtifacts.AgentWorktreeArtifacts should be false by default")
+	}
+	if cfg.DevArtifacts.PnpmStore {
+		t.Error("DevArtifacts.PnpmStore should be false by default")
+	}
 	if !cfg.DevArtifacts.GoBuildCache {
 		t.Error("DevArtifacts.GoBuildCache should be true by default")
 	}
@@ -578,6 +584,19 @@ func TestDarwinDevCacheDefaults(t *testing.T) {
 	if cfg.DarwinDevCaches.Bazelisk.KeepLatest != 2 {
 		t.Errorf("DarwinDevCaches.Bazelisk.KeepLatest should default to 2, got %d", cfg.DarwinDevCaches.Bazelisk.KeepLatest)
 	}
+	for name, tool := range map[string]DarwinDevCacheToolConfig{
+		"NPM":      cfg.DarwinDevCaches.NPM,
+		"UV":       cfg.DarwinDevCaches.UV,
+		"Bun":      cfg.DarwinDevCaches.Bun,
+		"OpenCode": cfg.DarwinDevCaches.OpenCode,
+	} {
+		if !tool.Enabled {
+			t.Errorf("DarwinDevCaches.%s.Enabled should default to true", name)
+		}
+		if tool.StaleAfterDays != 14 {
+			t.Errorf("DarwinDevCaches.%s.StaleAfterDays should default to 14, got %d", name, tool.StaleAfterDays)
+		}
+	}
 	if !cfg.DarwinDevCaches.VSCode.Enabled {
 		t.Error("DarwinDevCaches.VSCode.Enabled should default to true")
 	}
@@ -602,6 +621,8 @@ func TestLoadConfigWithNewFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	content := `
+policy:
+  minimum_free_gb: 25
 enable:
   dev_artifacts: true
   bazel: true
@@ -622,6 +643,8 @@ dev_artifacts:
   python_venvs: true
   rust_targets: false
   go_build_cache: true
+  agent_worktree_artifacts: false
+  pnpm_store: false
   haskell_cache: false
   lmstudio_models: true
   protect_paths:
@@ -696,6 +719,18 @@ darwin_dev_caches:
   pip:
     enabled: true
     stale_after_days: 7
+  npm:
+    enabled: true
+    stale_after_days: 6
+  uv:
+    enabled: false
+    stale_after_days: 8
+  bun:
+    enabled: true
+    stale_after_days: 9
+  opencode:
+    enabled: true
+    stale_after_days: 11
   vscode:
     enabled: true
     stale_after_days: 10
@@ -715,6 +750,9 @@ darwin_dev_caches:
 
 	if !cfg.Enable.DevArtifacts {
 		t.Error("Enable.DevArtifacts should be true")
+	}
+	if cfg.Policy.MinimumFreeGB != 25 {
+		t.Errorf("Policy.MinimumFreeGB should be 25 per config, got %d", cfg.Policy.MinimumFreeGB)
 	}
 	if !cfg.Enable.Bazel {
 		t.Error("Enable.Bazel should be true")
@@ -748,6 +786,12 @@ darwin_dev_caches:
 	}
 	if cfg.DevArtifacts.RustTargets {
 		t.Error("DevArtifacts.RustTargets should be false per config")
+	}
+	if cfg.DevArtifacts.AgentWorktreeArtifacts {
+		t.Error("DevArtifacts.AgentWorktreeArtifacts should be false per config")
+	}
+	if cfg.DevArtifacts.PnpmStore {
+		t.Error("DevArtifacts.PnpmStore should be false per config")
 	}
 	if !cfg.DevArtifacts.ZigArtifacts {
 		t.Error("DevArtifacts.ZigArtifacts should stay true by default when omitted")
@@ -907,6 +951,21 @@ darwin_dev_caches:
 	}
 	if cfg.DarwinDevCaches.Pip.StaleAfterDays != 7 {
 		t.Errorf("DarwinDevCaches.Pip.StaleAfterDays should be 7 per config, got %d", cfg.DarwinDevCaches.Pip.StaleAfterDays)
+	}
+	if cfg.DarwinDevCaches.NPM.StaleAfterDays != 6 {
+		t.Errorf("DarwinDevCaches.NPM.StaleAfterDays should be 6 per config, got %d", cfg.DarwinDevCaches.NPM.StaleAfterDays)
+	}
+	if cfg.DarwinDevCaches.UV.Enabled {
+		t.Error("DarwinDevCaches.UV.Enabled should be false per config")
+	}
+	if cfg.DarwinDevCaches.UV.StaleAfterDays != 8 {
+		t.Errorf("DarwinDevCaches.UV.StaleAfterDays should be 8 per config, got %d", cfg.DarwinDevCaches.UV.StaleAfterDays)
+	}
+	if cfg.DarwinDevCaches.Bun.StaleAfterDays != 9 {
+		t.Errorf("DarwinDevCaches.Bun.StaleAfterDays should be 9 per config, got %d", cfg.DarwinDevCaches.Bun.StaleAfterDays)
+	}
+	if cfg.DarwinDevCaches.OpenCode.StaleAfterDays != 11 {
+		t.Errorf("DarwinDevCaches.OpenCode.StaleAfterDays should be 11 per config, got %d", cfg.DarwinDevCaches.OpenCode.StaleAfterDays)
 	}
 	if cfg.DarwinDevCaches.VSCode.StaleAfterDays != 10 {
 		t.Errorf("DarwinDevCaches.VSCode.StaleAfterDays should be 10 per config, got %d", cfg.DarwinDevCaches.VSCode.StaleAfterDays)
