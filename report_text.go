@@ -73,6 +73,14 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 			return err
 		}
 	}
+	if report.MinimumFreeBytes > 0 {
+		if _, err := fmt.Fprintf(w, "minimum free: need %s free, deficit %s\n",
+			formatByteCount(int64(report.MinimumFreeBytes)),
+			formatByteCount(report.MinimumFreeDeficitBytes),
+		); err != nil {
+			return err
+		}
+	}
 	if report.StopReason != "" {
 		if _, err := fmt.Fprintf(w, "stop: %s\n", report.StopReason); err != nil {
 			return err

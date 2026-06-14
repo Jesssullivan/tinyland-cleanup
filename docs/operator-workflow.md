@@ -182,28 +182,31 @@ and active editor or IDE processes.
 
 For workspace build artifacts, the `dev-artifacts` plan reports rebuildable
 targets such as `node_modules`, Python virtualenvs, Rust `target/` directories,
-Zig `.zig-cache` and `zig-out` directories, Go build cache, Haskell caches,
-opt-in LM Studio model caches, and review-only large local disk/image artifacts
-such as `.dmg`, `.img`, `.qcow2`, `.raw`, `.iso`, `.sparsebundle`, `.utm`,
-`.pvm`, and `.vmwarevm` targets. Warning level reports only; moderate and above
-mark eligible stale artifacts as deletion or cache-clean targets while
-preserving configured protected paths. Large local disk/image artifacts are
-always protected and excluded from estimated reclaim because they can be
-developer-owned state. Mounted disk images are reported as active protected
-targets with their mount point so operators know to detach them before any
-manual cleanup or compaction. Sparsebundle targets also report logical size
-from `Info.plist` when available; detached APFS sparsebundles may still reject
-`hdiutil compact`, so treat them as manual migrate/delete decisions rather than
-automatic reclaim. The plan also surfaces large top-level temporary
-proof/output directories from configured `dev_artifacts.temp_scan_paths`, but
-those root targets are review-only and excluded from estimated reclaim. For
-stale inactive temporary roots, known generated subdirectories such as Rust
-`target/`, `node_modules`, Python virtualenvs, and Zig outputs can still appear
-as narrower reclaim candidates so cleanup can preserve the worktree or proof
-root while pruning rebuildable output. Active process command lines that
-reference the temp root mark the root active, suppress nested generated
-cleanup, and avoid full size walks of that root during dry-run planning. The
-plan also protects matching artifact families when active
+Zig `.zig-cache` and `zig-out` directories, opt-in agent worktree Rust
+`target/` directories under roots such as `~/.claude/worktrees`, opt-in pnpm
+store pruning, Go build cache, Haskell caches, opt-in LM Studio model caches,
+and review-only large local disk/image artifacts such as `.dmg`, `.img`,
+`.qcow2`, `.raw`, `.iso`, `.sparsebundle`, `.utm`, `.pvm`, and `.vmwarevm`
+targets. Warning level reports only; moderate and above mark eligible stale
+artifacts as deletion or cache-clean targets while preserving configured
+protected paths. Large local disk/image artifacts are always protected and
+excluded from estimated reclaim because they can be developer-owned state.
+Mounted disk images are reported as active protected targets with their mount
+point so operators know to detach them before any manual cleanup or compaction.
+Sparsebundle targets also report logical size from `Info.plist` when available;
+detached APFS sparsebundles may still reject `hdiutil compact`, so treat them
+as manual migrate/delete decisions rather than automatic reclaim. The plan also
+surfaces large top-level temporary proof/output directories from configured
+`dev_artifacts.temp_scan_paths`; recognized proof-lane roots such as
+`t2035b-mi.*` are classified separately, but those root targets are still
+review-only and excluded from estimated reclaim. For stale inactive temporary
+roots, known generated subdirectories such as Rust `target/`, `node_modules`,
+Python virtualenvs, and Zig outputs can still appear as narrower reclaim
+candidates so cleanup can preserve the worktree or proof root while pruning
+rebuildable output. Active process command lines that reference the temp root
+mark the root active, suppress nested generated cleanup, and avoid full size
+walks of that root during dry-run planning. The plan also protects matching
+artifact families when active
 package manager, compiler, language server, runtime, or LM Studio processes are
 visible, and it preserves any candidate artifact directory that contains files
 tracked by Git. For `node_modules`, Python virtualenvs, Rust `target/`, and Zig

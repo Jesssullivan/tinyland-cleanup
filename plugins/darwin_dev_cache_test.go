@@ -60,7 +60,7 @@ func TestDarwinDeveloperCacheTargetsClassifyProtectedVersions(t *testing.T) {
 		t.Fatalf("expected two newest Bazelisk caches to be protected: v2=%#v v3=%#v", bazeliskV2, bazeliskV3)
 	}
 
-	pip := findCleanupTarget(t, targets, "pip", "pip")
+	pip := findCleanupTarget(t, targets, "pip", "Library/Caches/pip")
 	if pip.Bytes <= 0 {
 		t.Fatalf("expected pip cache size to be measured: %#v", pip)
 	}
@@ -155,6 +155,44 @@ func TestDarwinDeveloperCacheTargetsEditorCaches(t *testing.T) {
 	}
 	if _, err := os.Stat(vscodeSettings); err != nil {
 		t.Fatalf("test settings fixture should exist: %v", err)
+	}
+}
+
+func TestDarwinDeveloperCacheTargetsSafePackageAndAgentCaches(t *testing.T) {
+	home := t.TempDir()
+	cfg := config.DefaultConfig().DarwinDevCaches
+	cfg.Enforce = true
+
+	targetDirs := []string{
+		filepath.Join(home, ".npm", "_cacache"),
+		filepath.Join(home, ".cache", "uv"),
+		filepath.Join(home, ".cache", "bun"),
+		filepath.Join(home, ".cache", "opencode"),
+	}
+	for _, dir := range targetDirs {
+		writeFileAt(t, filepath.Join(dir, "cache.bin"), "cache")
+		mustChtimes(t, dir, time.Now().Add(-30*24*time.Hour))
+	}
+
+	plugin := &CachePlugin{}
+	targets := plugin.darwinDeveloperCacheTargets(home, cfg, map[string]bool{}, LevelModerate)
+
+	for _, want := range []struct {
+		targetType string
+		name       string
+	}{
+		{"npm-cache", ".npm/_cacache"},
+		{"uv-cache", ".cache/uv"},
+		{"bun-cache", ".cache/bun"},
+		{"opencode-cache", ".cache/opencode"},
+	} {
+		target := findCleanupTarget(t, targets, want.targetType, want.name)
+		if target.Action != "delete" || target.Protected {
+			t.Fatalf("expected %s %s to be an opt-in delete target: %#v", want.targetType, want.name, target)
+		}
+		if target.Tier != CleanupTierSafe || target.Reclaim != CleanupReclaimHost {
+			t.Fatalf("unexpected policy for %s %s: %#v", want.targetType, want.name, target)
+		}
 	}
 }
 

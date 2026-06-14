@@ -936,6 +936,35 @@ func TestPlanTemporaryArtifactsReportsReviewOnlyTargets(t *testing.T) {
 	}
 }
 
+func TestPlanTemporaryArtifactsClassifiesProofLanes(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	proofLane := filepath.Join(tmpDir, "t2035b-mi.0WfaPi")
+	if err := os.MkdirAll(proofLane, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proofLane, "artifact"), []byte("artifact"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(proofLane, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	var targets []CleanupTarget
+	cfg := config.DefaultConfig().DevArtifacts
+	cfg.NixTempRoots = false
+	p.planTemporaryArtifacts(context.Background(), tmpDir, 1, 6*time.Hour, cfg, nil, &targets)
+
+	target := findDevArtifactTarget(t, targets, "temporary-proof-lane", proofLane)
+	if target.Action != "review_temp_proof_lane" || !target.Protected || target.Reclaim != CleanupReclaimNone {
+		t.Fatalf("expected proof lane to remain review-only, got %#v", target)
+	}
+	if !strings.Contains(target.Reason, "nested rebuildable artifacts") {
+		t.Fatalf("expected nested-artifact guidance in reason, got %q", target.Reason)
+	}
+}
+
 func TestPlanTemporaryArtifactsDoesNotChargeSymlinkTargets(t *testing.T) {
 	p := NewDevArtifactsPlugin()
 	tmpDir := t.TempDir()
@@ -967,6 +996,57 @@ func TestPlanTemporaryArtifactsDoesNotChargeSymlinkTargets(t *testing.T) {
 		if target.Path == root {
 			t.Fatalf("symlink forest should not be reported as large temp artifact, got %#v", target)
 		}
+	}
+}
+
+func TestPlanCleanupReportsAgentWorktreeRustTargets(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	worktree := filepath.Join(home, ".claude", "worktrees", "session-a", "repo")
+	targetDir := filepath.Join(worktree, "target", "debug")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cargoToml := filepath.Join(worktree, "Cargo.toml")
+	if err := os.WriteFile(cargoToml, []byte("[package]\nname = \"agent-worktree\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "artifact"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(cargoToml, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := agentWorktreeArtifactConfig()
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, slog.Default())
+
+	target := findDevArtifactTarget(t, plan.Targets, "rust-target", filepath.Join(worktree, "target"))
+	if target.Action != "delete" || target.Protected {
+		t.Fatalf("expected agent worktree Rust target to be deletable, got %#v", target)
+	}
+}
+
+func TestPlanCleanupReportsPnpmStorePruneTarget(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	store := filepath.Join(home, ".local", "share", "pnpm", "store", "v3")
+	if err := os.MkdirAll(store, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(store, "pkg"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := pnpmStoreConfig()
+	plan := p.PlanCleanup(context.Background(), LevelModerate, cfg, slog.Default())
+
+	target := findDevArtifactTarget(t, plan.Targets, "pnpm-store", filepath.Join(home, ".local", "share", "pnpm"))
+	if target.Action != "clean-cache" || target.Protected || target.Tier != CleanupTierSafe {
+		t.Fatalf("expected pnpm store prune target, got %#v", target)
 	}
 }
 
@@ -1155,6 +1235,40 @@ func tempGeneratedArtifactConfig(tmpDir string) *config.Config {
 	cfg.DevArtifacts.PythonVenvs = false
 	cfg.DevArtifacts.RustTargets = true
 	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.GoBuildCache = false
+	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.LargeLocalArtifacts = false
+	cfg.DevArtifacts.LMStudioModels = false
+	return cfg
+}
+
+func agentWorktreeArtifactConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DevArtifacts.ScanPaths = nil
+	cfg.DevArtifacts.TempArtifacts = false
+	cfg.DevArtifacts.AgentWorktreeArtifacts = true
+	cfg.DevArtifacts.NodeModules = false
+	cfg.DevArtifacts.PythonVenvs = false
+	cfg.DevArtifacts.RustTargets = true
+	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.PnpmStore = false
+	cfg.DevArtifacts.GoBuildCache = false
+	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.LargeLocalArtifacts = false
+	cfg.DevArtifacts.LMStudioModels = false
+	return cfg
+}
+
+func pnpmStoreConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DevArtifacts.ScanPaths = nil
+	cfg.DevArtifacts.TempArtifacts = false
+	cfg.DevArtifacts.AgentWorktreeArtifacts = false
+	cfg.DevArtifacts.NodeModules = false
+	cfg.DevArtifacts.PythonVenvs = false
+	cfg.DevArtifacts.RustTargets = false
+	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.PnpmStore = true
 	cfg.DevArtifacts.GoBuildCache = false
 	cfg.DevArtifacts.HaskellCache = false
 	cfg.DevArtifacts.LargeLocalArtifacts = false

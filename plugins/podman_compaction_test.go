@@ -23,6 +23,38 @@ func TestParsePodmanMachineListSelectsStoppedDefault(t *testing.T) {
 	}
 }
 
+func TestPodmanMachineFallbackDiscoversConfigAndDataDisk(t *testing.T) {
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".config", "containers", "podman", "machine", "applehv")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "podman-machine-default.json"), []byte(`{"ImagePath":{"Path":"/tmp/podman.raw"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if name := podmanMachineNameFromConfig(home, "applehv"); name != "podman-machine-default" {
+		t.Fatalf("expected config fallback machine name, got %q", name)
+	}
+
+	dataDir := filepath.Join(home, ".local", "share", "containers", "podman", "machine", "applehv")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diskPath := filepath.Join(dataDir, "podman-machine-default-arm64.raw")
+	if err := os.WriteFile(diskPath, []byte("raw disk placeholder"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	found, err := podmanMachineDiskPathFromDataDirs(home, "podman-machine-default", []string{"applehv"})
+	if err != nil {
+		t.Fatalf("expected data-dir disk fallback, got error: %v", err)
+	}
+	if found != diskPath {
+		t.Fatalf("expected fallback disk path %q, got %q", diskPath, found)
+	}
+}
+
 func TestPodmanCriticalPlanReportsStoppedMachineDisk(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

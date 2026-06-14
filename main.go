@@ -141,28 +141,28 @@ func main() {
 		return
 	}
 
-	// Setup log file directory
-	if err := ensureLogDir(cfg.LogFile); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create log directory: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Setup logging - write to both stderr and log file
 	logLevel := slog.LevelInfo
 	if *verbose {
 		logLevel = slog.LevelDebug
 	}
 
-	// Open log file for writing
-	logFile, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open log file: %v\n", err)
-		os.Exit(1)
+	logWriters := []io.Writer{os.Stderr}
+	var logFile *os.File
+	if cfg.LogFile != "" {
+		if err := ensureLogDir(cfg.LogFile); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to create log directory for %s: %v; continuing with stderr logging only\n", cfg.LogFile, err)
+		} else if file, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to open log file %s: %v; continuing with stderr logging only\n", cfg.LogFile, err)
+		} else {
+			logFile = file
+			defer logFile.Close()
+			logWriters = append(logWriters, logFile)
+		}
 	}
-	defer logFile.Close()
 
-	// Create multi-writer for both stderr and log file
-	multiWriter := io.MultiWriter(os.Stderr, logFile)
+	// Create multi-writer for stderr and the configured log file when available.
+	multiWriter := io.MultiWriter(logWriters...)
 	logger := slog.New(slog.NewTextHandler(multiWriter, &slog.HandlerOptions{
 		Level: logLevel,
 	}))
@@ -293,6 +293,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 	if cooldown > 0 {
 		report.CooldownSeconds = int64(cooldown / time.Second)
 	}
+	report.MinimumFreeBytes = d.minimumFreeBytes()
 	report.StateFile = expandPathHome(d.config.Policy.StateFile)
 	state, stateErr := d.loadStateForCycle()
 	if stateErr != nil {
@@ -457,6 +458,12 @@ type cycleReport struct {
 	TargetFreeDeficitBytes int64 `json:"target_free_deficit_bytes"`
 	// TargetFreeMet reports whether the host already satisfies the target.
 	TargetFreeMet bool `json:"target_free_met"`
+	// MinimumFreeBytes is an absolute free-space runway that bypasses cooldown while unmet.
+	MinimumFreeBytes uint64 `json:"minimum_free_bytes,omitempty"`
+	// MinimumFreeDeficitBytes is the remaining free-space gap to the absolute runway.
+	MinimumFreeDeficitBytes int64 `json:"minimum_free_deficit_bytes,omitempty"`
+	// MinimumFreeMet reports whether the host already satisfies the absolute runway.
+	MinimumFreeMet bool `json:"minimum_free_met"`
 	// StopReason explains why remaining cleanup plugins were skipped.
 	StopReason string `json:"stop_reason,omitempty"`
 	// PlannedEstimatedBytesFreed aggregates dry-run plugin plan estimates.
@@ -688,6 +695,9 @@ func (d *daemon) loadStateForCycle() (*cleanupState, error) {
 }
 
 func (d *daemon) shouldApplyCooldown(report cycleReport, level monitor.CleanupLevel) bool {
+	if report.MinimumFreeBytes > 0 && !report.MinimumFreeMet {
+		return false
+	}
 	return !d.dryRun &&
 		!report.ForcedLevel &&
 		level < d.cooldownBypassLevel() &&
@@ -729,6 +739,16 @@ func (d *daemon) updateHostFreeAfter(report *cycleReport, beforeStats *monitor.D
 }
 
 func (d *daemon) updateTargetFreeStatus(report *cycleReport, stats *monitor.DiskStats) {
+	if report.MinimumFreeBytes > 0 {
+		if stats.Free >= report.MinimumFreeBytes {
+			report.MinimumFreeDeficitBytes = 0
+			report.MinimumFreeMet = true
+		} else {
+			report.MinimumFreeDeficitBytes = int64(report.MinimumFreeBytes - stats.Free)
+			report.MinimumFreeMet = false
+		}
+	}
+
 	targetFreeBytes, ok := targetFreeBytes(stats.Total, d.config.TargetFree)
 	if !ok {
 		return
@@ -744,6 +764,13 @@ func (d *daemon) updateTargetFreeStatus(report *cycleReport, stats *monitor.Disk
 
 	report.TargetFreeDeficitBytes = int64(targetFreeBytes - stats.Free)
 	report.TargetFreeMet = false
+}
+
+func (d *daemon) minimumFreeBytes() uint64 {
+	if d.config == nil || d.config.Policy.MinimumFreeGB <= 0 {
+		return 0
+	}
+	return uint64(d.config.Policy.MinimumFreeGB) * 1024 * 1024 * 1024
 }
 
 func targetFreeBytes(totalBytes uint64, targetUsedPercent int) (uint64, bool) {

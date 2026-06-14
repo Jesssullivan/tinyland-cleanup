@@ -19,6 +19,10 @@ func TestDiscoverBazelRootCandidates(t *testing.T) {
 	root := t.TempDir()
 	outputBase := filepath.Join(root, "_bazel_jess", "abc123")
 	makeBazelOutputBase(t, outputBase)
+	partialOutputBase := filepath.Join(root, "_bazel_jess", "partial123")
+	mustMkdir(t, filepath.Join(partialOutputBase, "execroot", "repo"))
+	repoCache := filepath.Join(root, "_bazel_jess", "cache", "repos", "v1")
+	mustMkdir(t, filepath.Join(repoCache, "content_addressable"))
 	explicitOutputBase := filepath.Join(root, "tinyvectors-external-smoke-ob")
 	makeBazelOutputBase(t, explicitOutputBase)
 	mustMkdir(t, filepath.Join(root, "repository_cache"))
@@ -36,14 +40,28 @@ func TestDiscoverBazelRootCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resolvedPartialOutputBase, err := filepath.EvalSymlinks(partialOutputBase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedRepoCache, err := filepath.EvalSymlinks(repoCache)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	for _, candidateType := range []string{"output_base", "repository_cache", "disk_cache", "remote_cache"} {
+	for _, candidateType := range []string{"output_base", "partial_output_base", "repository_cache", "disk_cache", "remote_cache"} {
 		if !byType[candidateType] {
 			t.Fatalf("expected %s candidate, got %#v", candidateType, candidates)
 		}
 	}
 	if !byPath[resolvedExplicitOutputBase] {
 		t.Fatalf("expected direct explicit output base %s, got %#v", explicitOutputBase, candidates)
+	}
+	if !byPath[resolvedPartialOutputBase] {
+		t.Fatalf("expected partial output base %s, got %#v", partialOutputBase, candidates)
+	}
+	if !byPath[resolvedRepoCache] {
+		t.Fatalf("expected output-user-root repository cache %s, got %#v", repoCache, candidates)
 	}
 }
 
@@ -309,6 +327,38 @@ func TestBazelPlanTargetsDeletesCacheTiersOnlyWhenBudgetExceeded(t *testing.T) {
 	}
 	if targets[0].Action != "review_cache_budget" {
 		t.Fatalf("within-budget cache tier action = %q, want review_cache_budget", targets[0].Action)
+	}
+}
+
+func TestBazelPlanTargetsDeletesStalePartialOutputBase(t *testing.T) {
+	now := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	cfg := config.BazelConfig{
+		KeepRecentOutputBases: 0,
+		StaleAfter:            "14d",
+		CriticalStaleAfter:    "3d",
+	}
+	candidates := []bazelCandidate{
+		{
+			Type:     "partial_output_base",
+			Name:     "partial",
+			Path:     "/tmp/partial",
+			ModTime:  now.Add(-30 * 24 * time.Hour),
+			Physical: 10,
+		},
+	}
+
+	targets, total := bazelPlanTargets(candidates, cfg, LevelModerate, now, false)
+	if total != 10 {
+		t.Fatalf("total physical = %d, want 10", total)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("expected one target, got %d", len(targets))
+	}
+	if targets[0].Action != "delete_partial_output_base" || targets[0].Protected {
+		t.Fatalf("partial output base should be an eligible delete target: %#v", targets[0])
+	}
+	if targets[0].Tier != CleanupTierWarm || targets[0].Reclaim != CleanupReclaimHost {
+		t.Fatalf("partial output base policy = tier %q reclaim %q, want warm/host", targets[0].Tier, targets[0].Reclaim)
 	}
 }
 

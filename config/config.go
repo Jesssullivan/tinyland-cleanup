@@ -159,6 +159,8 @@ type PolicyConfig struct {
 	Cooldown string `yaml:"cooldown"`
 	// CooldownBypassLevel is the minimum cleanup level that ignores cooldown.
 	CooldownBypassLevel string `yaml:"cooldown_bypass_level"`
+	// MinimumFreeGB bypasses cooldown until the monitored filesystem has this much free space.
+	MinimumFreeGB int `yaml:"minimum_free_gb"`
 	// StateFile stores daemon cleanup state such as per-plugin last-run timestamps.
 	StateFile string `yaml:"state_file"`
 }
@@ -321,6 +323,10 @@ type DevArtifactsConfig struct {
 	RustTargets bool `yaml:"rust_targets"`
 	// ZigArtifacts enables Zig .zig-cache/ and zig-out/ cleanup
 	ZigArtifacts bool `yaml:"zig_artifacts"`
+	// AgentWorktreeArtifacts enables cleanup of generated outputs inside agent worktree roots.
+	AgentWorktreeArtifacts bool `yaml:"agent_worktree_artifacts"`
+	// PnpmStore enables pnpm store prune for the rebuildable global package store.
+	PnpmStore bool `yaml:"pnpm_store"`
 	// GoBuildCache enables Go build cache cleanup
 	GoBuildCache bool `yaml:"go_build_cache"`
 	// HaskellCache enables .ghcup/cache and .cabal/store cleanup
@@ -352,6 +358,14 @@ type DarwinDevCachesConfig struct {
 	Bazelisk DarwinDevCacheToolConfig `yaml:"bazelisk"`
 	// Pip controls pip cache planning.
 	Pip DarwinDevCacheToolConfig `yaml:"pip"`
+	// NPM controls npm package cache planning.
+	NPM DarwinDevCacheToolConfig `yaml:"npm"`
+	// UV controls uv package cache planning.
+	UV DarwinDevCacheToolConfig `yaml:"uv"`
+	// Bun controls Bun cache planning.
+	Bun DarwinDevCacheToolConfig `yaml:"bun"`
+	// OpenCode controls opencode cache planning.
+	OpenCode DarwinDevCacheToolConfig `yaml:"opencode"`
 	// VSCode controls Visual Studio Code cache planning.
 	VSCode DarwinDevCacheToolConfig `yaml:"vscode"`
 	// Cursor controls Cursor cache planning.
@@ -426,6 +440,7 @@ func DefaultConfig() *Config {
 		Policy: PolicyConfig{
 			Cooldown:            "30m",
 			CooldownBypassLevel: "critical",
+			MinimumFreeGB:       0,
 			StateFile:           stateFile,
 		},
 		LogFile: logFile,
@@ -521,6 +536,8 @@ func DefaultConfig() *Config {
 			PythonVenvs:             true,
 			RustTargets:             true,
 			ZigArtifacts:            true,
+			AgentWorktreeArtifacts:  false,
+			PnpmStore:               false,
 			GoBuildCache:            true,
 			HaskellCache:            true,
 			LMStudioModels:          false,
@@ -547,6 +564,22 @@ func DefaultConfig() *Config {
 				KeepLatest: 2,
 			},
 			Pip: DarwinDevCacheToolConfig{
+				Enabled:        true,
+				StaleAfterDays: 14,
+			},
+			NPM: DarwinDevCacheToolConfig{
+				Enabled:        true,
+				StaleAfterDays: 14,
+			},
+			UV: DarwinDevCacheToolConfig{
+				Enabled:        true,
+				StaleAfterDays: 14,
+			},
+			Bun: DarwinDevCacheToolConfig{
+				Enabled:        true,
+				StaleAfterDays: 14,
+			},
+			OpenCode: DarwinDevCacheToolConfig{
 				Enabled:        true,
 				StaleAfterDays: 14,
 			},

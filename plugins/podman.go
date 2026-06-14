@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -976,9 +977,13 @@ func detectMachine() (bool, string) {
 	cmd := exec.Command("podman", "machine", "list", "--format", "{{.Name}}\t{{.Running}}")
 	output, err := cmd.Output()
 	if err != nil {
-		return false, ""
+		return false, detectMachineNameFromConfig()
 	}
-	return parsePodmanMachineList(string(output))
+	running, name := parsePodmanMachineList(string(output))
+	if name == "" {
+		name = detectMachineNameFromConfig()
+	}
+	return running, name
 }
 
 func parsePodmanMachineList(output string) (bool, string) {
@@ -1010,6 +1015,73 @@ func parsePodmanMachineList(output string) (bool, string) {
 		return false, defaultMachine
 	}
 	return false, firstMachine
+}
+
+func detectMachineNameFromConfig() string {
+	home, _ := os.UserHomeDir()
+	return podmanMachineNameFromConfig(home, detectMachineProvider())
+}
+
+func podmanMachineNameFromConfig(home string, preferredProvider string) string {
+	for _, provider := range podmanProviderSearchOrder(preferredProvider) {
+		configDir := filepath.Join(home, ".config", "containers", "podman", "machine", provider)
+		if name := podmanMachineNameFromConfigDir(configDir); name != "" {
+			return name
+		}
+	}
+
+	for _, provider := range podmanProviderSearchOrder(preferredProvider) {
+		dataDir := filepath.Join(home, ".local", "share", "containers", "podman", "machine", provider)
+		if entries, err := os.ReadDir(dataDir); err == nil && len(entries) > 0 {
+			return "podman-machine-default"
+		}
+	}
+	return ""
+}
+
+func podmanProviderSearchOrder(preferredProvider string) []string {
+	seen := map[string]bool{}
+	var providers []string
+	add := func(provider string) {
+		provider = strings.TrimSpace(provider)
+		if provider == "" || seen[provider] {
+			return
+		}
+		seen[provider] = true
+		providers = append(providers, provider)
+	}
+	add(preferredProvider)
+	add("applehv")
+	add("libkrun")
+	add("qemu")
+	return providers
+}
+
+func podmanMachineNameFromConfigDir(configDir string) string {
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		return ""
+	}
+
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		name := strings.TrimSuffix(entry.Name(), ".json")
+		if name == "" {
+			continue
+		}
+		if name == "podman-machine-default" {
+			return name
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
 }
 
 // getPodmanSocket returns the Podman socket path.
@@ -1851,15 +1923,57 @@ func (p *PodmanPlugin) getMachineDiskPath(ctx context.Context) (string, error) {
 
 	// Strategy 2: Read internal config JSON from known provider paths
 	home, _ := os.UserHomeDir()
-	providers := []string{"libkrun", "applehv", "qemu"}
+	providers := podmanProviderSearchOrder(p.environment.VMProvider)
 	for _, provider := range providers {
 		configDir := filepath.Join(home, ".config/containers/podman/machine", provider)
 		if path, err := p.readDiskPathFromConfig(configDir); err == nil {
 			return path, nil
 		}
 	}
+	if path, err := podmanMachineDiskPathFromDataDirs(home, p.environment.MachineName, providers); err == nil {
+		return path, nil
+	}
 
 	return "", fmt.Errorf("disk path not found in machine config")
+}
+
+func podmanMachineDiskPathFromDataDirs(home string, machineName string, providers []string) (string, error) {
+	if machineName == "" {
+		return "", fmt.Errorf("machine name is empty")
+	}
+	for _, provider := range providers {
+		dataDir := filepath.Join(home, ".local", "share", "containers", "podman", "machine", provider)
+		if path := podmanMachineDiskPathFromDataDir(dataDir, machineName); path != "" {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("disk path not found in Podman machine data directories")
+}
+
+func podmanMachineDiskPathFromDataDir(dataDir string, machineName string) string {
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		return ""
+	}
+	var matches []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, machineName) {
+			continue
+		}
+		switch filepath.Ext(name) {
+		case ".raw", ".qcow2":
+			matches = append(matches, filepath.Join(dataDir, name))
+		}
+	}
+	sort.Strings(matches)
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[0]
 }
 
 // readDiskPathFromConfig reads the disk image path from a machine config JSON file.
