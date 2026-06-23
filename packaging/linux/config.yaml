@@ -13,6 +13,9 @@ policy:
   cooldown: 30m
   cooldown_bypass_level: critical
   state_file: /var/lib/tinyland-cleanup/state.json
+  # Back off inode-only critical escalation to the cooldown cadence after this
+  # many consecutive cycles fail to relieve inode pressure (0 = default 3).
+  inode_no_progress_limit: 3
 
 thresholds:
   warning: 80
