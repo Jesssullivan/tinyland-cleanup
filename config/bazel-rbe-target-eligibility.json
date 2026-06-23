@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "owner_issue": "TIN-2170",
+  "updated": "2026-06-23",
+  "platform": "gloriousflywheel-rbe-linux-x86_64",
+  "default_posture": "cache-forward local or CI execution; executor-backed mode is explicit-proof only",
+  "proved_target_classes": [],
+  "candidate_target_classes": [
+    {
+      "name": "bazel-cache-policy-contract",
+      "status": "candidate",
+      "labels": [
+        "//:bazel_cache_policy_check"
+      ],
+      "allowed_modes": [
+        "explicit-proof"
+      ],
+      "requirements": [
+        "shell and Python static policy checks only",
+        "declared repo configuration files only",
+        "no host mutation",
+        "no ambient secrets",
+        "no fleet reachability dependency"
+      ],
+      "proof_required": [
+        "run through scripts/bazel-rbe-proof.sh with BAZEL_REMOTE_EXECUTOR and BAZEL_REMOTE_CACHE",
+        "force execution with --remote_accept_cached=false",
+        "capture a proof artifact showing nonzero remote executor processes"
+      ],
+      "boundary": "This candidate does not prove //:all_tests, //..., Go toolchain execution, Nix evaluation, package builds, or cleanup runtime behavior."
+    }
+  ],
+  "blocked_target_classes": [
+    {
+      "name": "broad-go-and-presubmit-graph",
+      "labels": [
+        "//:all_tests",
+        "//...",
+        "//:tinyland-cleanup"
+      ],
+      "blockers": [
+        "broad presubmit has not been proved against a matching rules_go remote execution platform",
+        "platform-specific Darwin/Linux selects need executor parity proof",
+        "test sandbox behavior must be compared against local and shared-cache runs before marking eligible"
+      ]
+    },
+    {
+      "name": "host-cleanup-runtime",
+      "labels": [
+        "bazel run //:tinyland-cleanup",
+        "tinyland-cleanup --once",
+        "tinyland-cleanup daemon"
+      ],
+      "blockers": [
+        "cleanup runtime can inspect or mutate host cache and service state",
+        "operator dry-run and real cleanup semantics belong to the target host",
+        "remote execution would hide the machine under pressure"
+      ]
+    },
+    {
+      "name": "nix-packaging-and-release",
+      "labels": [
+        "nix build .#default",
+        "nix flake check",
+        ".github/workflows/release.yml"
+      ],
+      "blockers": [
+        "uses Nix store, host platform, and cache trust state",
+        "release artifacts remain under the Nix and GitHub release control planes",
+        "Attic and FlakeHub cache attachment is not Bazel remote execution"
+      ]
+    }
+  ],
+  "invariants": [
+    "Remote cache hits are not RBE proof.",
+    "Executor-backed proof requires both BAZEL_REMOTE_EXECUTOR and BAZEL_REMOTE_CACHE.",
+    "Attic and FlakeHub are Nix cache substrates, not Bazel remote execution substrates.",
+    "No broad presubmit or cleanup runtime target is RBE eligible until a target-class proof artifact exists.",
+    "Runner and IaC selection remains explicit; do not infer remote execution from branch names or cache attachment."
+  ]
+}

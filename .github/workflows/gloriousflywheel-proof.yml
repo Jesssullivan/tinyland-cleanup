@@ -4,17 +4,28 @@ on:
   workflow_dispatch:
     inputs:
       bazel_remote_cache:
-        description: Bazel remote cache URL
-        required: true
-        default: grpc://bazel-cache.nix-cache.svc.cluster.local:9092
+        description: Optional Bazel remote cache URL; runner-provided BAZEL_REMOTE_CACHE is used when omitted
+        required: false
+      bazel_remote_executor:
+        description: Optional Bazel remote executor URL for explicit RBE proof mode
+        required: false
+      remote_execution_platform:
+        description: Required when bazel_remote_executor is set
+        required: false
+      rbe_proof_target:
+        description: RBE proof target listed in config/bazel-rbe-target-eligibility.json
+        required: false
+        default: //:bazel_cache_policy_check
+      bazel_remote_upload:
+        description: Upload local results to the remote cache from this trusted proof run
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   shared-cache-proof:
-    name: Shared cache proof
+    name: Bazel cache and RBE proof
     runs-on: tinyland-nix
-    env:
-      BAZEL_REMOTE_CACHE: ${{ inputs.bazel_remote_cache }}
-      GF_BAZEL_SUBSTRATE_MODE: shared-cache-backed
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Go validation
@@ -26,5 +37,46 @@ jobs:
           GOFLAGS: -mod=vendor
       - name: Nix package
         run: nix build .#default --no-link --print-build-logs
-      - name: Bazel shared-cache test
+      - name: Apply Bazel proof inputs
+        env:
+          INPUT_BAZEL_REMOTE_CACHE: ${{ inputs.bazel_remote_cache }}
+          INPUT_BAZEL_REMOTE_EXECUTOR: ${{ inputs.bazel_remote_executor }}
+          INPUT_REMOTE_EXECUTION_PLATFORM: ${{ inputs.remote_execution_platform }}
+          INPUT_BAZEL_REMOTE_UPLOAD: ${{ inputs.bazel_remote_upload }}
+        run: |
+          if [ -n "$INPUT_BAZEL_REMOTE_CACHE" ]; then
+            echo "::add-mask::$INPUT_BAZEL_REMOTE_CACHE"
+          fi
+          if [ -n "$INPUT_BAZEL_REMOTE_EXECUTOR" ]; then
+            echo "::add-mask::$INPUT_BAZEL_REMOTE_EXECUTOR"
+          fi
+          {
+            if [ -n "$INPUT_BAZEL_REMOTE_CACHE" ]; then
+              printf 'BAZEL_REMOTE_CACHE=%s\n' "$INPUT_BAZEL_REMOTE_CACHE"
+            fi
+            if [ -n "$INPUT_BAZEL_REMOTE_EXECUTOR" ]; then
+              printf 'BAZEL_REMOTE_EXECUTOR=%s\n' "$INPUT_BAZEL_REMOTE_EXECUTOR"
+              printf 'GF_BAZEL_SUBSTRATE_MODE=executor-backed\n'
+              printf 'GF_RBE_PROOF_MODE=explicit\n'
+            fi
+            if [ -n "$INPUT_REMOTE_EXECUTION_PLATFORM" ]; then
+              printf 'GF_BAZEL_REMOTE_EXECUTION_PLATFORM=%s\n' "$INPUT_REMOTE_EXECUTION_PLATFORM"
+            fi
+            printf 'BAZEL_REMOTE_UPLOAD=%s\n' "$INPUT_BAZEL_REMOTE_UPLOAD"
+          } >> "$GITHUB_ENV"
+      - name: Classify Bazel substrate
+        run: |
+          if [ -n "${BAZEL_REMOTE_EXECUTOR:-}" ]; then
+            printf 'GF_BAZEL_SUBSTRATE_MODE=executor-backed\n' >> "$GITHUB_ENV"
+          elif [ -n "${BAZEL_REMOTE_CACHE:-}" ]; then
+            printf 'GF_BAZEL_SUBSTRATE_MODE=shared-cache-backed\n' >> "$GITHUB_ENV"
+          fi
+      - name: Bazel cache contract
+        run: bash scripts/validation/bazel-cache-contract.sh --strict
+      - name: Bazel cache-backed test
         run: nix shell nixpkgs#bazelisk --command bash scripts/bazel-cache-backed.sh test //...
+      - name: Bazel explicit RBE proof
+        if: ${{ inputs.bazel_remote_executor != '' }}
+        env:
+          RBE_PROOF_TARGET: ${{ inputs.rbe_proof_target }}
+        run: nix shell nixpkgs#bazelisk --command bash scripts/bazel-rbe-proof.sh --target "$RBE_PROOF_TARGET"

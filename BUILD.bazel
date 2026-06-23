@@ -12,6 +12,94 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 gazelle(name = "gazelle")
 
+exports_files([
+    ".bazelrc",
+    ".github/actionlint.yaml",
+    ".github/workflows/gloriousflywheel-proof.yml",
+    "config/bazel-rbe-target-eligibility.json",
+    "scripts/bazel-cache-backed.sh",
+    "scripts/bazel-rbe-proof.sh",
+    "scripts/validation/bazel-cache-contract.sh",
+    "scripts/validation/check-bazel-cache-policy.sh",
+    "scripts/validation/test-bazel-cache-backed-wrapper.sh",
+    "scripts/validation/test-bazel-cache-contract.sh",
+    "scripts/validation/test-bazel-rbe-proof-wrapper.sh",
+    "scripts/validation/validate-bazel-rbe-target-eligibility.py",
+])
+
+filegroup(
+    name = "bazel_control_plane_files",
+    srcs = [
+        ".bazelrc",
+        ".github/actionlint.yaml",
+        ".github/workflows/gloriousflywheel-proof.yml",
+        "config/bazel-rbe-target-eligibility.json",
+        "scripts/bazel-cache-backed.sh",
+        "scripts/bazel-rbe-proof.sh",
+        "scripts/validation/bazel-cache-contract.sh",
+        "scripts/validation/check-bazel-cache-policy.sh",
+        "scripts/validation/test-bazel-cache-backed-wrapper.sh",
+        "scripts/validation/test-bazel-cache-contract.sh",
+        "scripts/validation/test-bazel-rbe-proof-wrapper.sh",
+        "scripts/validation/validate-bazel-rbe-target-eligibility.py",
+    ],
+)
+
+sh_test(
+    name = "bazel_cache_policy_check",
+    srcs = ["scripts/validation/check-bazel-cache-policy.sh"],
+    data = [":bazel_control_plane_files"],
+    tags = [
+        "bazel-cache-policy",
+        "fast",
+        "presubmit",
+    ],
+)
+
+sh_test(
+    name = "bazel_cache_contract_check",
+    srcs = ["scripts/validation/test-bazel-cache-contract.sh"],
+    data = [":bazel_control_plane_files"],
+    tags = [
+        "bazel-cache-policy",
+        "fast",
+        "presubmit",
+    ],
+)
+
+sh_test(
+    name = "bazel_cache_backed_wrapper_check",
+    srcs = ["scripts/validation/test-bazel-cache-backed-wrapper.sh"],
+    data = [":bazel_control_plane_files"],
+    tags = [
+        "bazel-cache-policy",
+        "fast",
+        "presubmit",
+    ],
+)
+
+sh_test(
+    name = "bazel_rbe_proof_wrapper_check",
+    srcs = ["scripts/validation/test-bazel-rbe-proof-wrapper.sh"],
+    data = [":bazel_control_plane_files"],
+    tags = [
+        "bazel-cache-policy",
+        "fast",
+        "presubmit",
+    ],
+)
+
+sh_test(
+    name = "bazel_rbe_target_eligibility_check",
+    srcs = ["scripts/validation/validate-bazel-rbe-target-eligibility.py"],
+    data = [":bazel_control_plane_files"],
+    tags = [
+        "bazel-cache-policy",
+        "fast",
+        "presubmit",
+    ],
+)
+
 go_binary(
     name = "tinyland-cleanup",
     embed = [":tinyland-cleanup_lib"],
@@ -159,6 +247,11 @@ go_test(
 test_suite(
     name = "all_tests",
     tests = [
+        ":bazel_cache_backed_wrapper_check",
+        ":bazel_cache_contract_check",
+        ":bazel_cache_policy_check",
+        ":bazel_rbe_proof_wrapper_check",
+        ":bazel_rbe_target_eligibility_check",
         ":config_test",
         ":monitor_test",
         ":plugins_test",

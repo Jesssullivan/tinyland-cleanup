@@ -6,9 +6,36 @@ build --spawn_strategy=sandboxed
 test --test_output=errors
 test --test_summary=detailed
 
-# Shared-cache CI configuration. Pass --remote_cache from a wrapper because
-# Bazel does not expand environment variables in .bazelrc values.
-build:ci-cached --remote_upload_local_results=true
-build:ci-cached --remote_timeout=60
-test:ci-cached --remote_upload_local_results=true
-test:ci-cached --remote_timeout=60
+# Remote cache endpoints are supplied by scripts/bazel-cache-backed.sh with an
+# explicit --remote_cache flag. Keep .bazelrc endpoint-free so stale private
+# hostnames cannot silently shadow the GloriousFlywheel-provided endpoint.
+build:remote --remote_upload_local_results=false
+build:remote --remote_download_outputs=toplevel
+build:remote --remote_timeout=300
+build:remote --remote_local_fallback=true
+
+# Remote executor endpoints are never stored in .bazelrc. Use
+# scripts/bazel-rbe-proof.sh with BAZEL_REMOTE_EXECUTOR, BAZEL_REMOTE_CACHE, and
+# GF_BAZEL_SUBSTRATE_MODE=executor-backed for explicit REAPI proof runs.
+build:executor-backed --config=ci
+test:executor-backed --config=ci
+
+build:ci --config=remote
+test:ci --config=remote
+build:ci --show_progress_rate_limit=10
+build:ci --curses=no
+build:ci --color=yes
+build:ci --keep_going=false
+test:ci --test_output=errors
+test:ci --test_summary=short
+
+build:ci-local --disk_cache=/tmp/tinyland-cleanup-bazel-disk-cache
+build:ci-local --curses=no
+build:ci-local --color=yes
+build:ci-local --keep_going=false
+test:ci-local --test_output=errors
+test:ci-local --test_summary=short
+
+# Backward-compatible alias retained for older docs and proof invocations.
+build:ci-cached --config=ci
+test:ci-cached --config=ci
