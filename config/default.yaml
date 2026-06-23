@@ -37,6 +37,11 @@ policy:
   # monitored filesystem has at least this many GiB free.
   minimum_free_gb: 0
   state_file: ~/.local/state/tinyland-cleanup/state.json
+  # Inode-pressure circuit breaker. When inode-only critical pressure persists
+  # without being relieved for this many consecutive cycles, the daemon stops
+  # bypassing cooldown and backs off to the cooldown cadence instead of running
+  # every plugin every poll interval. Zero uses the built-in default (3).
+  inode_no_progress_limit: 3
 
 # Enable/disable specific cleanup plugins
 enable:
