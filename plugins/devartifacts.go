@@ -609,7 +609,13 @@ func (p *DevArtifactsPlugin) planAgentTranscripts(ctx context.Context, home stri
 func (p *DevArtifactsPlugin) planAgentWorktreeRoots(ctx context.Context, home string, level CleanupLevel, daCfg config.DevArtifactsConfig, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	staleAfter := parseNixPolicyDuration(daCfg.AgentWorktreeStaleAfter, 14*24*time.Hour)
 	p.forEachAgentWorktreeRoot(ctx, home, staleAfter, daCfg, func(path string, info os.FileInfo, bytes int64, activeReason string) {
-		*targets = append(*targets, p.agentWorktreeRootTarget(path, bytes, info.ModTime(), staleAfter, time.Now(), level >= LevelCritical, p.isProtected(path, daCfg.ProtectPaths), activeReason))
+		protectReason := ""
+		if p.isProtected(path, daCfg.ProtectPaths) {
+			protectReason = "path is covered by dev_artifacts.protect_paths"
+		} else if reason := gitWorktreeProtectReason(ctx, path); reason != "" {
+			protectReason = reason
+		}
+		*targets = append(*targets, p.agentWorktreeRootTarget(path, bytes, info.ModTime(), staleAfter, time.Now(), level >= LevelCritical, protectReason, activeReason))
 	}, budgets...)
 }
 
@@ -763,8 +769,9 @@ func (p *DevArtifactsPlugin) agentTranscriptTarget(home string, path string, byt
 	return target
 }
 
-func (p *DevArtifactsPlugin) agentWorktreeRootTarget(path string, bytes int64, modTime time.Time, staleAfter time.Duration, now time.Time, canDelete bool, protected bool, activeReason string) CleanupTarget {
+func (p *DevArtifactsPlugin) agentWorktreeRootTarget(path string, bytes int64, modTime time.Time, staleAfter time.Duration, now time.Time, canDelete bool, protectReason string, activeReason string) CleanupTarget {
 	active := activeReason != ""
+	protected := protectReason != ""
 	target := CleanupTarget{
 		Type:      "agent-worktree-root",
 		Name:      filepath.Base(path),
@@ -779,7 +786,7 @@ func (p *DevArtifactsPlugin) agentWorktreeRootTarget(path string, bytes int64, m
 		target.Reason = "active process references this agent worktree: " + activeReason
 	case protected:
 		target.Action = "protect"
-		target.Reason = "path is covered by dev_artifacts.protect_paths"
+		target.Reason = protectReason
 	case staleAfter > 0 && modTime.After(now.Add(-staleAfter)):
 		target.Action = "protect"
 		target.Protected = true
@@ -876,6 +883,10 @@ func (p *DevArtifactsPlugin) cleanAgentWorktreeRoots(ctx context.Context, home s
 		}
 		if p.isProtected(path, daCfg.ProtectPaths) {
 			logger.Debug("preserving protected agent worktree", "path", path)
+			return
+		}
+		if reason := gitWorktreeProtectReason(ctx, path); reason != "" {
+			logger.Debug("preserving git agent worktree", "path", path, "reason", reason)
 			return
 		}
 		if err := os.RemoveAll(path); err != nil {
@@ -2397,6 +2408,60 @@ func newDevArtifactGitTracker() *devArtifactGitTracker {
 
 func devArtifactContainsTrackedFiles(path string) bool {
 	return newDevArtifactGitTracker().ContainsTrackedFiles(path)
+}
+
+func gitWorktreeProtectReason(ctx context.Context, path string) string {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		if pathExists(filepath.Join(path, ".git")) {
+			return "git worktree cannot be verified because git is unavailable"
+		}
+		return ""
+	}
+
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(checkCtx, gitPath, "-C", path, "rev-parse", "--is-inside-work-tree")
+	output, err := cmd.Output()
+	if err != nil || strings.TrimSpace(string(output)) != "true" {
+		return ""
+	}
+
+	statusCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	statusCmd := exec.CommandContext(statusCtx, gitPath, "-C", path, "status", "--porcelain", "--untracked-files=all")
+	statusOutput, err := statusCmd.Output()
+	if err != nil {
+		return "git worktree status could not be verified"
+	}
+	if strings.TrimSpace(string(statusOutput)) != "" {
+		return "git worktree has uncommitted changes"
+	}
+
+	upstreamCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	upstreamCmd := exec.CommandContext(upstreamCtx, gitPath, "-C", path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	upstreamOutput, err := upstreamCmd.Output()
+	if err != nil || strings.TrimSpace(string(upstreamOutput)) == "" {
+		return "git worktree has no upstream branch"
+	}
+
+	aheadCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	aheadCmd := exec.CommandContext(aheadCtx, gitPath, "-C", path, "rev-list", "--count", "@{u}..HEAD")
+	aheadOutput, err := aheadCmd.Output()
+	if err != nil {
+		return "git worktree upstream comparison could not be verified"
+	}
+	ahead, err := strconv.Atoi(strings.TrimSpace(string(aheadOutput)))
+	if err != nil {
+		return "git worktree upstream comparison could not be parsed"
+	}
+	if ahead > 0 {
+		return "git worktree has unpushed commits"
+	}
+
+	return ""
 }
 
 func (t *devArtifactGitTracker) ContainsTrackedFiles(path string) bool {
