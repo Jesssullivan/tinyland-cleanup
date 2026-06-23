@@ -1390,7 +1390,7 @@ func (p *CachePlugin) cleanupDarwinDeveloperCacheTargets(ctx context.Context, le
 			sizeBefore = getDirAllocatedBytes(target.Path)
 		}
 		result.EstimatedBytesFreed += sizeBefore
-		if err := os.RemoveAll(target.Path); err != nil {
+		if err := removeDarwinDeveloperCacheTarget(target.Path); err != nil {
 			result.Error = err
 			logger.Warn("failed to delete Darwin developer cache target", "path", target.Path, "type", target.Type, "error", err)
 			continue
@@ -1408,6 +1408,28 @@ func (p *CachePlugin) cleanupDarwinDeveloperCacheTargets(ctx context.Context, le
 			"freed_mb", freed/(1024*1024))
 	}
 	return result
+}
+
+func removeDarwinDeveloperCacheTarget(path string) error {
+	return removeAllDarwinCacheTargetWithRetry(path, os.RemoveAll, time.Sleep, 3)
+}
+
+func removeAllDarwinCacheTargetWithRetry(path string, removeAll func(string) error, sleep func(time.Duration), attempts int) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		err = removeAll(path)
+		if err == nil || !pathExists(path) {
+			return nil
+		}
+		if attempt < attempts {
+			sleep(time.Duration(attempt) * 100 * time.Millisecond)
+		}
+	}
+	return err
 }
 
 func listDarwinCacheEntries(root string) []darwinCacheEntry {
