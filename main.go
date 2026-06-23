@@ -340,8 +340,9 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 
 	// Engage the inode-pressure circuit breaker for this cycle when inode-only
 	// escalation has repeatedly failed to free inodes, so cooldown is applied
-	// instead of bypassed (TIN-2170).
-	report.InodeBackoff = d.inodeBackoffActive(report)
+	// instead of bypassed (TIN-2170). Forced runs and configurations without a
+	// cooldown always run, so the breaker has no effect there.
+	report.InodeBackoff = !report.ForcedLevel && d.cleanupCooldown() > 0 && d.inodeBackoffActive(report)
 	if report.InodeBackoff {
 		d.logger.Warn("inode pressure unrelieved by recent cleanup cycles; backing off to cooldown cadence",
 			"path", report.MonitorPath,
