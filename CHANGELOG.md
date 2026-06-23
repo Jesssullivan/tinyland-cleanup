@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Inode-aware disk-pressure handling (TIN-2170/TIN-2165). `DiskStats` now carries
+  inode totals/used/free/percent from statfs, and `DiskMonitor` evaluates byte
+  and inode thresholds in parallel: the cleanup level is the higher of the two,
+  so a filesystem with ample free bytes but exhausted inodes (the honey
+  nix-store small-file crunch) now escalates cleanup and fires nix-GC.
+  Configurable via `inode_thresholds` and per-mount `threshold_inode_warning` /
+  `threshold_inode_critical`. Filesystems that report no inode totals (APFS/ZFS
+  report large dynamic counts; some report zero) never falsely escalate.
+- Inode-pressure circuit breaker. The cleanup stop condition requires inode
+  pressure to clear across all monitored mounts (not just the byte-pressure
+  primary), and daemon state records consecutive inode "no-progress" cycles so
+  inode-only critical escalation that nothing can relieve backs off to the
+  cooldown cadence instead of running every plugin every poll interval. Tunable
+  via `policy.inode_no_progress_limit` (default 3).
+- JSON and text reports surface host and per-mount inode evidence
+  (`host_inode_level`, `host_byte_level`, `max_inode_level`, `inode_backoff`,
+  per-mount `byte_level`/`inode_level`/`inodes_*`).
 - Repository authority, contribution, security, and productionization docs.
 - Bazel/Bzlmod surface for the Go build and test graph.
 - GitHub CI and release workflow scaffolding.
