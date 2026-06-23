@@ -326,6 +326,170 @@ func TestRunOnceStopsAfterTargetFreeMet(t *testing.T) {
 	}
 }
 
+func TestRunOnceDoesNotStopWhenTargetFreeMetButInodesPressured(t *testing.T) {
+	var output bytes.Buffer
+	first := &reportingPlugin{
+		name: "first",
+		result: plugins.CleanupResult{
+			Plugin:       "first",
+			Level:        plugins.LevelCritical,
+			ItemsCleaned: 1,
+		},
+	}
+	second := &reportingPlugin{
+		name: "second",
+		result: plugins.CleanupResult{
+			Plugin:       "second",
+			Level:        plugins.LevelCritical,
+			ItemsCleaned: 1,
+		},
+	}
+	daemon := newTestDaemonWithPlugins(t, &output, first, second)
+	daemon.config.TargetFree = 70
+	inodePressure := diskStatsWithInodes(1000, 400, 60, 1000, 20, 98)
+	daemon.diskStats = sequenceDiskStats(t,
+		inodePressure,
+		inodePressure,
+		inodePressure,
+		inodePressure,
+		inodePressure,
+	)
+
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatalf("runOnce failed: %v", err)
+	}
+
+	if !first.called {
+		t.Fatal("expected first plugin cleanup to run")
+	}
+	if !second.called {
+		t.Fatal("second plugin should still run while inode pressure remains")
+	}
+
+	report := decodeCycleReport(t, output.Bytes())
+	if !report.TargetFreeMet {
+		t.Fatal("expected byte target free to be met")
+	}
+	if report.HostInodeLevel != "critical" {
+		t.Fatalf("expected host inode level critical, got %q", report.HostInodeLevel)
+	}
+	if report.StopReason != "" {
+		t.Fatalf("did not expect stop reason while inode pressure remains, got %q", report.StopReason)
+	}
+	if len(report.Plugins) != 2 {
+		t.Fatalf("expected 2 plugin reports, got %d", len(report.Plugins))
+	}
+	if !report.Plugins[1].WouldRun {
+		t.Fatalf("expected second plugin to run, skip reason %q", report.Plugins[1].SkipReason)
+	}
+}
+
+func TestRunOnceInodeBackoffEngagesAfterRepeatedNoProgress(t *testing.T) {
+	var output bytes.Buffer
+	plugin := &reportingPlugin{
+		name: "nix",
+		result: plugins.CleanupResult{
+			Plugin:       "nix",
+			Level:        plugins.LevelCritical,
+			ItemsCleaned: 1,
+		},
+	}
+	d := newTestDaemonWithPlugins(t, &output, plugin)
+	d.config.TargetFree = 70
+	// Byte target met (free 400 >= 300) but inodes pinned at 98% with no
+	// improvement across cycles: inode-only critical escalation.
+	d.diskStats = sequenceDiskStats(t, diskStatsWithInodes(1000, 400, 60, 1000, 20, 98))
+
+	limit := d.config.Policy.InodeNoProgressLimit
+	if limit <= 0 {
+		t.Fatalf("expected a positive inode no-progress limit, got %d", limit)
+	}
+
+	// The first `limit` cycles run aggressively because critical pressure
+	// bypasses cooldown; the breaker has not yet tripped.
+	for i := 0; i < limit; i++ {
+		output.Reset()
+		if err := d.runOnce(context.Background(), monitor.LevelNone); err != nil {
+			t.Fatalf("cycle %d runOnce failed: %v", i, err)
+		}
+		rep := decodeCycleReport(t, output.Bytes())
+		if rep.InodeBackoff {
+			t.Fatalf("cycle %d unexpectedly backed off (count=%d)", i, rep.InodeNoProgressCount)
+		}
+		if len(rep.Plugins) != 1 || rep.Plugins[0].SkipReason != "" {
+			t.Fatalf("cycle %d expected plugin to run, got %+v", i, rep.Plugins)
+		}
+	}
+
+	// After `limit` consecutive no-progress cycles the breaker engages and the
+	// daemon backs off to the cooldown cadence instead of churning.
+	output.Reset()
+	if err := d.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatalf("backoff cycle runOnce failed: %v", err)
+	}
+	rep := decodeCycleReport(t, output.Bytes())
+	if !rep.InodeBackoff {
+		t.Fatalf("expected inode backoff to engage, count=%d", rep.InodeNoProgressCount)
+	}
+	if len(rep.Plugins) != 1 || rep.Plugins[0].WouldRun || rep.Plugins[0].SkipReason != "cooldown" {
+		t.Fatalf("expected plugin cooldown skip, got %+v", rep.Plugins)
+	}
+}
+
+func TestCleanupTargetMetRequiresAllMountsInodeClear(t *testing.T) {
+	d := &daemon{}
+	cases := []struct {
+		name          string
+		targetFreeMet bool
+		maxInodeLevel string
+		want          bool
+	}{
+		{"bytes met, no inode pressure", true, monitor.LevelNone.String(), true},
+		{"bytes met, inode critical on some mount", true, monitor.LevelCritical.String(), false},
+		{"bytes met, inode warning on some mount", true, monitor.LevelWarning.String(), false},
+		{"bytes met, inode unmeasured", true, "", true},
+		{"bytes not met", false, monitor.LevelNone.String(), false},
+	}
+	for _, tc := range cases {
+		report := cycleReport{TargetFreeMet: tc.targetFreeMet, MaxInodeLevel: tc.maxInodeLevel}
+		if got := d.cleanupTargetMet(report); got != tc.want {
+			t.Errorf("%s: cleanupTargetMet = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestAssessMountsTracksMaxInodeLevelAcrossMounts(t *testing.T) {
+	var output bytes.Buffer
+	d := newTestDaemonWithPlugins(t, &output)
+	d.config.MonitoredMounts = []config.MountConfig{
+		{Path: "/data", Label: "data"},
+		{Path: "/nix", Label: "nix"},
+	}
+	byPath := map[string]*monitor.DiskStats{
+		// Byte-critical primary with no inode pressure.
+		"/data": diskStats(1000, 40, 96),
+		// Healthy bytes but inode-critical secondary (the honey /nix case).
+		"/nix": diskStatsWithInodes(1000, 800, 20, 1000, 40, 96),
+	}
+	d.diskStats = func(path string) (*monitor.DiskStats, error) {
+		stats, ok := byPath[path]
+		if !ok {
+			t.Fatalf("unexpected path %q", path)
+		}
+		cp := *stats
+		cp.Path = path
+		return &cp, nil
+	}
+
+	assessment := d.assessMounts()
+	if assessment.Level != monitor.LevelCritical {
+		t.Fatalf("assessment.Level = %s, want critical (byte pressure on /data)", assessment.Level)
+	}
+	if assessment.InodeLevel != monitor.LevelCritical {
+		t.Fatalf("assessment.InodeLevel = %s, want critical (inode pressure on /nix)", assessment.InodeLevel)
+	}
+}
+
 func TestApplyTargetUsedPercentOverride(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.TargetFree = 70
@@ -670,6 +834,9 @@ func newTestDaemonWithPlugins(t *testing.T, output io.Writer, registeredPlugins 
 	t.Helper()
 
 	cfg := config.DefaultConfig()
+	stateRoot := t.TempDir()
+	cfg.LogFile = filepath.Join(stateRoot, "disk-cleanup.log")
+	cfg.Policy.StateFile = filepath.Join(stateRoot, "state.json")
 	registry := plugins.NewRegistry()
 	for _, plugin := range registeredPlugins {
 		registry.Register(plugin)
@@ -696,6 +863,16 @@ func diskStats(total, free uint64, usedPercent float64) *monitor.DiskStats {
 		FreePercent: 100 - usedPercent,
 		FreeGB:      float64(free) / (1024 * 1024 * 1024),
 	}
+}
+
+func diskStatsWithInodes(total, free uint64, usedPercent float64, inodesTotal, inodesFree uint64, inodesUsedPercent float64) *monitor.DiskStats {
+	stats := diskStats(total, free, usedPercent)
+	stats.InodesTotal = inodesTotal
+	stats.InodesFree = inodesFree
+	stats.InodesUsed = inodesTotal - inodesFree
+	stats.InodesUsedPercent = inodesUsedPercent
+	stats.InodesFreePercent = 100 - inodesUsedPercent
+	return stats
 }
 
 func sequenceDiskStats(t *testing.T, stats ...*monitor.DiskStats) func(string) (*monitor.DiskStats, error) {

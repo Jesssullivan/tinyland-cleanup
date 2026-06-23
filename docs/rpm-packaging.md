@@ -31,6 +31,11 @@ Enable the service only after the dry-run plan matches the host policy:
 systemctl enable --now tinyland-cleanup.service
 ```
 
+For Nix-heavy Rocky runners, add `/nix` to `monitored_mounts` and review
+`inode_thresholds` before enabling the service. The packaged defaults include
+the inode threshold keys but keep the mount list conservative until a node role
+or operator config selects the host-specific filesystems.
+
 Build an RPM locally with:
 
 ```sh

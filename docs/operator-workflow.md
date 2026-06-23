@@ -58,7 +58,7 @@ The JSON report includes:
 
 - the selected cleanup level;
 - monitored mount status;
-- host free-space before and after the cycle;
+- host free-space and inode status before and after the cycle;
 - the configured target maximum used percentage and equivalent free-space
   deficit;
 - daemon state file and configured cleanup cooldown;
@@ -67,6 +67,12 @@ The JSON report includes:
 - optional `plugin_filter` when `--plugins` constrains the cycle;
 - enabled plugins that would run;
 - plugin descriptions and dry-run skip reasons.
+
+Byte thresholds and `inode_thresholds` are evaluated in parallel. A monitored
+mount can therefore enter warning, moderate, aggressive, or critical cleanup
+because bytes are scarce, inodes are scarce, or both. Mount reports include
+`byte_level`, `inode_level`, `inodes_total`, `inodes_free`, and
+`inodes_used_percent` when the filesystem reports inode statistics.
 
 Dry-run mode does not call plugin cleanup methods. A plugin entry with
 `skip_reason: "dry_run"` means the plugin is enabled and would run at that
@@ -148,14 +154,19 @@ Use `--output json` for automation. The report distinguishes:
 - `target_free_deficit_bytes`: remaining bytes needed to satisfy the target;
 - `target_free_met`: whether the current host free space satisfies the target;
 - `stop_reason`: why remaining plugins were skipped, currently
-  `target_free_met` when a real cleanup cycle reaches the target;
+  `target_free_met` when a real cleanup cycle reaches the byte target and inode
+  pressure has cleared;
 - `planned_estimated_bytes_freed`: aggregate dry-run reclaim estimate from
   plugin plans;
 - `planned_required_free_bytes`: largest free-space preflight requirement
   across plugin plans;
 - `planned_targets`: total number of dry-run targets across plugin plans;
 - `host_free_delta_bytes`: cycle-level host free-space delta for the monitored
-  path.
+  path;
+- `host_inodes_free_before`, `host_inodes_free_after`, and
+  `host_inodes_free_delta`: cycle-level inode accounting for the monitored
+  path when available;
+- `host_inode_level`: current inode pressure level for the monitored path.
 
 The cycle-level host delta is the operator truth for whether the machine gained
 usable space. Plugin byte counts are supporting evidence and may differ from

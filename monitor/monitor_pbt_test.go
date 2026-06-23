@@ -7,6 +7,44 @@ import (
 	"pgregory.net/rapid"
 )
 
+// TestCheckLevelIsMaxOfByteAndInode verifies the combined level is always the
+// higher of the byte-driven and inode-driven levels across the joint space,
+// including filesystems that report no inode totals.
+func TestCheckLevelIsMaxOfByteAndInode(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		bw := rapid.IntRange(50, 70).Draw(t, "byte_warn")
+		bm := rapid.IntRange(bw+1, 85).Draw(t, "byte_mod")
+		ba := rapid.IntRange(bm+1, 94).Draw(t, "byte_agg")
+		bc := rapid.IntRange(ba+1, 99).Draw(t, "byte_crit")
+		iw := rapid.IntRange(50, 70).Draw(t, "inode_warn")
+		im := rapid.IntRange(iw+1, 85).Draw(t, "inode_mod")
+		ia := rapid.IntRange(im+1, 94).Draw(t, "inode_agg")
+		ic := rapid.IntRange(ia+1, 99).Draw(t, "inode_crit")
+
+		mon := NewDiskMonitorWithInodeThresholds(bw, bm, ba, bc, iw, im, ia, ic)
+
+		stats := &DiskStats{
+			UsedPercent: rapid.Float64Range(0, 100).Draw(t, "byte_pct"),
+			// InodesTotal of 0 must make the inode dimension contribute LevelNone.
+			InodesTotal:       rapid.Uint64Range(0, 100000).Draw(t, "inodes_total"),
+			InodesUsedPercent: rapid.Float64Range(0, 100).Draw(t, "inode_pct"),
+		}
+
+		byteLevel := mon.CheckByteLevel(stats)
+		inodeLevel := mon.CheckInodeLevel(stats)
+		want := byteLevel
+		if inodeLevel > want {
+			want = inodeLevel
+		}
+		if got := mon.CheckLevel(stats); got != want {
+			t.Fatalf("CheckLevel = %s, want max(byte=%s, inode=%s)", got, byteLevel, inodeLevel)
+		}
+		if stats.InodesTotal == 0 && inodeLevel != LevelNone {
+			t.Fatalf("inode level = %s with zero inode total, want none", inodeLevel)
+		}
+	})
+}
+
 // TestThresholdMonotonicity verifies higher usage never results in lower level.
 func TestThresholdMonotonicity(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
@@ -26,6 +64,29 @@ func TestThresholdMonotonicity(t *testing.T) {
 
 			if level < prevLevel {
 				t.Fatalf("level decreased from %d to %d at usage %d%%", prevLevel, level, usage)
+			}
+			prevLevel = level
+		}
+	})
+}
+
+// TestInodeThresholdMonotonicity verifies higher inode usage never results in lower level.
+func TestInodeThresholdMonotonicity(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		warn := rapid.IntRange(50, 70).Draw(t, "warn")
+		mod := rapid.IntRange(warn+1, 85).Draw(t, "mod")
+		agg := rapid.IntRange(mod+1, 94).Draw(t, "agg")
+		crit := rapid.IntRange(agg+1, 99).Draw(t, "crit")
+
+		mon := NewDiskMonitorWithInodeThresholds(80, 85, 90, 95, warn, mod, agg, crit)
+
+		prevLevel := LevelNone
+		for usage := 0; usage <= 100; usage++ {
+			stats := &DiskStats{InodesTotal: 1000, InodesUsedPercent: float64(usage)}
+			level := mon.CheckInodeLevel(stats)
+
+			if level < prevLevel {
+				t.Fatalf("inode level decreased from %d to %d at usage %d%%", prevLevel, level, usage)
 			}
 			prevLevel = level
 		}

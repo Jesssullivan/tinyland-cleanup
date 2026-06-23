@@ -12,8 +12,9 @@ builder and runner machines.
 
 - Dry-run behavior must stay useful enough for operator review.
 - Cleanup policy should explain what it plans to remove and why.
-- Host free-space accounting should be measured before and after cleanup.
-- Real cleanup should stop once the configured host free-space target is met.
+- Host free-space and inode accounting should be measured before and after cleanup.
+- Real cleanup should stop once the configured host free-space target is met
+  and inode pressure has cleared.
 - Daemon-triggered cleanup should honor cooldown state below the configured
   bypass severity.
 - Privileged actions, offline compaction, and service disruption must remain
@@ -61,6 +62,10 @@ Use JSON when another tool needs the stable report schema:
 ```sh
 tinyland-cleanup --once --dry-run --level critical --output json
 ```
+
+Byte and inode thresholds are evaluated in parallel. This matters for Nix
+stores and runner hosts where small-file sprawl can exhaust inodes while byte
+usage still looks healthy.
 
 List available plugin names before constraining an evidence run:
 

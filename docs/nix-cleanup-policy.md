@@ -4,6 +4,12 @@ Nix cleanup is now planned before mutation. The plugin reports dry-run store
 reclaim estimates, visible profile generations, and active Nix work before it
 touches generations or the store.
 
+The daemon monitors byte pressure and inode pressure independently. This is
+important for `/nix/store`: many small store paths can exhaust filesystem
+inodes while byte usage still appears safe. Configure `monitored_mounts` for
+`/nix` or `/nix/store` and tune `inode_thresholds` when deploying the daemon as
+a node-level prevention control.
+
 Review with:
 
 ```sh
@@ -116,6 +122,20 @@ opt-in because it can be long-running.
 Recommended Rocky or Linux runner defaults:
 
 ```yaml
+inode_thresholds:
+  warning: 80
+  moderate: 85
+  aggressive: 90
+  critical: 95
+
+monitored_mounts:
+  - path: /nix
+    label: nix
+    threshold_warning: 70
+    threshold_critical: 85
+    threshold_inode_warning: 70
+    threshold_inode_critical: 90
+
 nix:
   min_user_generations: 3
   min_home_manager_generations: 3

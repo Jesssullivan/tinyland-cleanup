@@ -63,6 +63,24 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 			return err
 		}
 	}
+	if report.HostInodesTotal > 0 {
+		after := "not measured"
+		afterUsed := report.HostInodesUsedPercentBefore
+		if report.HostFreeAfterBytes > 0 || report.HostInodesFreeAfter > 0 || report.HostInodesUsedPercentAfter > 0 {
+			after = formatCount(report.HostInodesFreeAfter)
+			afterUsed = report.HostInodesUsedPercentAfter
+		}
+		if _, err := fmt.Fprintf(w, "host inodes: %.1f%% used before, %.1f%% used after, %s free before, %s free after, delta %s, level %s\n",
+			report.HostInodesUsedPercentBefore,
+			afterUsed,
+			formatCount(report.HostInodesFreeBefore),
+			after,
+			formatSignedCount(report.HostInodesFreeDelta),
+			report.HostInodeLevel,
+		); err != nil {
+			return err
+		}
+	}
 
 	if report.TargetUsedPercent > 0 {
 		if _, err := fmt.Fprintf(w, "target: <=%d%% used, need %s free, deficit %s\n",
@@ -86,6 +104,12 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 			return err
 		}
 	}
+	if report.InodeBackoff {
+		if _, err := fmt.Fprintf(w, "inode backoff: pressure unrelieved after %d cycles, applying cooldown\n",
+			report.InodeNoProgressCount); err != nil {
+			return err
+		}
+	}
 
 	if len(report.Mounts) > 0 {
 		if _, err := fmt.Fprintln(w, "mounts:"); err != nil {
@@ -102,13 +126,32 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 				}
 				continue
 			}
-			if _, err := fmt.Fprintf(w, "- %s (%s): %.1f%% used, %s free, level %s\n",
+			inodeStatus := "inodes unavailable"
+			if mount.InodesTotal > 0 {
+				inodeStatus = fmt.Sprintf("%.1f%% inodes used, %s inodes free",
+					mount.InodesUsedPercent,
+					formatCount(mount.InodesFree))
+			}
+			if _, err := fmt.Fprintf(w, "- %s (%s): %.1f%% bytes used, %s free, %s, level %s",
 				label,
 				mount.Path,
 				mount.UsedPercent,
 				formatByteCount(int64(mount.FreeBytes)),
+				inodeStatus,
 				mount.Level,
 			); err != nil {
+				return err
+			}
+			if mount.ByteLevel != "" || mount.InodeLevel != "" {
+				inodeLevel := mount.InodeLevel
+				if inodeLevel == "" {
+					inodeLevel = "n/a"
+				}
+				if _, err := fmt.Fprintf(w, " (bytes %s, inodes %s)", mount.ByteLevel, inodeLevel); err != nil {
+					return err
+				}
+			}
+			if _, err := fmt.Fprintln(w); err != nil {
 				return err
 			}
 		}
@@ -341,6 +384,32 @@ func formatSignedByteCount(bytes int64) string {
 		return "+" + formatByteCount(bytes)
 	}
 	return "0 B"
+}
+
+func formatSignedCount(count int64) string {
+	if count < 0 {
+		return "-" + formatCount(uint64(-count))
+	}
+	if count > 0 {
+		return "+" + formatCount(uint64(count))
+	}
+	return "0"
+}
+
+func formatCount(count uint64) string {
+	value := float64(count)
+	// Use SI-style magnitude suffixes for inode counts. "G" (not "B") denotes
+	// billions so a count is never confused with a byte size in the same report.
+	units := []string{"", "K", "M", "G", "T"}
+	unit := 0
+	for value >= 1000 && unit < len(units)-1 {
+		value /= 1000
+		unit++
+	}
+	if unit == 0 {
+		return fmt.Sprintf("%d", count)
+	}
+	return fmt.Sprintf("%.1f%s", value, units[unit])
 }
 
 func formatByteCount(bytes int64) string {

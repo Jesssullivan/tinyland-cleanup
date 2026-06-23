@@ -28,6 +28,12 @@ func TestConfigRoundtrip(t *testing.T) {
 				Aggressive: rapid.IntRange(86, 94).Draw(rt, "aggressive"),
 				Critical:   rapid.IntRange(95, 99).Draw(rt, "critical"),
 			},
+			InodeThresholds: Thresholds{
+				Warning:    rapid.IntRange(50, 70).Draw(rt, "inode_warning"),
+				Moderate:   rapid.IntRange(71, 85).Draw(rt, "inode_moderate"),
+				Aggressive: rapid.IntRange(86, 94).Draw(rt, "inode_aggressive"),
+				Critical:   rapid.IntRange(95, 99).Draw(rt, "inode_critical"),
+			},
 			TargetFree: rapid.IntRange(10, 50).Draw(rt, "target_free"),
 		}
 
@@ -62,6 +68,12 @@ func TestConfigRoundtrip(t *testing.T) {
 		}
 		if loaded.Thresholds.Critical != cfg.Thresholds.Critical {
 			rt.Fatalf("Critical threshold mismatch: expected %d, got %d", cfg.Thresholds.Critical, loaded.Thresholds.Critical)
+		}
+		if loaded.InodeThresholds.Warning != cfg.InodeThresholds.Warning {
+			rt.Fatalf("Inode warning threshold mismatch: expected %d, got %d", cfg.InodeThresholds.Warning, loaded.InodeThresholds.Warning)
+		}
+		if loaded.InodeThresholds.Critical != cfg.InodeThresholds.Critical {
+			rt.Fatalf("Inode critical threshold mismatch: expected %d, got %d", cfg.InodeThresholds.Critical, loaded.InodeThresholds.Critical)
 		}
 		if loaded.TargetFree != cfg.TargetFree {
 			rt.Fatalf("TargetFree mismatch: expected %d, got %d", cfg.TargetFree, loaded.TargetFree)
@@ -117,6 +129,15 @@ func TestDefaultConfigValid(t *testing.T) {
 	if cfg.Thresholds.Aggressive >= cfg.Thresholds.Critical {
 		t.Errorf("aggressive >= critical: %d >= %d", cfg.Thresholds.Aggressive, cfg.Thresholds.Critical)
 	}
+	if cfg.InodeThresholds.Warning >= cfg.InodeThresholds.Moderate {
+		t.Errorf("inode warning >= moderate: %d >= %d", cfg.InodeThresholds.Warning, cfg.InodeThresholds.Moderate)
+	}
+	if cfg.InodeThresholds.Moderate >= cfg.InodeThresholds.Aggressive {
+		t.Errorf("inode moderate >= aggressive: %d >= %d", cfg.InodeThresholds.Moderate, cfg.InodeThresholds.Aggressive)
+	}
+	if cfg.InodeThresholds.Aggressive >= cfg.InodeThresholds.Critical {
+		t.Errorf("inode aggressive >= critical: %d >= %d", cfg.InodeThresholds.Aggressive, cfg.InodeThresholds.Critical)
+	}
 
 	// Thresholds must be percentages (0-100)
 	if cfg.Thresholds.Warning < 0 || cfg.Thresholds.Warning > 100 {
@@ -124,6 +145,12 @@ func TestDefaultConfigValid(t *testing.T) {
 	}
 	if cfg.Thresholds.Critical < 0 || cfg.Thresholds.Critical > 100 {
 		t.Errorf("Critical threshold out of range: %d", cfg.Thresholds.Critical)
+	}
+	if cfg.InodeThresholds.Warning < 0 || cfg.InodeThresholds.Warning > 100 {
+		t.Errorf("Inode warning threshold out of range: %d", cfg.InodeThresholds.Warning)
+	}
+	if cfg.InodeThresholds.Critical < 0 || cfg.InodeThresholds.Critical > 100 {
+		t.Errorf("Inode critical threshold out of range: %d", cfg.InodeThresholds.Critical)
 	}
 
 	// TargetFree must be less than Warning threshold

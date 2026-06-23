@@ -20,6 +20,12 @@ thresholds:
   aggressive: 90
   critical: 95
 
+inode_thresholds:
+  warning: 80
+  moderate: 85
+  aggressive: 90
+  critical: 95
+
 enable:
   cache: true
   nix_gc: true
