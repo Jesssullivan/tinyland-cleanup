@@ -111,3 +111,36 @@ Runtime boundary:
 Do not disable active-output-base protection on developer machines or shared
 runners unless an operator has already drained the relevant jobs and accepted
 the risk.
+
+## Bazel Cache and RBE Proof Contract
+
+The repo keeps Bazel endpoint configuration out of `.bazelrc`. Operators and
+GloriousFlywheel runners attach cache and executor endpoints through
+environment variables consumed by `scripts/bazel-cache-backed.sh`:
+
+```sh
+BAZEL_REMOTE_CACHE=grpc://example.internal:9092 \
+  bash scripts/bazel-cache-backed.sh test //...
+```
+
+By default the wrapper uses local execution with a local disk cache. When
+`BAZEL_REMOTE_CACHE` is set it uses shared remote cache mode and does not upload
+local results unless `BAZEL_REMOTE_UPLOAD=true` is set by a trusted proof run.
+
+Remote execution is explicit proof-only. Use `scripts/bazel-rbe-proof.sh` with
+both a cache endpoint and executor endpoint, and only for a target listed in
+`config/bazel-rbe-target-eligibility.json`:
+
+```sh
+GF_RBE_PROOF_MODE=explicit \
+GF_BAZEL_SUBSTRATE_MODE=executor-backed \
+GF_BAZEL_REMOTE_EXECUTION_PLATFORM=linux-x86_64 \
+BAZEL_REMOTE_CACHE=grpc://example-cache.internal:9092 \
+BAZEL_REMOTE_EXECUTOR=grpc://example-executor.internal:8980 \
+  bash scripts/bazel-rbe-proof.sh --target //:bazel_cache_policy_check
+```
+
+Remote cache hits are not RBE proof. The manifest currently marks only the
+Bazel cache policy contract as an explicit proof candidate; the broad Go test
+graph, cleanup runtime, and Nix packaging surfaces remain local/shared-cache
+validated until a matching executor proof artifact exists.

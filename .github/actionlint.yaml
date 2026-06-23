@@ -1,0 +1,8 @@
+self-hosted-runner:
+  labels:
+    - tinyland-dind
+    - tinyland-docker
+    - tinyland-nix
+    - tinyland-nix-gpu
+    - tinyland-nix-heavy
+    - tinyland-nix-kvm
