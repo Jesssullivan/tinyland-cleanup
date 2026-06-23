@@ -1647,6 +1647,97 @@ func TestAgentWorktreeRootCleanupDeletesOnlyStaleCriticalRoots(t *testing.T) {
 	}
 }
 
+func TestAgentWorktreeRootCleanupProtectsDirtyGitWorktree(t *testing.T) {
+	git := requireGit(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	root := filepath.Join(home, ".claude", "worktrees")
+	dirty := filepath.Join(root, "agent-dirty")
+	if err := os.MkdirAll(dirty, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, git, dirty, "init")
+	runGit(t, git, dirty, "config", "user.email", "test@example.invalid")
+	runGit(t, git, dirty, "config", "user.name", "Tinyland Test")
+	runGit(t, git, dirty, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(dirty, ".gitignore"), []byte("state.bin\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, git, dirty, "add", ".gitignore")
+	runGit(t, git, dirty, "commit", "-m", "seed")
+	if err := os.WriteFile(filepath.Join(dirty, ".gitignore"), []byte("state.bin\nscratch.log\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(dirty, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := agentStateRetentionConfig(home)
+	plugin := newDevArtifactsPluginWithActive(nil)
+	criticalPlan := plugin.PlanCleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	dirtyTarget := findDevArtifactTarget(t, criticalPlan.Targets, "agent-worktree-root", dirty)
+	if dirtyTarget.Action != "protect" || !dirtyTarget.Protected {
+		t.Fatalf("expected dirty git worktree to be protected, got %#v", dirtyTarget)
+	}
+	if !strings.Contains(dirtyTarget.Reason, "uncommitted changes") {
+		t.Fatalf("expected dirty-git reason, got %q", dirtyTarget.Reason)
+	}
+
+	result := plugin.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	if result.ItemsCleaned != 0 || result.BytesFreed != 0 {
+		t.Fatalf("expected dirty git worktree cleanup to reclaim nothing, got %#v", result)
+	}
+	if !pathExists(dirty) {
+		t.Fatal("dirty git worktree should remain")
+	}
+}
+
+func TestAgentWorktreeRootCleanupProtectsLocalOnlyGitWorktree(t *testing.T) {
+	git := requireGit(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	root := filepath.Join(home, ".claude", "worktrees")
+	localOnly := filepath.Join(root, "agent-local-only")
+	if err := os.MkdirAll(localOnly, 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, git, localOnly, "init")
+	runGit(t, git, localOnly, "config", "user.email", "test@example.invalid")
+	runGit(t, git, localOnly, "config", "user.name", "Tinyland Test")
+	runGit(t, git, localOnly, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(localOnly, "state.bin"), []byte(strings.Repeat("x", 1024)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, git, localOnly, "add", "state.bin")
+	runGit(t, git, localOnly, "commit", "-m", "local-only")
+	oldTime := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(localOnly, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := agentStateRetentionConfig(home)
+	plugin := newDevArtifactsPluginWithActive(nil)
+	criticalPlan := plugin.PlanCleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	localTarget := findDevArtifactTarget(t, criticalPlan.Targets, "agent-worktree-root", localOnly)
+	if localTarget.Action != "protect" || !localTarget.Protected {
+		t.Fatalf("expected local-only git worktree to be protected, got %#v", localTarget)
+	}
+	if !strings.Contains(localTarget.Reason, "no upstream") {
+		t.Fatalf("expected no-upstream reason, got %q", localTarget.Reason)
+	}
+
+	result := plugin.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	if result.ItemsCleaned != 0 || result.BytesFreed != 0 {
+		t.Fatalf("expected local-only git worktree cleanup to reclaim nothing, got %#v", result)
+	}
+	if !pathExists(localOnly) {
+		t.Fatal("local-only git worktree should remain")
+	}
+}
+
 func TestActiveAgentPathReferencesFromProcessOutputMapsNestedPathToRoot(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".claude", "worktrees")
