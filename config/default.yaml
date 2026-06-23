@@ -234,6 +234,17 @@ dev_artifacts:
   # Host-specific pressure profiles can opt into these global/agent-local
   # surfaces after reviewing active-process protection and store semantics.
   agent_worktree_artifacts: false
+  # Stale top-level agent scratch worktrees are local-only generated state.
+  # Keep whole-root deletion opt-in and critical-only.
+  agent_worktree_root_cleanup: false
+  agent_worktree_roots:
+    - ~/.claude/worktrees
+  agent_worktree_stale_after: 14d
+  # Compress old JSONL transcripts instead of deleting session history.
+  agent_transcript_compression: false
+  agent_transcript_roots:
+    - ~/.codex/sessions
+  agent_transcript_compress_after: 14d
   pnpm_store: false
   go_build_cache: true
   haskell_cache: true

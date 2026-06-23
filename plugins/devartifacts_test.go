@@ -1,7 +1,9 @@
 package plugins
 
 import (
+	"compress/gzip"
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -1541,6 +1543,126 @@ func TestDevArtifactActivityReasonsSorted(t *testing.T) {
 	}
 }
 
+func TestAgentTranscriptCompressionPreservesHistory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	transcriptRoot := filepath.Join(home, ".codex", "sessions")
+	transcript := filepath.Join(transcriptRoot, "2026", "05", "01", "rollout.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat(`{"event":"large transcript"}`+"\n", 2048)
+	if err := os.WriteFile(transcript, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(transcript, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := agentStateRetentionConfig(home)
+	plugin := newDevArtifactsPluginWithActive(nil)
+	plan := plugin.PlanCleanup(context.Background(), LevelModerate, cfg, devArtifactTestLogger())
+	target := findDevArtifactTarget(t, plan.Targets, "agent-transcript", transcript)
+	if target.Action != "compress" || target.Protected {
+		t.Fatalf("expected old transcript to be compressed, got %#v", target)
+	}
+
+	result := plugin.Cleanup(context.Background(), LevelModerate, cfg, devArtifactTestLogger())
+	if result.ItemsCleaned != 1 || result.BytesFreed <= 0 {
+		t.Fatalf("expected transcript compression to reclaim bytes, got %#v", result)
+	}
+	if pathExists(transcript) {
+		t.Fatal("uncompressed transcript should be replaced")
+	}
+	gzPath := transcript + ".gz"
+	if !pathExists(gzPath) {
+		t.Fatal("compressed transcript should exist")
+	}
+	got := readGzipFile(t, gzPath)
+	if got != content {
+		t.Fatal("compressed transcript did not preserve content")
+	}
+}
+
+func TestAgentWorktreeRootCleanupDeletesOnlyStaleCriticalRoots(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	root := filepath.Join(home, ".claude", "worktrees")
+	stale := filepath.Join(root, "agent-old")
+	recent := filepath.Join(root, "agent-new")
+	protected := filepath.Join(root, "agent-protected")
+	for _, dir := range []string{stale, recent, protected} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "state.bin"), []byte(strings.Repeat("x", 1024)), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-30 * 24 * time.Hour)
+	for _, dir := range []string{stale, protected} {
+		if err := os.Chtimes(dir, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := agentStateRetentionConfig(home)
+	cfg.DevArtifacts.ProtectPaths = []string{protected}
+	plugin := newDevArtifactsPluginWithActive(nil)
+
+	aggressivePlan := plugin.PlanCleanup(context.Background(), LevelAggressive, cfg, devArtifactTestLogger())
+	aggressiveTarget := findDevArtifactTarget(t, aggressivePlan.Targets, "agent-worktree-root", stale)
+	if aggressiveTarget.Action != "report" || !aggressiveTarget.Protected {
+		t.Fatalf("expected aggressive cleanup to report stale root only, got %#v", aggressiveTarget)
+	}
+
+	criticalPlan := plugin.PlanCleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	staleTarget := findDevArtifactTarget(t, criticalPlan.Targets, "agent-worktree-root", stale)
+	if staleTarget.Action != "delete" || staleTarget.Protected {
+		t.Fatalf("expected critical cleanup to delete stale root, got %#v", staleTarget)
+	}
+	protectedTarget := findDevArtifactTarget(t, criticalPlan.Targets, "agent-worktree-root", protected)
+	if protectedTarget.Action != "protect" || !protectedTarget.Protected {
+		t.Fatalf("expected protected stale root to remain protected, got %#v", protectedTarget)
+	}
+	if _, ok := findDevArtifactTargetMaybe(criticalPlan.Targets, "agent-worktree-root", recent); ok {
+		t.Fatalf("recent worktree should not be a cleanup target")
+	}
+
+	result := plugin.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	if result.ItemsCleaned != 1 || result.BytesFreed <= 0 {
+		t.Fatalf("expected one stale worktree deleted, got %#v", result)
+	}
+	if pathExists(stale) {
+		t.Fatal("stale worktree should be deleted")
+	}
+	if !pathExists(recent) {
+		t.Fatal("recent worktree should remain")
+	}
+	if !pathExists(protected) {
+		t.Fatal("protected worktree should remain")
+	}
+}
+
+func TestActiveAgentPathReferencesFromProcessOutputMapsNestedPathToRoot(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".claude", "worktrees")
+	worktree := filepath.Join(root, "agent-live")
+	nested := filepath.Join(worktree, "src", "main.go")
+	output := "codex codex edit " + nested + "\n"
+
+	refs := activeAgentPathReferencesFromProcessOutput(output, []string{root}, home)
+	if refs[filepath.Clean(nested)] != "codex" {
+		t.Fatalf("expected nested path reference, got %#v", refs)
+	}
+	if refs[filepath.Clean(worktree)] != "codex" {
+		t.Fatalf("expected top-level worktree reference, got %#v", refs)
+	}
+}
+
 func TestGetGoCacheDir(t *testing.T) {
 	p := NewDevArtifactsPlugin()
 
@@ -1557,6 +1679,52 @@ func TestGetGoCacheDir(t *testing.T) {
 	_ = dir
 }
 
+func agentStateRetentionConfig(home string) *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DevArtifacts.ScanPaths = nil
+	cfg.DevArtifacts.TempArtifacts = false
+	cfg.DevArtifacts.NodeModules = false
+	cfg.DevArtifacts.PythonVenvs = false
+	cfg.DevArtifacts.RustTargets = false
+	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.AgentWorktreeArtifacts = false
+	cfg.DevArtifacts.AgentWorktreeRootCleanup = true
+	cfg.DevArtifacts.AgentWorktreeRoots = []string{filepath.Join(home, ".claude", "worktrees")}
+	cfg.DevArtifacts.AgentWorktreeStaleAfter = "7d"
+	cfg.DevArtifacts.AgentTranscriptCompression = true
+	cfg.DevArtifacts.AgentTranscriptRoots = []string{filepath.Join(home, ".codex", "sessions")}
+	cfg.DevArtifacts.AgentTranscriptCompressAfter = "7d"
+	cfg.DevArtifacts.PnpmStore = false
+	cfg.DevArtifacts.GoBuildCache = false
+	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.LargeLocalArtifacts = false
+	cfg.DevArtifacts.LMStudioModels = false
+	return cfg
+}
+
+func readGzipFile(t *testing.T, path string) string {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	reader, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func devArtifactTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func findDevArtifactTarget(t *testing.T, targets []CleanupTarget, targetType, path string) CleanupTarget {
 	t.Helper()
 	for _, target := range targets {
@@ -1566,6 +1734,15 @@ func findDevArtifactTarget(t *testing.T, targets []CleanupTarget, targetType, pa
 	}
 	t.Fatalf("target %s at %s not found in %#v", targetType, path, targets)
 	return CleanupTarget{}
+}
+
+func findDevArtifactTargetMaybe(targets []CleanupTarget, targetType, path string) (CleanupTarget, bool) {
+	for _, target := range targets {
+		if target.Type == targetType && target.Path == path {
+			return target, true
+		}
+	}
+	return CleanupTarget{}, false
 }
 
 func newDevArtifactsPluginWithActive(active map[string]string) *DevArtifactsPlugin {
