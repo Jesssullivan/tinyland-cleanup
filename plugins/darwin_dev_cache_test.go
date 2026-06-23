@@ -229,6 +229,29 @@ func TestCleanupDarwinDeveloperCacheTargetsDeletesOnlyEligibleTargets(t *testing
 	}
 }
 
+func TestRemoveAllDarwinCacheTargetWithRetryHandlesTransientNonEmptyDirectory(t *testing.T) {
+	dir := t.TempDir()
+	writeFileAt(t, filepath.Join(dir, "cache.bin"), "cache")
+
+	attempts := 0
+	err := removeAllDarwinCacheTargetWithRetry(dir, func(path string) error {
+		attempts++
+		if attempts == 1 {
+			return os.ErrInvalid
+		}
+		return os.RemoveAll(path)
+	}, func(time.Duration) {}, 3)
+	if err != nil {
+		t.Fatalf("expected retry to remove cache target, got %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected exactly two remove attempts, got %d", attempts)
+	}
+	if pathExists(dir) {
+		t.Fatalf("expected cache directory to be removed")
+	}
+}
+
 func TestCacheCleanupDarwinDevCachesDisabledEnforcementSkipsLegacyMutation(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
