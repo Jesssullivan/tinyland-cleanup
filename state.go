@@ -15,6 +15,10 @@ const cleanupStateVersion = 1
 type cleanupState struct {
 	Version int                          `json:"version"`
 	Plugins map[string]pluginStateRecord `json:"plugins"`
+	// Inodes tracks per-monitor-path inode reclaim progress so the daemon can
+	// detect inode pressure that repeated cleanup cycles fail to relieve and
+	// back off instead of churning every poll interval (TIN-2170).
+	Inodes map[string]inodeProgressRecord `json:"inodes,omitempty"`
 }
 
 type pluginStateRecord struct {
@@ -26,10 +30,22 @@ type pluginStateRecord struct {
 	LastError        string `json:"last_error,omitempty"`
 }
 
+// inodeProgressRecord records the inode state observed at the end of the most
+// recent cleanup cycle for one monitored path, plus a counter of consecutive
+// cycles that did not relieve inode pressure.
+type inodeProgressRecord struct {
+	LastRun               string  `json:"last_run"`
+	LastInodesFree        uint64  `json:"last_inodes_free"`
+	LastInodesUsedPercent float64 `json:"last_inodes_used_percent"`
+	LastInodeLevel        string  `json:"last_inode_level"`
+	NoProgressCount       int     `json:"no_progress_count"`
+}
+
 func newCleanupState() *cleanupState {
 	return &cleanupState{
 		Version: cleanupStateVersion,
 		Plugins: map[string]pluginStateRecord{},
+		Inodes:  map[string]inodeProgressRecord{},
 	}
 }
 
@@ -54,6 +70,9 @@ func loadCleanupState(path string) (*cleanupState, error) {
 	}
 	if state.Plugins == nil {
 		state.Plugins = map[string]pluginStateRecord{}
+	}
+	if state.Inodes == nil {
+		state.Inodes = map[string]inodeProgressRecord{}
 	}
 	if state.Version == 0 {
 		state.Version = cleanupStateVersion
@@ -116,4 +135,37 @@ func (s *cleanupState) recordPluginRun(plugin string, level plugins.CleanupLevel
 		record.LastError = result.Error.Error()
 	}
 	s.Plugins[plugin] = record
+}
+
+// inodeNoProgressCount returns the number of consecutive recent cleanup cycles
+// that failed to relieve inode pressure on path.
+func (s *cleanupState) inodeNoProgressCount(path string) int {
+	if s == nil || s.Inodes == nil || path == "" {
+		return 0
+	}
+	return s.Inodes[path].NoProgressCount
+}
+
+// recordInodeProgress updates the inode no-progress tracker for path. When
+// improved is true (the cycle increased free inodes or cleared inode pressure)
+// the counter resets; otherwise it increments so the daemon can detect
+// unrelievable inode pressure and back off.
+func (s *cleanupState) recordInodeProgress(path string, inodesFree uint64, usedPercent float64, level string, now time.Time, improved bool) {
+	if s == nil || path == "" {
+		return
+	}
+	if s.Inodes == nil {
+		s.Inodes = map[string]inodeProgressRecord{}
+	}
+	record := s.Inodes[path]
+	if improved {
+		record.NoProgressCount = 0
+	} else {
+		record.NoProgressCount++
+	}
+	record.LastRun = now.UTC().Format(time.RFC3339)
+	record.LastInodesFree = inodesFree
+	record.LastInodesUsedPercent = usedPercent
+	record.LastInodeLevel = level
+	s.Inodes[path] = record
 }

@@ -55,6 +55,12 @@ var (
 	date    = "unknown"
 )
 
+// defaultInodeNoProgressLimit is the number of consecutive cleanup cycles that
+// must fail to relieve inode pressure before the daemon stops bypassing
+// cooldown for inode-only escalation. Used when policy.inode_no_progress_limit
+// is unset.
+const defaultInodeNoProgressLimit = 3
+
 func main() {
 	// Parse command line flags
 	var (
@@ -168,11 +174,15 @@ func main() {
 	}))
 
 	// Create disk monitor
-	diskMon := monitor.NewDiskMonitor(
+	diskMon := monitor.NewDiskMonitorWithInodeThresholds(
 		cfg.Thresholds.Warning,
 		cfg.Thresholds.Moderate,
 		cfg.Thresholds.Aggressive,
 		cfg.Thresholds.Critical,
+		cfg.InodeThresholds.Warning,
+		cfg.InodeThresholds.Moderate,
+		cfg.InodeThresholds.Aggressive,
+		cfg.InodeThresholds.Critical,
 	)
 
 	// Create cleanup daemon
@@ -228,6 +238,10 @@ func main() {
 		"moderate", cfg.Thresholds.Moderate,
 		"aggressive", cfg.Thresholds.Aggressive,
 		"critical", cfg.Thresholds.Critical,
+		"inode_warning", cfg.InodeThresholds.Warning,
+		"inode_moderate", cfg.InodeThresholds.Moderate,
+		"inode_aggressive", cfg.InodeThresholds.Aggressive,
+		"inode_critical", cfg.InodeThresholds.Critical,
 	)
 
 	if err := d.run(ctx); err != nil && err != context.Canceled {
@@ -280,13 +294,14 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 
 	now := d.currentTime()
 	report := cycleReport{
-		Timestamp:    now.UTC().Format(time.RFC3339),
-		DryRun:       d.dryRun,
-		ForcedLevel:  forcedLevel != monitor.LevelNone,
-		Level:        level.String(),
-		MonitorPath:  d.primaryMonitorPath(assessment),
-		Mounts:       assessment.Mounts,
-		PluginFilter: d.pluginFilter,
+		Timestamp:     now.UTC().Format(time.RFC3339),
+		DryRun:        d.dryRun,
+		ForcedLevel:   forcedLevel != monitor.LevelNone,
+		Level:         level.String(),
+		MonitorPath:   d.primaryMonitorPath(assessment),
+		MaxInodeLevel: assessment.InodeLevel.String(),
+		Mounts:        assessment.Mounts,
+		PluginFilter:  d.pluginFilter,
 	}
 
 	cooldown := d.cleanupCooldown()
@@ -300,6 +315,9 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		report.StateError = stateErr.Error()
 		d.logger.Warn("failed to load cleanup state", "path", report.StateFile, "error", stateErr)
 	}
+	if stateErr == nil {
+		report.InodeNoProgressCount = state.inodeNoProgressCount(report.MonitorPath)
+	}
 	stateDirty := false
 
 	beforeStats, beforeErr := d.getDiskStats(report.MonitorPath)
@@ -308,11 +326,28 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		d.logger.Warn("failed to measure host free space before cleanup", "path", report.MonitorPath, "error", beforeErr)
 	} else {
 		report.HostFreeBeforeBytes = beforeStats.Free
+		report.HostInodesTotal = beforeStats.InodesTotal
+		report.HostInodesFreeBefore = beforeStats.InodesFree
+		report.HostInodesUsedPercentBefore = beforeStats.InodesUsedPercent
+		report.HostInodeLevel = d.inodeLevelForPath(report.MonitorPath, beforeStats).String()
+		report.HostByteLevel = d.byteLevelForPath(report.MonitorPath, beforeStats).String()
 		d.updateTargetFreeStatus(&report, beforeStats)
 	}
 
 	if level == monitor.LevelNone {
 		return d.writeReport(report)
+	}
+
+	// Engage the inode-pressure circuit breaker for this cycle when inode-only
+	// escalation has repeatedly failed to free inodes, so cooldown is applied
+	// instead of bypassed (TIN-2170).
+	report.InodeBackoff = d.inodeBackoffActive(report)
+	if report.InodeBackoff {
+		d.logger.Warn("inode pressure unrelieved by recent cleanup cycles; backing off to cooldown cadence",
+			"path", report.MonitorPath,
+			"inode_level", report.HostInodeLevel,
+			"no_progress_count", report.InodeNoProgressCount,
+		)
 	}
 
 	// Convert monitor level to plugin level
@@ -333,7 +368,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 			WouldRun:    true,
 		}
 
-		if !d.dryRun && report.TargetFreeMet {
+		if !d.dryRun && d.cleanupTargetMet(report) {
 			pluginReport.WouldRun = false
 			pluginReport.SkipReason = "target_free_met"
 			if report.StopReason == "" {
@@ -412,6 +447,27 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 	report.TotalItemsCleaned = totalItems
 
 	d.updateHostFreeAfter(&report, beforeStats, beforeErr)
+
+	// Record inode reclaim progress for the monitored path so the circuit
+	// breaker can detect inode pressure that repeated cycles fail to relieve
+	// (TIN-2170). A cycle counts as progress when free inodes increased or inode
+	// pressure cleared; otherwise the no-progress counter advances toward the
+	// backoff limit.
+	if !d.dryRun && stateErr == nil && report.HostInodesTotal > 0 {
+		if parseLevel(report.MaxInodeLevel) != monitor.LevelNone {
+			improved := report.HostInodesFreeDelta > 0 ||
+				parseLevel(report.HostInodeLevel) == monitor.LevelNone
+			state.recordInodeProgress(report.MonitorPath, report.HostInodesFreeAfter,
+				report.HostInodesUsedPercentAfter, report.HostInodeLevel, now, improved)
+			stateDirty = true
+		} else if state.inodeNoProgressCount(report.MonitorPath) > 0 {
+			// Inode pressure cleared: reset the stale no-progress counter.
+			state.recordInodeProgress(report.MonitorPath, report.HostInodesFreeAfter,
+				report.HostInodesUsedPercentAfter, report.HostInodeLevel, now, true)
+			stateDirty = true
+		}
+	}
+
 	if stateDirty {
 		if err := saveCleanupState(report.StateFile, state); err != nil {
 			report.StateError = err.Error()
@@ -438,18 +494,37 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 }
 
 type cycleReport struct {
-	Timestamp           string `json:"timestamp"`
-	DryRun              bool   `json:"dry_run"`
-	ForcedLevel         bool   `json:"forced_level"`
-	Level               string `json:"level"`
-	MonitorPath         string `json:"monitor_path"`
-	HostFreeBeforeBytes uint64 `json:"host_free_before_bytes"`
-	HostFreeAfterBytes  uint64 `json:"host_free_after_bytes"`
-	HostFreeDeltaBytes  int64  `json:"host_free_delta_bytes"`
-	HostFreeError       string `json:"host_free_error,omitempty"`
-	StateFile           string `json:"state_file,omitempty"`
-	StateError          string `json:"state_error,omitempty"`
-	CooldownSeconds     int64  `json:"cooldown_seconds,omitempty"`
+	Timestamp                   string  `json:"timestamp"`
+	DryRun                      bool    `json:"dry_run"`
+	ForcedLevel                 bool    `json:"forced_level"`
+	Level                       string  `json:"level"`
+	MonitorPath                 string  `json:"monitor_path"`
+	HostFreeBeforeBytes         uint64  `json:"host_free_before_bytes"`
+	HostFreeAfterBytes          uint64  `json:"host_free_after_bytes"`
+	HostFreeDeltaBytes          int64   `json:"host_free_delta_bytes"`
+	HostInodesTotal             uint64  `json:"host_inodes_total,omitempty"`
+	HostInodesFreeBefore        uint64  `json:"host_inodes_free_before,omitempty"`
+	HostInodesFreeAfter         uint64  `json:"host_inodes_free_after,omitempty"`
+	HostInodesFreeDelta         int64   `json:"host_inodes_free_delta,omitempty"`
+	HostInodesUsedPercentBefore float64 `json:"host_inodes_used_percent_before,omitempty"`
+	HostInodesUsedPercentAfter  float64 `json:"host_inodes_used_percent_after,omitempty"`
+	HostInodeLevel              string  `json:"host_inode_level,omitempty"`
+	// HostByteLevel is the byte-driven cleanup level for the monitored primary
+	// path, used to tell apart inode-only escalation from byte pressure.
+	HostByteLevel string `json:"host_byte_level,omitempty"`
+	// MaxInodeLevel is the highest inode-driven level across all monitored mounts
+	// and gates the cleanup stop condition.
+	MaxInodeLevel string `json:"max_inode_level,omitempty"`
+	// InodeNoProgressCount is the number of consecutive prior cycles that failed
+	// to relieve inode pressure on the primary path.
+	InodeNoProgressCount int `json:"inode_no_progress_count,omitempty"`
+	// InodeBackoff reports that the inode-pressure circuit breaker engaged this
+	// cycle, so the daemon applied cooldown instead of bypassing it.
+	InodeBackoff    bool   `json:"inode_backoff,omitempty"`
+	HostFreeError   string `json:"host_free_error,omitempty"`
+	StateFile       string `json:"state_file,omitempty"`
+	StateError      string `json:"state_error,omitempty"`
+	CooldownSeconds int64  `json:"cooldown_seconds,omitempty"`
 	// TargetUsedPercent is the legacy target_free config value as a maximum used percentage.
 	TargetUsedPercent int `json:"target_used_percent"`
 	// TargetFreeBytes is the free-space equivalent required to satisfy TargetUsedPercent.
@@ -480,13 +555,18 @@ type cycleReport struct {
 }
 
 type mountReport struct {
-	Label       string  `json:"label"`
-	Path        string  `json:"path"`
-	UsedPercent float64 `json:"used_percent"`
-	FreeGB      float64 `json:"free_gb"`
-	FreeBytes   uint64  `json:"free_bytes"`
-	Level       string  `json:"level"`
-	Error       string  `json:"error,omitempty"`
+	Label             string  `json:"label"`
+	Path              string  `json:"path"`
+	UsedPercent       float64 `json:"used_percent"`
+	FreeGB            float64 `json:"free_gb"`
+	FreeBytes         uint64  `json:"free_bytes"`
+	ByteLevel         string  `json:"byte_level"`
+	InodesTotal       uint64  `json:"inodes_total,omitempty"`
+	InodesFree        uint64  `json:"inodes_free,omitempty"`
+	InodesUsedPercent float64 `json:"inodes_used_percent,omitempty"`
+	InodeLevel        string  `json:"inode_level,omitempty"`
+	Level             string  `json:"level"`
+	Error             string  `json:"error,omitempty"`
 }
 
 type pluginCycleReport struct {
@@ -519,8 +599,13 @@ type pluginListEntry struct {
 }
 
 type mountAssessment struct {
-	Level  monitor.CleanupLevel
-	Mounts []mountReport
+	Level monitor.CleanupLevel
+	// InodeLevel is the highest inode-driven cleanup level across all monitored
+	// mounts. It is tracked separately from Level so the cleanup stop condition
+	// does not declare success while any mount still has inode pressure, even
+	// when that mount is not the byte-pressure primary.
+	InodeLevel monitor.CleanupLevel
+	Mounts     []mountReport
 }
 
 // assessMounts monitors all configured mount points and returns the highest
@@ -548,30 +633,22 @@ func (d *daemon) assessMounts() mountAssessment {
 				continue
 			}
 
-			// Use per-mount thresholds if configured, otherwise use global
-			mountMonitor := d.monitor
-			if mount.ThresholdWarning > 0 || mount.ThresholdCritical > 0 {
-				warning := d.config.Thresholds.Warning
-				moderate := d.config.Thresholds.Moderate
-				aggressive := d.config.Thresholds.Aggressive
-				critical := d.config.Thresholds.Critical
-				if mount.ThresholdWarning > 0 {
-					warning = mount.ThresholdWarning
-				}
-				if mount.ThresholdCritical > 0 {
-					critical = mount.ThresholdCritical
-				}
-				mountMonitor = monitor.NewDiskMonitor(warning, moderate, aggressive, critical)
-			}
-
+			mountMonitor := d.monitorForMount(mount)
+			byteLevel := mountMonitor.CheckByteLevel(stats)
+			inodeLevel := mountMonitor.CheckInodeLevel(stats)
 			mountLevel := mountMonitor.CheckLevel(stats)
 			assessment.Mounts = append(assessment.Mounts, mountReport{
-				Label:       label,
-				Path:        mount.Path,
-				UsedPercent: stats.UsedPercent,
-				FreeGB:      stats.FreeGB,
-				FreeBytes:   stats.Free,
-				Level:       mountLevel.String(),
+				Label:             label,
+				Path:              mount.Path,
+				UsedPercent:       stats.UsedPercent,
+				FreeGB:            stats.FreeGB,
+				FreeBytes:         stats.Free,
+				ByteLevel:         byteLevel.String(),
+				InodesTotal:       stats.InodesTotal,
+				InodesFree:        stats.InodesFree,
+				InodesUsedPercent: stats.InodesUsedPercent,
+				InodeLevel:        inodeLevelDisplay(inodeLevel, stats.InodesTotal),
+				Level:             mountLevel.String(),
 			})
 
 			d.logger.Info("disk status",
@@ -579,11 +656,18 @@ func (d *daemon) assessMounts() mountAssessment {
 				"path", mount.Path,
 				"used_percent", fmt.Sprintf("%.1f%%", stats.UsedPercent),
 				"free_gb", fmt.Sprintf("%.1fGB", stats.FreeGB),
+				"inodes_used_percent", fmt.Sprintf("%.1f%%", stats.InodesUsedPercent),
+				"inodes_free", stats.InodesFree,
+				"byte_level", byteLevel.String(),
+				"inode_level", inodeLevel.String(),
 				"level", mountLevel.String(),
 			)
 
 			if mountLevel > assessment.Level {
 				assessment.Level = mountLevel
+			}
+			if inodeLevel > assessment.InodeLevel {
+				assessment.InodeLevel = inodeLevel
 			}
 		}
 	} else {
@@ -607,30 +691,116 @@ func (d *daemon) assessMounts() mountAssessment {
 			return assessment
 		}
 		detectedLevel := d.monitor.CheckLevel(stats)
+		byteLevel := d.monitor.CheckByteLevel(stats)
+		inodeLevel := d.monitor.CheckInodeLevel(stats)
 
 		assessment.Mounts = append(assessment.Mounts, mountReport{
-			Label:       monitorPath,
-			Path:        monitorPath,
-			UsedPercent: stats.UsedPercent,
-			FreeGB:      stats.FreeGB,
-			FreeBytes:   stats.Free,
-			Level:       detectedLevel.String(),
+			Label:             monitorPath,
+			Path:              monitorPath,
+			UsedPercent:       stats.UsedPercent,
+			FreeGB:            stats.FreeGB,
+			FreeBytes:         stats.Free,
+			ByteLevel:         byteLevel.String(),
+			InodesTotal:       stats.InodesTotal,
+			InodesFree:        stats.InodesFree,
+			InodesUsedPercent: stats.InodesUsedPercent,
+			InodeLevel:        inodeLevelDisplay(inodeLevel, stats.InodesTotal),
+			Level:             detectedLevel.String(),
 		})
 
 		d.logger.Info("disk status",
 			"used_percent", fmt.Sprintf("%.1f%%", stats.UsedPercent),
 			"free_gb", fmt.Sprintf("%.1fGB", stats.FreeGB),
+			"inodes_used_percent", fmt.Sprintf("%.1f%%", stats.InodesUsedPercent),
+			"inodes_free", stats.InodesFree,
+			"byte_level", byteLevel.String(),
+			"inode_level", inodeLevel.String(),
 			"level", detectedLevel.String(),
 		)
 
 		assessment.Level = detectedLevel
+		assessment.InodeLevel = inodeLevel
 	}
 
 	return assessment
 }
 
+// inodeLevelDisplay returns the inode cleanup level as a string, or "" when the
+// filesystem does not report a usable inode count, so callers can distinguish
+// "no inode pressure" (none) from "inodes not measured" (empty).
+func inodeLevelDisplay(level monitor.CleanupLevel, inodesTotal uint64) string {
+	if inodesTotal == 0 {
+		return ""
+	}
+	return level.String()
+}
+
 func (d *daemon) checkMounts() monitor.CleanupLevel {
 	return d.assessMounts().Level
+}
+
+func (d *daemon) monitorForMount(mount config.MountConfig) *monitor.DiskMonitor {
+	if mount.ThresholdWarning <= 0 &&
+		mount.ThresholdCritical <= 0 &&
+		mount.ThresholdInodeWarning <= 0 &&
+		mount.ThresholdInodeCritical <= 0 {
+		return d.monitor
+	}
+
+	warning := d.config.Thresholds.Warning
+	moderate := d.config.Thresholds.Moderate
+	aggressive := d.config.Thresholds.Aggressive
+	critical := d.config.Thresholds.Critical
+	if mount.ThresholdWarning > 0 {
+		warning = mount.ThresholdWarning
+	}
+	if mount.ThresholdCritical > 0 {
+		critical = mount.ThresholdCritical
+	}
+
+	inodeWarning := d.config.InodeThresholds.Warning
+	inodeModerate := d.config.InodeThresholds.Moderate
+	inodeAggressive := d.config.InodeThresholds.Aggressive
+	inodeCritical := d.config.InodeThresholds.Critical
+	if mount.ThresholdInodeWarning > 0 {
+		inodeWarning = mount.ThresholdInodeWarning
+	}
+	if mount.ThresholdInodeCritical > 0 {
+		inodeCritical = mount.ThresholdInodeCritical
+	}
+
+	return monitor.NewDiskMonitorWithInodeThresholds(
+		warning,
+		moderate,
+		aggressive,
+		critical,
+		inodeWarning,
+		inodeModerate,
+		inodeAggressive,
+		inodeCritical,
+	)
+}
+
+func (d *daemon) inodeLevelForPath(path string, stats *monitor.DiskStats) monitor.CleanupLevel {
+	if d.config != nil {
+		for _, mount := range d.config.MonitoredMounts {
+			if mount.Path == path {
+				return d.monitorForMount(mount).CheckInodeLevel(stats)
+			}
+		}
+	}
+	return d.monitor.CheckInodeLevel(stats)
+}
+
+func (d *daemon) byteLevelForPath(path string, stats *monitor.DiskStats) monitor.CleanupLevel {
+	if d.config != nil {
+		for _, mount := range d.config.MonitoredMounts {
+			if mount.Path == path {
+				return d.monitorForMount(mount).CheckByteLevel(stats)
+			}
+		}
+	}
+	return d.monitor.CheckByteLevel(stats)
 }
 
 func (d *daemon) primaryMonitorPath(assessment mountAssessment) string {
@@ -698,10 +868,42 @@ func (d *daemon) shouldApplyCooldown(report cycleReport, level monitor.CleanupLe
 	if report.MinimumFreeBytes > 0 && !report.MinimumFreeMet {
 		return false
 	}
-	return !d.dryRun &&
-		!report.ForcedLevel &&
-		level < d.cooldownBypassLevel() &&
-		d.cleanupCooldown() > 0
+	if d.dryRun || report.ForcedLevel || d.cleanupCooldown() <= 0 {
+		return false
+	}
+	if level >= d.cooldownBypassLevel() {
+		// An escalation at/above the bypass level normally ignores cooldown.
+		// Circuit breaker: when that escalation is driven solely by inode
+		// pressure that recent cycles have repeatedly failed to relieve, resume
+		// applying cooldown so the daemon backs off to the cooldown cadence
+		// instead of churning every poll interval (TIN-2170).
+		return report.InodeBackoff
+	}
+	return true
+}
+
+// inodeBackoffActive reports whether the circuit breaker should engage: the
+// monitor-path escalation is forced by inode pressure (not bytes) at/above the
+// bypass level, and the configured number of consecutive cleanup cycles have
+// failed to free inodes on that path.
+func (d *daemon) inodeBackoffActive(report cycleReport) bool {
+	bypass := d.cooldownBypassLevel()
+	if parseLevel(report.HostInodeLevel) < bypass {
+		return false
+	}
+	if parseLevel(report.HostByteLevel) >= bypass {
+		// Bytes are independently at/above the bypass level, so cleanup is
+		// expected to make byte progress; do not back off.
+		return false
+	}
+	return report.InodeNoProgressCount >= d.inodeNoProgressLimit()
+}
+
+func (d *daemon) inodeNoProgressLimit() int {
+	if d.config != nil && d.config.Policy.InodeNoProgressLimit > 0 {
+		return d.config.Policy.InodeNoProgressLimit
+	}
+	return defaultInodeNoProgressLimit
 }
 
 func (d *daemon) cooldownBypassLevel() monitor.CleanupLevel {
@@ -732,10 +934,23 @@ func (d *daemon) updateHostFreeAfter(report *cycleReport, beforeStats *monitor.D
 	}
 
 	report.HostFreeAfterBytes = afterStats.Free
+	report.HostInodesTotal = afterStats.InodesTotal
+	report.HostInodesFreeAfter = afterStats.InodesFree
+	report.HostInodesUsedPercentAfter = afterStats.InodesUsedPercent
+	report.HostInodeLevel = d.inodeLevelForPath(report.MonitorPath, afterStats).String()
 	if beforeErr == nil && beforeStats != nil {
 		report.HostFreeDeltaBytes = int64(afterStats.Free) - int64(beforeStats.Free)
+		report.HostInodesFreeDelta = int64(afterStats.InodesFree) - int64(beforeStats.InodesFree)
 	}
 	d.updateTargetFreeStatus(report, afterStats)
+}
+
+func (d *daemon) cleanupTargetMet(report cycleReport) bool {
+	// Do not declare the cleanup target met while any monitored mount still has
+	// inode pressure, even if it is not the byte-pressure primary path. The byte
+	// target alone is insufficient because an inode-exhausted filesystem can have
+	// ample free bytes (the honey nix-store crunch, TIN-2165/TIN-2170).
+	return report.TargetFreeMet && parseLevel(report.MaxInodeLevel) == monitor.LevelNone
 }
 
 func (d *daemon) updateTargetFreeStatus(report *cycleReport, stats *monitor.DiskStats) {

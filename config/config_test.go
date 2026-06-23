@@ -29,6 +29,18 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Thresholds.Critical != 95 {
 		t.Errorf("expected Critical=95, got %d", cfg.Thresholds.Critical)
 	}
+	if cfg.InodeThresholds.Warning != 80 {
+		t.Errorf("expected inode Warning=80, got %d", cfg.InodeThresholds.Warning)
+	}
+	if cfg.InodeThresholds.Moderate != 85 {
+		t.Errorf("expected inode Moderate=85, got %d", cfg.InodeThresholds.Moderate)
+	}
+	if cfg.InodeThresholds.Aggressive != 90 {
+		t.Errorf("expected inode Aggressive=90, got %d", cfg.InodeThresholds.Aggressive)
+	}
+	if cfg.InodeThresholds.Critical != 95 {
+		t.Errorf("expected inode Critical=95, got %d", cfg.InodeThresholds.Critical)
+	}
 	if cfg.Policy.Cooldown != "30m" {
 		t.Errorf("expected cooldown=30m, got %q", cfg.Policy.Cooldown)
 	}
@@ -122,6 +134,48 @@ thresholds:
 	// Should use defaults for unspecified values
 	if cfg.Thresholds.Moderate != 85 {
 		t.Errorf("expected default Moderate=85, got %d", cfg.Thresholds.Moderate)
+	}
+}
+
+func TestLoadConfigInodeThresholds(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	content := `
+inode_thresholds:
+  warning: 70
+  moderate: 80
+  aggressive: 90
+  critical: 98
+monitored_mounts:
+  - path: /nix
+    label: nix
+    threshold_inode_warning: 60
+    threshold_inode_critical: 92
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.InodeThresholds.Warning != 70 {
+		t.Fatalf("expected inode warning 70, got %d", cfg.InodeThresholds.Warning)
+	}
+	if cfg.InodeThresholds.Critical != 98 {
+		t.Fatalf("expected inode critical 98, got %d", cfg.InodeThresholds.Critical)
+	}
+	if len(cfg.MonitoredMounts) != 1 {
+		t.Fatalf("expected one mount, got %d", len(cfg.MonitoredMounts))
+	}
+	mount := cfg.MonitoredMounts[0]
+	if mount.ThresholdInodeWarning != 60 {
+		t.Fatalf("expected mount inode warning 60, got %d", mount.ThresholdInodeWarning)
+	}
+	if mount.ThresholdInodeCritical != 92 {
+		t.Fatalf("expected mount inode critical 92, got %d", mount.ThresholdInodeCritical)
 	}
 }
 

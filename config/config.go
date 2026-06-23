@@ -18,6 +18,9 @@ type Config struct {
 	// Thresholds for disk usage (percentage)
 	Thresholds Thresholds `yaml:"thresholds"`
 
+	// InodeThresholds for inode usage (percentage)
+	InodeThresholds Thresholds `yaml:"inode_thresholds"`
+
 	// TargetFree is the legacy config key for target maximum used percentage after cleanup.
 	TargetFree int `yaml:"target_free"`
 
@@ -105,6 +108,10 @@ type MountConfig struct {
 	ThresholdWarning int `yaml:"threshold_warning,omitempty"`
 	// ThresholdCritical overrides the global critical threshold
 	ThresholdCritical int `yaml:"threshold_critical,omitempty"`
+	// ThresholdInodeWarning overrides the global inode warning threshold
+	ThresholdInodeWarning int `yaml:"threshold_inode_warning,omitempty"`
+	// ThresholdInodeCritical overrides the global inode critical threshold
+	ThresholdInodeCritical int `yaml:"threshold_inode_critical,omitempty"`
 }
 
 // Thresholds defines disk usage thresholds for graduated cleanup.
@@ -163,6 +170,11 @@ type PolicyConfig struct {
 	MinimumFreeGB int `yaml:"minimum_free_gb"`
 	// StateFile stores daemon cleanup state such as per-plugin last-run timestamps.
 	StateFile string `yaml:"state_file"`
+	// InodeNoProgressLimit is the number of consecutive cleanup cycles that fail
+	// to relieve inode pressure before the daemon stops bypassing cooldown for
+	// inode-only escalation and backs off to the cooldown cadence. Zero uses the
+	// built-in default.
+	InodeNoProgressLimit int `yaml:"inode_no_progress_limit"`
 }
 
 // DockerConfig holds Docker-specific cleanup settings.
@@ -436,12 +448,19 @@ func DefaultConfig() *Config {
 			Aggressive: 90,
 			Critical:   95,
 		},
+		InodeThresholds: Thresholds{
+			Warning:    80,
+			Moderate:   85,
+			Aggressive: 90,
+			Critical:   95,
+		},
 		TargetFree: 70,
 		Policy: PolicyConfig{
-			Cooldown:            "30m",
-			CooldownBypassLevel: "critical",
-			MinimumFreeGB:       0,
-			StateFile:           stateFile,
+			Cooldown:             "30m",
+			CooldownBypassLevel:  "critical",
+			MinimumFreeGB:        0,
+			StateFile:            stateFile,
+			InodeNoProgressLimit: 3,
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{

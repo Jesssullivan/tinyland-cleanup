@@ -12,6 +12,15 @@ thresholds:
   aggressive: 90   # Level 3: Prune volumes
   critical: 95     # Level 4: Emergency cleanup
 
+# Inode usage thresholds (percentage). These are evaluated in parallel with
+# byte thresholds, so small-file pressure can trigger cleanup even when bytes
+# are still healthy.
+inode_thresholds:
+  warning: 80
+  moderate: 85
+  aggressive: 90
+  critical: 95
+
 # Target maximum used-space percentage after cleanup.
 # Historical key name is target_free.
 target_free: 70
@@ -28,6 +37,11 @@ policy:
   # monitored filesystem has at least this many GiB free.
   minimum_free_gb: 0
   state_file: ~/.local/state/tinyland-cleanup/state.json
+  # Inode-pressure circuit breaker. When inode-only critical pressure persists
+  # without being relieved for this many consecutive cycles, the daemon stops
+  # bypassing cooldown and backs off to the cooldown cadence instead of running
+  # every plugin every poll interval. Zero uses the built-in default (3).
+  inode_no_progress_limit: 3
 
 # Enable/disable specific cleanup plugins
 enable:
@@ -75,6 +89,8 @@ github_runner:
 #     label: "nix"
 #     threshold_warning: 70
 #     threshold_critical: 85
+#     threshold_inode_warning: 70
+#     threshold_inode_critical: 90
 
 # Docker-specific settings
 docker:

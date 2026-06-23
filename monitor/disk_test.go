@@ -43,6 +43,71 @@ func TestDiskMonitorCheckLevel(t *testing.T) {
 	}
 }
 
+func TestDiskMonitorCheckLevelUsesInodePressure(t *testing.T) {
+	mon := NewDiskMonitor(80, 85, 90, 95)
+
+	stats := &DiskStats{
+		Path:              "/nix",
+		UsedPercent:       60,
+		FreePercent:       40,
+		InodesTotal:       1000,
+		InodesUsed:        960,
+		InodesFree:        40,
+		InodesUsedPercent: 96,
+		InodesFreePercent: 4,
+	}
+
+	if got := mon.CheckByteLevel(stats); got != LevelNone {
+		t.Fatalf("byte level = %s, want none", got)
+	}
+	if got := mon.CheckInodeLevel(stats); got != LevelCritical {
+		t.Fatalf("inode level = %s, want critical", got)
+	}
+	if got := mon.CheckLevel(stats); got != LevelCritical {
+		t.Fatalf("combined level = %s, want critical", got)
+	}
+}
+
+func TestDiskMonitorCheckLevelIgnoresUnavailableInodeStats(t *testing.T) {
+	mon := NewDiskMonitor(80, 85, 90, 95)
+	stats := &DiskStats{
+		UsedPercent:       60,
+		InodesUsedPercent: 99,
+	}
+
+	if got := mon.CheckInodeLevel(stats); got != LevelNone {
+		t.Fatalf("inode level = %s, want none when inode totals are unavailable", got)
+	}
+	if got := mon.CheckLevel(stats); got != LevelNone {
+		t.Fatalf("combined level = %s, want none", got)
+	}
+}
+
+func TestDiskMonitorCustomInodeThresholds(t *testing.T) {
+	mon := NewDiskMonitorWithInodeThresholds(80, 85, 90, 95, 50, 60, 70, 80)
+	stats := &DiskStats{
+		UsedPercent:       10,
+		InodesTotal:       100,
+		InodesUsedPercent: 75,
+	}
+
+	if got := mon.CheckLevel(stats); got != LevelAggressive {
+		t.Fatalf("combined level = %s, want aggressive", got)
+	}
+}
+
+func TestInodeUsedPercentPrefersCountedInodes(t *testing.T) {
+	if got := inodeUsedPercent(1000, 990, 0); got != 99 {
+		t.Fatalf("inode used percent = %v, want 99", got)
+	}
+	if got := inodeUsedPercent(1000, 0, 42); got != 42 {
+		t.Fatalf("inode used percent fallback = %v, want 42", got)
+	}
+	if got := inodeUsedPercent(0, 99, 42); got != 0 {
+		t.Fatalf("inode used percent unavailable = %v, want 0", got)
+	}
+}
+
 func TestCleanupLevelString(t *testing.T) {
 	tests := []struct {
 		level    CleanupLevel
@@ -88,6 +153,14 @@ func TestDiskStats(t *testing.T) {
 	if stats.FreePercent < 0 || stats.FreePercent > 100 {
 		t.Errorf("FreePercent %v out of range [0,100]", stats.FreePercent)
 	}
+	if stats.InodesTotal > 0 {
+		if stats.InodesUsedPercent < 0 || stats.InodesUsedPercent > 100 {
+			t.Errorf("InodesUsedPercent %v out of range [0,100]", stats.InodesUsedPercent)
+		}
+		if stats.InodesFreePercent < 0 || stats.InodesFreePercent > 100 {
+			t.Errorf("InodesFreePercent %v out of range [0,100]", stats.InodesFreePercent)
+		}
+	}
 
 	// UsedPercent + FreePercent should be ~100
 	total := stats.UsedPercent + stats.FreePercent
@@ -129,5 +202,17 @@ func TestNewDiskMonitor(t *testing.T) {
 	}
 	if mon.ThresholdCritical != 95 {
 		t.Errorf("ThresholdCritical = %v, want 95", mon.ThresholdCritical)
+	}
+	if mon.ThresholdInodeWarning != 70 {
+		t.Errorf("ThresholdInodeWarning = %v, want 70", mon.ThresholdInodeWarning)
+	}
+	if mon.ThresholdInodeModerate != 80 {
+		t.Errorf("ThresholdInodeModerate = %v, want 80", mon.ThresholdInodeModerate)
+	}
+	if mon.ThresholdInodeAggressive != 90 {
+		t.Errorf("ThresholdInodeAggressive = %v, want 90", mon.ThresholdInodeAggressive)
+	}
+	if mon.ThresholdInodeCritical != 95 {
+		t.Errorf("ThresholdInodeCritical = %v, want 95", mon.ThresholdInodeCritical)
 	}
 }
