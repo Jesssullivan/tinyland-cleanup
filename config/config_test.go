@@ -385,6 +385,24 @@ func TestDevArtifactsConfigDefaults(t *testing.T) {
 	if cfg.DevArtifacts.AgentWorktreeArtifacts {
 		t.Error("DevArtifacts.AgentWorktreeArtifacts should be false by default")
 	}
+	if cfg.DevArtifacts.AgentWorktreeRootCleanup {
+		t.Error("DevArtifacts.AgentWorktreeRootCleanup should be false by default")
+	}
+	if len(cfg.DevArtifacts.AgentWorktreeRoots) == 0 {
+		t.Error("DevArtifacts.AgentWorktreeRoots should include default roots")
+	}
+	if cfg.DevArtifacts.AgentWorktreeStaleAfter != "14d" {
+		t.Errorf("DevArtifacts.AgentWorktreeStaleAfter should default to 14d, got %q", cfg.DevArtifacts.AgentWorktreeStaleAfter)
+	}
+	if cfg.DevArtifacts.AgentTranscriptCompression {
+		t.Error("DevArtifacts.AgentTranscriptCompression should be false by default")
+	}
+	if len(cfg.DevArtifacts.AgentTranscriptRoots) == 0 {
+		t.Error("DevArtifacts.AgentTranscriptRoots should include default roots")
+	}
+	if cfg.DevArtifacts.AgentTranscriptCompressAfter != "14d" {
+		t.Errorf("DevArtifacts.AgentTranscriptCompressAfter should default to 14d, got %q", cfg.DevArtifacts.AgentTranscriptCompressAfter)
+	}
 	if cfg.DevArtifacts.PnpmStore {
 		t.Error("DevArtifacts.PnpmStore should be false by default")
 	}
@@ -698,6 +716,15 @@ dev_artifacts:
   rust_targets: false
   go_build_cache: true
   agent_worktree_artifacts: false
+  agent_worktree_root_cleanup: true
+  agent_worktree_roots:
+    - ~/.claude/worktrees
+    - ~/git/*/.claude/worktrees
+  agent_worktree_stale_after: 7d
+  agent_transcript_compression: true
+  agent_transcript_roots:
+    - ~/.codex/sessions
+  agent_transcript_compress_after: 7d
   pnpm_store: false
   haskell_cache: false
   lmstudio_models: true
@@ -843,6 +870,24 @@ darwin_dev_caches:
 	}
 	if cfg.DevArtifacts.AgentWorktreeArtifacts {
 		t.Error("DevArtifacts.AgentWorktreeArtifacts should be false per config")
+	}
+	if !cfg.DevArtifacts.AgentWorktreeRootCleanup {
+		t.Error("DevArtifacts.AgentWorktreeRootCleanup should be true per config")
+	}
+	if len(cfg.DevArtifacts.AgentWorktreeRoots) != 2 {
+		t.Errorf("expected 2 agent worktree roots, got %d", len(cfg.DevArtifacts.AgentWorktreeRoots))
+	}
+	if cfg.DevArtifacts.AgentWorktreeStaleAfter != "7d" {
+		t.Errorf("expected agent worktree stale policy 7d, got %q", cfg.DevArtifacts.AgentWorktreeStaleAfter)
+	}
+	if !cfg.DevArtifacts.AgentTranscriptCompression {
+		t.Error("DevArtifacts.AgentTranscriptCompression should be true per config")
+	}
+	if len(cfg.DevArtifacts.AgentTranscriptRoots) != 1 {
+		t.Errorf("expected 1 agent transcript root, got %d", len(cfg.DevArtifacts.AgentTranscriptRoots))
+	}
+	if cfg.DevArtifacts.AgentTranscriptCompressAfter != "7d" {
+		t.Errorf("expected agent transcript compression policy 7d, got %q", cfg.DevArtifacts.AgentTranscriptCompressAfter)
 	}
 	if cfg.DevArtifacts.PnpmStore {
 		t.Error("DevArtifacts.PnpmStore should be false per config")

@@ -337,6 +337,18 @@ type DevArtifactsConfig struct {
 	ZigArtifacts bool `yaml:"zig_artifacts"`
 	// AgentWorktreeArtifacts enables cleanup of generated outputs inside agent worktree roots.
 	AgentWorktreeArtifacts bool `yaml:"agent_worktree_artifacts"`
+	// AgentWorktreeRootCleanup enables deletion of stale top-level agent worktree roots.
+	AgentWorktreeRootCleanup bool `yaml:"agent_worktree_root_cleanup"`
+	// AgentWorktreeRoots are top-level directories containing agent scratch worktrees.
+	AgentWorktreeRoots []string `yaml:"agent_worktree_roots"`
+	// AgentWorktreeStaleAfter is the age after which top-level agent worktrees are cleanup candidates.
+	AgentWorktreeStaleAfter string `yaml:"agent_worktree_stale_after"`
+	// AgentTranscriptCompression enables gzip compression for stale agent transcript JSONL files.
+	AgentTranscriptCompression bool `yaml:"agent_transcript_compression"`
+	// AgentTranscriptRoots are directories scanned recursively for agent transcript JSONL files.
+	AgentTranscriptRoots []string `yaml:"agent_transcript_roots"`
+	// AgentTranscriptCompressAfter is the age after which JSONL transcripts are compressed.
+	AgentTranscriptCompressAfter string `yaml:"agent_transcript_compress_after"`
 	// PnpmStore enables pnpm store prune for the rebuildable global package store.
 	PnpmStore bool `yaml:"pnpm_store"`
 	// GoBuildCache enables Go build cache cleanup
@@ -540,29 +552,37 @@ func DefaultConfig() *Config {
 			MinFileSizeMB:  10,
 		},
 		DevArtifacts: DevArtifactsConfig{
-			ScanPaths:               defaultScanPaths,
-			ScanMaxDuration:         "30s",
-			ScanMaxEntries:          250000,
-			TempArtifacts:           true,
-			TempScanPaths:           defaultTempScanPaths,
-			TempScanMaxRoots:        128,
-			TempArtifactMinMB:       256,
-			TempArtifactStaleAfter:  "6h",
-			NixTempRoots:            true,
-			NixTempRootMinMB:        1,
-			NixTempRootStaleAfter:   "24h",
-			NodeModules:             true,
-			PythonVenvs:             true,
-			RustTargets:             true,
-			ZigArtifacts:            true,
-			AgentWorktreeArtifacts:  false,
-			PnpmStore:               false,
-			GoBuildCache:            true,
-			HaskellCache:            true,
-			LMStudioModels:          false,
-			LargeLocalArtifacts:     true,
-			LargeLocalArtifactMinMB: 1024,
-			ProtectPaths:            []string{},
+			ScanPaths:                defaultScanPaths,
+			ScanMaxDuration:          "30s",
+			ScanMaxEntries:           250000,
+			TempArtifacts:            true,
+			TempScanPaths:            defaultTempScanPaths,
+			TempScanMaxRoots:         128,
+			TempArtifactMinMB:        256,
+			TempArtifactStaleAfter:   "6h",
+			NixTempRoots:             true,
+			NixTempRootMinMB:         1,
+			NixTempRootStaleAfter:    "24h",
+			NodeModules:              true,
+			PythonVenvs:              true,
+			RustTargets:              true,
+			ZigArtifacts:             true,
+			AgentWorktreeArtifacts:   false,
+			AgentWorktreeRootCleanup: false,
+			AgentWorktreeRoots: []string{
+				filepath.Join(home, ".claude", "worktrees"),
+			},
+			AgentWorktreeStaleAfter:      "14d",
+			AgentTranscriptCompression:   false,
+			AgentTranscriptRoots:         []string{filepath.Join(home, ".codex", "sessions")},
+			AgentTranscriptCompressAfter: "14d",
+			PnpmStore:                    false,
+			GoBuildCache:                 true,
+			HaskellCache:                 true,
+			LMStudioModels:               false,
+			LargeLocalArtifacts:          true,
+			LargeLocalArtifactMinMB:      1024,
+			ProtectPaths:                 []string{},
 		},
 		DarwinDevCaches: DarwinDevCachesConfig{
 			Enabled:    runtime.GOOS == "darwin",

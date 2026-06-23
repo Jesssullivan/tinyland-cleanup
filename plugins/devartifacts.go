@@ -6,6 +6,7 @@
 package plugins
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -277,6 +278,12 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			p.planTemporaryGeneratedArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets, scanBudget)
 		}
 	}
+	if daCfg.AgentTranscriptCompression {
+		p.planAgentTranscripts(scanCtx, home, parseNixPolicyDuration(daCfg.AgentTranscriptCompressAfter, 14*24*time.Hour), mutates, daCfg, &targets, scanBudget)
+	}
+	if daCfg.AgentWorktreeRootCleanup {
+		p.planAgentWorktreeRoots(scanCtx, home, level, daCfg, &targets, scanBudget)
+	}
 	for _, scanPath := range daCfg.ScanPaths {
 		expanded := expandHome(scanPath, home)
 		if !pathExistsAndIsDir(expanded) {
@@ -324,7 +331,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 
 	var estimated int64
 	for _, target := range targets {
-		if target.Action == "delete" || target.Action == "clean-cache" {
+		if target.Action == "delete" || target.Action == "compress" || target.Action == "clean-cache" {
 			estimated += target.Bytes
 		}
 	}
@@ -402,6 +409,24 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 				return result
 			}
 		}
+	}
+	if daCfg.AgentTranscriptCompression {
+		freed := p.compressAgentTranscripts(scanCtx, home, parseNixPolicyDuration(daCfg.AgentTranscriptCompressAfter, 14*24*time.Hour), daCfg, logger, scanBudget)
+		result.BytesFreed += freed
+		if freed > 0 {
+			result.ItemsCleaned++
+		}
+	}
+	if daCfg.AgentWorktreeRootCleanup {
+		freed := p.cleanAgentWorktreeRoots(scanCtx, home, level, daCfg, logger, scanBudget)
+		result.BytesFreed += freed
+		if freed > 0 {
+			result.ItemsCleaned++
+		}
+	}
+	if scanBudget.exhausted() {
+		logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+		return result
 	}
 
 	// Scan configured paths for dev artifacts
@@ -575,6 +600,19 @@ func (p *DevArtifactsPlugin) planAgentWorktreeArtifacts(ctx context.Context, hom
 	}
 }
 
+func (p *DevArtifactsPlugin) planAgentTranscripts(ctx context.Context, home string, staleAfter time.Duration, mutates bool, daCfg config.DevArtifactsConfig, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+	p.forEachAgentTranscript(ctx, home, staleAfter, daCfg, func(path string, info os.FileInfo, activeReason string) {
+		*targets = append(*targets, p.agentTranscriptTarget(home, path, info.Size(), staleAfter, mutates, activeReason))
+	}, budgets...)
+}
+
+func (p *DevArtifactsPlugin) planAgentWorktreeRoots(ctx context.Context, home string, level CleanupLevel, daCfg config.DevArtifactsConfig, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+	staleAfter := parseNixPolicyDuration(daCfg.AgentWorktreeStaleAfter, 14*24*time.Hour)
+	p.forEachAgentWorktreeRoot(ctx, home, staleAfter, daCfg, func(path string, info os.FileInfo, bytes int64, activeReason string) {
+		*targets = append(*targets, p.agentWorktreeRootTarget(path, bytes, info.ModTime(), staleAfter, time.Now(), level >= LevelCritical, p.isProtected(path, daCfg.ProtectPaths), activeReason))
+	}, budgets...)
+}
+
 func (p *DevArtifactsPlugin) planLargeLocalArtifacts(ctx context.Context, scanPath string, minBytes int64, protectPaths []string, mountedImages map[string]string, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	p.findLargeLocalArtifacts(ctx, scanPath, minBytes, protectPaths, mountedImages, func(target CleanupTarget) {
@@ -586,6 +624,175 @@ func agentWorktreeRoots(home string) []string {
 	return []string{
 		filepath.Join(home, ".claude", "worktrees"),
 	}
+}
+
+func configuredAgentWorktreeRoots(home string, daCfg config.DevArtifactsConfig) []string {
+	roots := daCfg.AgentWorktreeRoots
+	if len(roots) == 0 {
+		roots = agentWorktreeRoots(home)
+	}
+	return expandConfiguredAgentRoots(home, roots)
+}
+
+func configuredAgentTranscriptRoots(home string, daCfg config.DevArtifactsConfig) []string {
+	roots := daCfg.AgentTranscriptRoots
+	if len(roots) == 0 {
+		roots = []string{filepath.Join(home, ".codex", "sessions")}
+	}
+	return expandConfiguredAgentRoots(home, roots)
+}
+
+func expandConfiguredAgentRoots(home string, roots []string) []string {
+	seen := map[string]struct{}{}
+	var expanded []string
+	for _, rawRoot := range roots {
+		root := filepath.Clean(expandHome(rawRoot, home))
+		matches := []string{root}
+		if strings.ContainsAny(root, "*?[") {
+			if globMatches, err := filepath.Glob(root); err == nil && len(globMatches) > 0 {
+				matches = globMatches
+			}
+		}
+		for _, match := range matches {
+			clean := filepath.Clean(match)
+			if _, ok := seen[clean]; ok {
+				continue
+			}
+			seen[clean] = struct{}{}
+			expanded = append(expanded, clean)
+		}
+	}
+	sort.Strings(expanded)
+	return expanded
+}
+
+func (p *DevArtifactsPlugin) forEachAgentTranscript(ctx context.Context, home string, staleAfter time.Duration, daCfg config.DevArtifactsConfig, callback func(path string, info os.FileInfo, activeReason string), budgets ...*devArtifactScanBudget) {
+	budget := optionalDevArtifactScanBudget(budgets)
+	roots := configuredAgentTranscriptRoots(home, daCfg)
+	activeRefs := activeAgentPathReferences(ctx, roots, home)
+	now := time.Now()
+	for _, root := range roots {
+		if !pathExistsAndIsDir(root) {
+			continue
+		}
+		filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err := budget.checkPath(ctx, path); err != nil {
+				return err
+			}
+			if err != nil || info == nil {
+				return nil
+			}
+			if info.IsDir() {
+				return nil
+			}
+			if !info.Mode().IsRegular() || !strings.HasSuffix(path, ".jsonl") {
+				return nil
+			}
+			if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+				return nil
+			}
+			callback(path, info, activeRefs[filepath.Clean(path)])
+			return nil
+		})
+	}
+}
+
+func (p *DevArtifactsPlugin) forEachAgentWorktreeRoot(ctx context.Context, home string, staleAfter time.Duration, daCfg config.DevArtifactsConfig, callback func(path string, info os.FileInfo, bytes int64, activeReason string), budgets ...*devArtifactScanBudget) {
+	budget := optionalDevArtifactScanBudget(budgets)
+	roots := configuredAgentWorktreeRoots(home, daCfg)
+	activeRefs := activeAgentPathReferences(ctx, roots, home)
+	now := time.Now()
+	for _, root := range roots {
+		if !pathExistsAndIsDir(root) {
+			continue
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if ctx.Err() != nil {
+				return
+			}
+			if !entry.IsDir() {
+				continue
+			}
+			path := filepath.Join(root, entry.Name())
+			if err := budget.checkPath(ctx, path); err != nil {
+				return
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+				continue
+			}
+			bytes, err := getDirAllocatedBytesContext(ctx, path)
+			if err != nil {
+				budget.markContextError(ctx, path)
+				return
+			}
+			callback(path, info, bytes, activeRefs[filepath.Clean(path)])
+		}
+	}
+}
+
+func (p *DevArtifactsPlugin) agentTranscriptTarget(home string, path string, bytes int64, staleAfter time.Duration, mutates bool, activeReason string) CleanupTarget {
+	active := activeReason != ""
+	target := CleanupTarget{
+		Type:      "agent-transcript",
+		Name:      devArtifactHomeRelativePath(home, path),
+		Path:      path,
+		Bytes:     bytes,
+		Active:    active,
+		Protected: active || !mutates,
+	}
+	switch {
+	case active:
+		target.Action = "protect"
+		target.Reason = "active process references this transcript: " + activeReason
+	case !mutates:
+		target.Action = "report"
+		target.Reason = "warning level reports agent transcripts without compressing them"
+	default:
+		target.Action = "compress"
+		target.Reason = fmt.Sprintf("agent transcript JSONL is older than %s and can be gzip-compressed without deleting history", formatDevArtifactAge(staleAfter))
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(target.Action))
+	return target
+}
+
+func (p *DevArtifactsPlugin) agentWorktreeRootTarget(path string, bytes int64, modTime time.Time, staleAfter time.Duration, now time.Time, canDelete bool, protected bool, activeReason string) CleanupTarget {
+	active := activeReason != ""
+	target := CleanupTarget{
+		Type:      "agent-worktree-root",
+		Name:      filepath.Base(path),
+		Path:      path,
+		Bytes:     bytes,
+		Active:    active,
+		Protected: active || protected || !canDelete,
+	}
+	switch {
+	case active:
+		target.Action = "protect"
+		target.Reason = "active process references this agent worktree: " + activeReason
+	case protected:
+		target.Action = "protect"
+		target.Reason = "path is covered by dev_artifacts.protect_paths"
+	case staleAfter > 0 && modTime.After(now.Add(-staleAfter)):
+		target.Action = "protect"
+		target.Protected = true
+		target.Reason = fmt.Sprintf("agent worktree root is newer than %s", formatDevArtifactAge(staleAfter))
+	case !canDelete:
+		target.Action = "report"
+		target.Reason = "agent worktree root deletion requires critical cleanup level"
+	default:
+		target.Action = "delete"
+		target.Reason = fmt.Sprintf("top-level agent scratch worktree is older than %s", formatDevArtifactAge(staleAfter))
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierDestructive, hostReclaimForAction(target.Action))
+	return target
 }
 
 func (p *DevArtifactsPlugin) planPnpmStore(ctx context.Context, home string, level CleanupLevel, active devArtifactActivity, targets *[]CleanupTarget) {
@@ -633,6 +840,51 @@ func (p *DevArtifactsPlugin) cleanAgentWorktreeArtifacts(ctx context.Context, ho
 		}
 		totalFreed += p.cleanRustTargets(ctx, root, rustAge, daCfg.ProtectPaths, active, tracker, logger, budgets...)
 	}
+	return totalFreed
+}
+
+func (p *DevArtifactsPlugin) compressAgentTranscripts(ctx context.Context, home string, staleAfter time.Duration, daCfg config.DevArtifactsConfig, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+	var totalFreed int64
+	p.forEachAgentTranscript(ctx, home, staleAfter, daCfg, func(path string, info os.FileInfo, activeReason string) {
+		if activeReason != "" {
+			logger.Debug("preserving active agent transcript", "path", path, "reason", activeReason)
+			return
+		}
+		freed, err := gzipAgentTranscript(path, info)
+		if err != nil {
+			logger.Warn("failed to compress agent transcript", "path", path, "error", err)
+			return
+		}
+		totalFreed += freed
+		if freed > 0 {
+			logger.Info("compressed agent transcript", "path", path, "freed_mb", freed/(1024*1024))
+		}
+	}, budgets...)
+	return totalFreed
+}
+
+func (p *DevArtifactsPlugin) cleanAgentWorktreeRoots(ctx context.Context, home string, level CleanupLevel, daCfg config.DevArtifactsConfig, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+	if level < LevelCritical {
+		return 0
+	}
+	var totalFreed int64
+	staleAfter := parseNixPolicyDuration(daCfg.AgentWorktreeStaleAfter, 14*24*time.Hour)
+	p.forEachAgentWorktreeRoot(ctx, home, staleAfter, daCfg, func(path string, _ os.FileInfo, bytes int64, activeReason string) {
+		if activeReason != "" {
+			logger.Debug("preserving active agent worktree", "path", path, "reason", activeReason)
+			return
+		}
+		if p.isProtected(path, daCfg.ProtectPaths) {
+			logger.Debug("preserving protected agent worktree", "path", path)
+			return
+		}
+		if err := os.RemoveAll(path); err != nil {
+			logger.Warn("failed to delete stale agent worktree", "path", path, "error", err)
+			return
+		}
+		totalFreed += bytes
+		logger.Info("deleted stale agent worktree", "path", path, "freed_mb", bytes/(1024*1024))
+	}, budgets...)
 	return totalFreed
 }
 
@@ -1837,6 +2089,151 @@ func pathWithin(path string, root string) bool {
 	}
 	rel, err := filepath.Rel(root, path)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func devArtifactHomeRelativePath(home string, path string) string {
+	if rel, err := filepath.Rel(home, path); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return filepath.Base(path)
+}
+
+func activeAgentPathReferences(ctx context.Context, roots []string, home string) map[string]string {
+	if len(roots) == 0 {
+		return nil
+	}
+	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	return activeAgentPathReferencesFromProcessOutput(string(output), roots, home)
+}
+
+func activeAgentPathReferencesFromProcessOutput(output string, roots []string, home string) map[string]string {
+	refs := map[string]string{}
+	cleanRoots := make([]string, 0, len(roots))
+	for _, root := range roots {
+		cleanRoots = append(cleanRoots, filepath.Clean(expandHome(root, home)))
+	}
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		command := agentCommandNameFromProcessLine(line)
+		for _, rawPath := range absoluteDevArtifactPathPattern.FindAllString(line, -1) {
+			path := filepath.Clean(expandHome(rawPath, home))
+			for _, root := range cleanRoots {
+				if !pathWithin(path, root) {
+					continue
+				}
+				for _, target := range agentPathReferenceTargets(path, root) {
+					if _, ok := refs[target]; !ok {
+						refs[target] = command
+					}
+				}
+			}
+		}
+	}
+	return refs
+}
+
+func agentPathReferenceTargets(path string, root string) []string {
+	targets := []string{path}
+	if rel, err := filepath.Rel(root, path); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		parts := strings.Split(rel, string(os.PathSeparator))
+		if len(parts) > 0 && parts[0] != "" {
+			targets = append(targets, filepath.Join(root, parts[0]))
+		}
+	}
+	return targets
+}
+
+func agentCommandNameFromProcessLine(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "unknown"
+	}
+	command := filepath.Base(fields[0])
+	if len(fields) > 1 {
+		command = filepath.Base(fields[1])
+	}
+	return command
+}
+
+func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
+	if info == nil {
+		var err error
+		info, err = os.Stat(path)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if !info.Mode().IsRegular() {
+		return 0, nil
+	}
+	dest := path + ".gz"
+	if pathExists(dest) {
+		return 0, nil
+	}
+
+	input, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer input.Close()
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.gz")
+	if err != nil {
+		return 0, err
+	}
+	tmpPath := tmp.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	writer, err := gzip.NewWriterLevel(tmp, gzip.BestCompression)
+	if err != nil {
+		_ = tmp.Close()
+		return 0, err
+	}
+	if _, err := io.Copy(writer, input); err != nil {
+		_ = writer.Close()
+		_ = tmp.Close()
+		return 0, err
+	}
+	if err := writer.Close(); err != nil {
+		_ = tmp.Close()
+		return 0, err
+	}
+	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
+		_ = tmp.Close()
+		return 0, err
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, err
+	}
+	if err := os.Chtimes(tmpPath, info.ModTime(), info.ModTime()); err != nil {
+		return 0, err
+	}
+	if err := os.Rename(tmpPath, dest); err != nil {
+		return 0, err
+	}
+	cleanupTmp = false
+	if err := os.Remove(path); err != nil {
+		return 0, err
+	}
+	compressedInfo, err := os.Stat(dest)
+	if err != nil {
+		return 0, err
+	}
+	return safeBytesDiff(info.Size(), compressedInfo.Size()), nil
 }
 
 func devArtifactProcessCWDs(ctx context.Context, candidates []devArtifactProcessCandidate) map[string]string {
