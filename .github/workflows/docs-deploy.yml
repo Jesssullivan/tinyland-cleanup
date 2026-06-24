@@ -1,0 +1,54 @@
+name: Docs Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'MODULE.bazel'
+      - '.github/workflows/docs-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; cancel in-progress runs for the same ref.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+      - name: Build //docs:site
+        run: |
+          nix shell nixpkgs#bazelisk --command bazelisk \
+            --output_user_root=/tmp/tinyland-cleanup-bazel build //docs:site
+      - name: Stage site output
+        run: |
+          mkdir -p _site
+          # bazel-bin is the convenience symlink to the built TreeArtifact;
+          # -L dereferences Bazel's read-only symlinks into real files for Pages.
+          cp -RL bazel-bin/docs/_site/. _site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

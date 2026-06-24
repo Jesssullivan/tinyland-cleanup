@@ -11,7 +11,7 @@
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
 
       perSystem = { pkgs, self', system, ... }: let
-        buildVersion = "0.2.0";
+        buildVersion = pkgs.lib.fileContents ./VERSION;
         buildCommit = inputs.self.rev or "dirty";
         buildDate = inputs.self.lastModifiedDate or "unknown";
       in {
@@ -35,6 +35,29 @@
             platforms = platforms.unix;
             mainProgram = "tinyland-cleanup";
           };
+        };
+
+        # Documentation site (MkDocs Material), built hermetically through Nix.
+        # Mirrors the pure-Bazel //docs:site target; SOURCE_DATE_EPOCH keeps the
+        # output byte-identical across Nix and Bazel.
+        packages.docs = pkgs.stdenvNoCC.mkDerivation {
+          pname = "tinyland-cleanup-docs";
+          version = buildVersion;
+          src = ./.;
+          nativeBuildInputs = [
+            (pkgs.python3.withPackages (ps: with ps; [
+              mkdocs
+              mkdocs-material
+              pymdown-extensions
+            ]))
+          ];
+          SOURCE_DATE_EPOCH = "315532800";
+          dontBuild = true;
+          installPhase = ''
+            runHook preInstall
+            mkdocs build --strict --config-file docs/mkdocs.yml --site-dir "$out"
+            runHook postInstall
+          '';
         };
 
         devShells.default = pkgs.mkShell {

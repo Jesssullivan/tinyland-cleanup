@@ -4,7 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-24
+
 ### Added
+
+- Documentation site: MkDocs Material built through a pure-Bazel flow
+  (`//docs:site` via `rules_python` + a sha256-pinned `pip.parse` lock, with a
+  hermetic `//docs:site_smoke_test`), a Nix parity build (`nix build .#docs`),
+  and a GitHub Pages deploy workflow.
+- Single version source: `VERSION` is the human-edit point; `flake.nix` reads it
+  and a CI step checks `main.go` and `MODULE.bazel` agree.
+
+### Changed
+
+- Streamlined the documentation set and rewrote the README into a reductive
+  quickstart (install, run modes, byte/inode behavior, configuration). Added
+  `installation`, `usage`, `configuration`, `plugins`, and `json-report-schema`
+  pages plus `llms.txt`; removed dated/ephemeral docs (productionization plan,
+  superseded validation snapshots, the CONTRIBUTING stub).
+
+### Inode-awareness (TIN-2170/TIN-2165)
 
 - Inode-aware disk-pressure handling (TIN-2170/TIN-2165). `DiskStats` now carries
   inode totals/used/free/percent from statfs, and `DiskMonitor` evaluates byte

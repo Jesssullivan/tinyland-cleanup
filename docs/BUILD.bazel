@@ -1,0 +1,73 @@
+# Documentation site: hermetic MkDocs Material build through Bazel.
+#
+# Pattern mirrors site.scaffold's js_run_binary(out_dirs=["build"]) flow, in
+# Python: a py_binary runner wraps `mkdocs build --strict`, and run_binary
+# declares the rendered `site/` directory as a Bazel TreeArtifact output.
+
+load("@aspect_bazel_lib//lib:run_binary.bzl", "run_binary")
+load("@docs_pip//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_python//python:pip.bzl", "compile_pip_requirements")
+
+package(default_visibility = ["//visibility:public"])
+
+# Regenerate requirements.lock after editing requirements.in (run manually):
+#   bazel run //docs:requirements.update
+compile_pip_requirements(
+    name = "requirements",
+    src = "requirements.in",
+    requirements_txt = "requirements.lock",
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "docs_srcs",
+    srcs = glob(["*.md"]),
+)
+
+py_binary(
+    name = "mkdocs_build_bin",
+    srcs = ["scripts/run_mkdocs_build.py"],
+    main = "scripts/run_mkdocs_build.py",
+    deps = [
+        requirement("mkdocs"),
+        requirement("mkdocs-material"),
+        requirement("pymdown-extensions"),
+    ],
+)
+
+# `site/` is the rendered static site (the out_dirs=["build"] analogue).
+# --strict is enforced inside the runner, so a failing build fails this target.
+# Cache-forward by default (the repo's posture); not tagged RBE-eligible until a
+# proof artifact exists, per config/bazel-rbe-target-eligibility.json.
+run_binary(
+    name = "site",
+    srcs = [
+        ":docs_srcs",
+        "mkdocs.yml",
+    ],
+    # out_dirs are not $(location)-expandable; the single declared directory is
+    # referenced with $@ (aspect_bazel_lib expand_variables).
+    out_dirs = ["_site"],
+    args = [
+        "--config",
+        "$(location mkdocs.yml)",
+        "--site-dir",
+        "$@",
+    ],
+    tool = ":mkdocs_build_bin",
+)
+
+# Hermetic smoke test on the built TreeArtifact (no network, no browser).
+py_test(
+    name = "site_smoke_test",
+    srcs = ["scripts/site_smoke_test.py"],
+    args = ["$(location :site)"],
+    data = [":site"],
+    main = "scripts/site_smoke_test.py",
+)
+
+test_suite(
+    name = "docs_ci",
+    tests = [":site_smoke_test"],
+)
