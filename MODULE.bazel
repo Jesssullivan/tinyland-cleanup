@@ -5,7 +5,8 @@
 
 module(
     name = "tinyland_cleanup",
-    version = "0.2.0",
+    # Keep in sync with //VERSION (checked by the CI version-consistency step).
+    version = "0.3.0",
     compatibility_level = 1,
 )
 

@@ -11,7 +11,7 @@
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
 
       perSystem = { pkgs, self', system, ... }: let
-        buildVersion = "0.2.0";
+        buildVersion = pkgs.lib.fileContents ./VERSION;
         buildCommit = inputs.self.rev or "dirty";
         buildDate = inputs.self.lastModifiedDate or "unknown";
       in {
