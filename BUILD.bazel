@@ -15,16 +15,22 @@ gazelle(name = "gazelle")
 exports_files([
     ".bazelrc",
     ".github/actionlint.yaml",
+    ".github/workflows/ci.yml",
     ".github/workflows/gloriousflywheel-proof.yml",
+    ".bazelrc.flywheel",
     "config/bazel-rbe-target-eligibility.json",
+    "Justfile",
+    "justfile.flywheel",
     "scripts/bazel-cache-backed.sh",
     "scripts/bazel-rbe-proof.sh",
     "scripts/validation/bazel-cache-contract.sh",
     "scripts/validation/check-bazel-cache-policy.sh",
+    "scripts/validation/check-flywheel-frontdoor-kit.sh",
     "scripts/validation/test-bazel-cache-backed-wrapper.sh",
     "scripts/validation/test-bazel-cache-contract.sh",
     "scripts/validation/test-bazel-rbe-proof-wrapper.sh",
     "scripts/validation/validate-bazel-rbe-target-eligibility.py",
+    "scripts/gloriousflywheel-bazel.sh",
 ])
 
 filegroup(
@@ -32,16 +38,33 @@ filegroup(
     srcs = [
         ".bazelrc",
         ".github/actionlint.yaml",
+        ".github/workflows/ci.yml",
         ".github/workflows/gloriousflywheel-proof.yml",
+        ".bazelrc.flywheel",
         "config/bazel-rbe-target-eligibility.json",
+        "Justfile",
+        "justfile.flywheel",
         "scripts/bazel-cache-backed.sh",
         "scripts/bazel-rbe-proof.sh",
+        "scripts/gloriousflywheel-bazel.sh",
         "scripts/validation/bazel-cache-contract.sh",
         "scripts/validation/check-bazel-cache-policy.sh",
+        "scripts/validation/check-flywheel-frontdoor-kit.sh",
         "scripts/validation/test-bazel-cache-backed-wrapper.sh",
         "scripts/validation/test-bazel-cache-contract.sh",
         "scripts/validation/test-bazel-rbe-proof-wrapper.sh",
         "scripts/validation/validate-bazel-rbe-target-eligibility.py",
+    ],
+)
+
+sh_test(
+    name = "flywheel_frontdoor_kit_check",
+    srcs = ["scripts/validation/check-flywheel-frontdoor-kit.sh"],
+    data = [":bazel_control_plane_files"],
+    tags = [
+        "bazel-cache-policy",
+        "fast",
+        "presubmit",
     ],
 )
 

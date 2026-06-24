@@ -1,0 +1,48 @@
+# GloriousFlywheel consumer front-door recipes.
+#
+# Include this file from a consumer repo Justfile:
+#
+#   import? "justfile.flywheel"
+#
+# The profile commands assume `gloriousflywheel-profile-tools` is on PATH
+# through the fleet-managed NixOS/Home Manager profile, `nix develop`, or an
+# equivalent operator-managed tool profile. Bazel commands use the local copied
+# wrapper so CI can dogfood the front door without relying on a global PATH shim.
+
+set dotenv-load := true
+
+# Explain the current GloriousFlywheel enrollment/profile state.
+flywheel-doctor *args:
+    @flywheel-doctor {{args}}
+
+# Fail unless the current shell is attached or explicitly in local-proof mode.
+flywheel-verify *args:
+    @flywheel-verify {{args}}
+
+# Materialize a fallback .env.flywheel.local profile for a consumer repo.
+flywheel-enroll profile *args:
+    @flywheel-enroll "{{profile}}" {{args}}
+
+# Materialize a sourceable non-secret GloriousFlywheel Bazel profile.
+flywheel-consumer-env profile *args:
+    @flywheel-consumer-env "{{profile}}" {{args}}
+
+# Run the GloriousFlywheel Bazel wrapper directly.
+flywheel-bazel command *args:
+    @./scripts/gloriousflywheel-bazel.sh "{{command}}" {{args}}
+
+# Cache-backed Bazel build through the wrapper.
+flywheel-build *targets:
+    @./scripts/gloriousflywheel-bazel.sh build {{targets}}
+
+# Cache-backed Bazel test through the wrapper.
+flywheel-test *targets:
+    @./scripts/gloriousflywheel-bazel.sh test {{targets}}
+
+# Cache-backed Bazel fetch through the wrapper.
+flywheel-fetch *targets:
+    @./scripts/gloriousflywheel-bazel.sh fetch {{targets}}
+
+# Print Bazel info through the wrapper after profile validation.
+flywheel-info *args:
+    @./scripts/gloriousflywheel-bazel.sh info {{args}}
