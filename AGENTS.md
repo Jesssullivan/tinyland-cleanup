@@ -28,14 +28,29 @@ operator runbook says otherwise.
   explicitly opt-in.
 - Keep Darwin and Linux/Rocky behavior separate where platform semantics differ.
 
+## Operating this daemon (for agents)
+
+- CLI contract: `--once`, `--daemon`, `--level {warning,moderate,aggressive,critical}`,
+  `--dry-run`, `--output {text,json}`, `--plugins <names>`, `--list-plugins`,
+  `--config <path>`, `--target-used-percent <int>`, `--version`. Flags are stable.
+- Machine surface: `--output json` emits a `cycleReport`. Schema:
+  [docs/json-report-schema.md](docs/json-report-schema.md). `host_free_delta_bytes`
+  and `host_inodes_free_delta` are the effectiveness signals.
+- Plugin contract: [docs/plugins.md](docs/plugins.md); enumerate live state with
+  `--list-plugins --output json`.
+- Exit codes: `0` success, `1` runtime error, `2` config/flag error.
+- Key files: `main.go` (flags + `cycleReport`), `config/config.go` (+
+  `config/default.yaml`) for the config schema, `monitor/disk.go` for byte/inode
+  thresholds, `plugins/` for cleanup logic.
+- Never run a `--daemon` and a `--once` cron on the same host (cooldown conflict).
+
 ## Validation
 
-Use repo-managed caches outside the user profile when possible:
+Run the Go checks (fast authority); Nix and Bazel for graph/package changes.
+Full matrix and the docs-site build: [docs/development.md](docs/development.md).
 
 ```sh
 env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go test ./...
 env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go vet ./...
 env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go build ./...
-nix build .#default --no-link --print-build-logs
-nix shell nixpkgs#bazelisk --command bazelisk --output_user_root=/tmp/tinyland-cleanup-bazel test //...
 ```

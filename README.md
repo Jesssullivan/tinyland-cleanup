@@ -1,183 +1,87 @@
 # tinyland-cleanup
 
-`tinyland-cleanup` is a conservative disk-pressure cleanup daemon for developer
-machines and CI hosts. It focuses on build-system and developer-tool caches
-where unmanaged disk pressure can break local work, remote runners, or
-hermetic build flows.
+A conservative disk-pressure cleanup daemon for developer machines and CI hosts.
+It reclaims build-system and developer-tool caches before unmanaged disk
+pressure breaks local work, runners, or hermetic builds — and stops as soon as
+the target is met.
 
-The current production target is Darwin developer machines plus Linux/Rocky
-builder and runner machines.
+Targets: Darwin developer machines and Linux/Rocky builder and runner hosts.
 
-## Safety Model
+## Safety model
 
-- Dry-run behavior must stay useful enough for operator review.
-- Cleanup policy should explain what it plans to remove and why.
-- Host free-space and inode accounting should be measured before and after cleanup.
-- Real cleanup should stop once the configured host free-space target is met
-  and inode pressure has cleared.
-- Daemon-triggered cleanup should honor cooldown state below the configured
-  bypass severity.
-- Privileged actions, offline compaction, and service disruption must remain
-  explicit policy choices.
+- Dry-run output is detailed enough to review before any deletion.
+- Every plan states what it will remove and why.
+- Host free space and inodes are measured before and after each cycle.
+- Cleanup stops once the free-space target is met and inode pressure has cleared.
+- Daemon cleanup honors cooldown below the configured bypass level.
+- Privileged actions, offline compaction, and service disruption are opt-in.
 
-## Build And Test
+## Quick start
 
-Fast local validation:
+### Home Manager (recommended)
 
-```sh
-env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go test ./...
-env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go vet ./...
-env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go build ./...
+```nix
+tinyland.cleanup.enable = true;
 ```
 
-Nix package build:
+Run `home-manager switch`. The daemon installs and starts itself — a launchd
+agent on macOS, a systemd user service on Linux — and renders its config from
+your Nix options. Tunables are in [Installation](docs/installation.md).
+
+### Manual
 
 ```sh
-nix build .#default --no-link --print-build-logs
+nix build github:Jesssullivan/tinyland-cleanup#default
+install -Dm755 result/bin/tinyland-cleanup ~/.local/bin/tinyland-cleanup
+tinyland-cleanup --once --dry-run --level critical   # review with built-in defaults
 ```
 
-Bazel build/test graph:
+The binary runs on built-in defaults when no config exists. To customize, copy
+`config/default.yaml` to `~/.config/tinyland-cleanup/config.yaml` and edit it.
+Linux hosts can install the RPM instead — see [Installation](docs/installation.md).
 
-```sh
-nix shell nixpkgs#bazelisk --command bazelisk --output_user_root=/tmp/tinyland-cleanup-bazel test //...
-```
+## Run modes
 
-Shared-cache Bazel runners can use:
+| Command | What it does | Use when |
+|---|---|---|
+| `--once --dry-run` | Plan only; change nothing | Reviewing a pressured host |
+| `--once` | Run one cleanup cycle and exit | Cron / systemd timer on a runner |
+| `--daemon` | Poll every `poll_interval`, keep cooldown state | Workstations (via Home Manager) |
 
-```sh
-BAZEL_REMOTE_CACHE=grpc://example.internal:9092 \
-  bash scripts/bazel-cache-backed.sh test //...
-```
+Pick one mode. Do not run `--daemon` and a `--once` cron together — their
+cooldown state conflicts. Details in [Usage](docs/usage.md).
 
-Explicit remote-execution proof is separate from cache-backed validation:
+## Byte and inode pressure
 
-```sh
-GF_RBE_PROOF_MODE=explicit \
-GF_BAZEL_SUBSTRATE_MODE=executor-backed \
-GF_BAZEL_REMOTE_EXECUTION_PLATFORM=linux-x86_64 \
-BAZEL_REMOTE_CACHE=grpc://example-cache.internal:9092 \
-BAZEL_REMOTE_EXECUTOR=grpc://example-executor.internal:8980 \
-  bash scripts/bazel-rbe-proof.sh --target //:bazel_cache_policy_check
-```
+Cleanup is driven by **whichever is worse**: disk bytes or filesystem inodes.
+A Nix store can exhaust inodes (millions of small files) while bytes still look
+fine, so an inode-only spike escalates cleanup and triggers `nix-collect-garbage`.
+If inode pressure persists with no relief for `policy.inode_no_progress_limit`
+cycles (default 3), the daemon backs off to the cooldown cadence instead of
+churning every poll.
 
-## Operator Review
+## Configuration
 
-Review the cleanup plan before mutating a high-pressure machine:
+With Home Manager, set options in Nix; the generated
+`~/.config/tinyland-cleanup/config.yaml` is overwritten on each switch — do not
+hand-edit it. Without Home Manager, copy `config/default.yaml`, edit it, and
+restart the daemon. Every key maps to a Home Manager option in
+[Configuration](docs/configuration.md).
 
-```sh
-tinyland-cleanup --once --dry-run --level critical --output text
-```
+## Documentation
 
-Use JSON when another tool needs the stable report schema:
+- [Installation](docs/installation.md) — Nix, Home Manager, RPM, source
+- [Usage](docs/usage.md) — run modes, daemon lifecycle, reports, exit codes
+- [Configuration](docs/configuration.md) — config keys and Home Manager options
+- [Operator workflow](docs/operator-workflow.md) — dry-run review and cleanup
+- [JSON report schema](docs/json-report-schema.md) — machine-readable output
+- [Plugins](docs/plugins.md) — what each cleanup plugin does
+- Policy — [Nix](docs/nix-cleanup-policy.md) · [Bazel](docs/bazel-cache-policy.md) · [Darwin caches](docs/darwin-dev-caches.md) · [Podman compaction](docs/podman-darwin-compaction.md)
+- [Development](docs/development.md) — build and test
+- Agents — [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt)
 
-```sh
-tinyland-cleanup --once --dry-run --level critical --output json
-```
+## Status
 
-Byte and inode thresholds are evaluated in parallel. This matters for Nix
-stores and runner hosts where small-file sprawl can exhaust inodes while byte
-usage still looks healthy.
-
-List available plugin names before constraining an evidence run:
-
-```sh
-tinyland-cleanup --list-plugins
-```
-
-Constrain review to specific plugins before scanning broad cache surfaces:
-
-```sh
-tinyland-cleanup --once --dry-run --level critical --plugins bazel,nix --output text
-```
-
-For temporary proof/output pressure, keep the review bounded:
-
-```sh
-tinyland-cleanup --once --dry-run --level critical --plugins dev-artifacts --output text
-```
-
-Large top-level temp roots remain review-only, but stale inactive roots may
-also expose narrower generated-output targets such as Rust `target/`
-directories for safe pruning without deleting the worktree. If scan budgets are
-hit, dry-run output marks the evidence partial with `scan_budget_exhausted` and
-lists `scan_truncated_paths`. Symlink-heavy temporary roots, including Nix
-shell symlink forests, are measured as symlink entries rather than as the store
-paths they point at.
-
-For Darwin developer-cache and development-artifact plans, dry-run metadata and
-text reports separate bytes that are direct host-reclaim candidates from bytes
-that are protected, active-protected, deferred, or review-only. Use that
-accounting when a host is full but the safe reclaim estimate is near zero.
-Development-artifact active-process protection is path-scoped when process cwd
-or command-line evidence proves the active project root, and JSON metadata
-includes `active_dev_artifact_roots` for those protected roots. If cwd evidence
-is unavailable, cleanup keeps the conservative family-wide protection fallback.
-When that fallback protects a whole generated-output family, dry-run planning
-skips the expensive workspace scan for that family and records it in
-`global_active_dev_artifact_scan_skips`.
-
-For a one-off run, override the configured maximum used-space target without
-editing the config file:
-
-```sh
-tinyland-cleanup --once --dry-run --level critical --target-used-percent 82
-```
-
-For Darwin removable-volume or TCC diagnosis, use direct probe mode. It only
-lists the target path, reads xattrs, writes one temporary dotfile, and removes
-that file; it does not run cleanup plugins:
-
-```sh
-tinyland-cleanup \
-  --probe-volume-path /Volumes/TinylandSSD/tinyland \
-  --probe-result-path /tmp/tinyland-cleanup-probe.result
-```
-
-See [docs/operator-workflow.md](docs/operator-workflow.md) for the current
-dry-run, candidate policy tier, and host free-space accounting workflow.
-
-Podman on macOS needs extra care because `applehv` raw sparse images do not
-prove host reclaim from guest `fstrim` output alone. Critical cleanup can prune
-BuildKit cache inside a running buildx builder and then count only the measured
-host free-space delta after advisory trim. See
-[docs/podman-darwin-compaction.md](docs/podman-darwin-compaction.md) before
-enabling offline compaction.
-
-Darwin developer cache review is documented in
-[docs/darwin-dev-caches.md](docs/darwin-dev-caches.md).
-
-Nix store, user-profile generation, and opt-in Home Manager generation cleanup
-policy is documented in
-[docs/nix-cleanup-policy.md](docs/nix-cleanup-policy.md).
-
-Bazel cache and output-base review is documented in
-[docs/bazel-cache-policy.md](docs/bazel-cache-policy.md).
-
-## Distribution Status
-
-Current package authority is the Nix flake package `.#tinyland-cleanup`.
-Release archives are produced from GitHub tags. No public tag has been cut yet.
-Linux RPM packaging is documented in
-[docs/rpm-packaging.md](docs/rpm-packaging.md); the RPM installs a systemd unit
-but leaves enable/start as an explicit operator action.
-
-## Roadmap
-
-Open productionization work is tracked in GitHub issues:
-
-- `#2`: durable disk-pressure policy overhaul
-- `#3`: Bazel cache tiering, budgets, and active-use detection
-- `#4`: Nix cleanup policy for generations, roots, and daemon contention
-- `#5`: Darwin IDE and developer-tool cache budgets
-- `#6`: Podman offline compaction for Darwin `applehv`
-- `#9`: GloriousFlywheel shared-cache runner proof
-
-Recently completed productionization work:
-
-- `#7`: dry-run, telemetry, and host free-space accounting
-
-See [docs/productionization-plan-2026-04-25.md](docs/productionization-plan-2026-04-25.md)
-for the current productionization plan.
-
-Current validation notes are tracked in
-[docs/validation-status-2026-04-26.md](docs/validation-status-2026-04-26.md).
+Package authority is the Nix flake (`.#tinyland-cleanup`). Release archives and
+RPMs are built from `v*` tags. Open work is tracked in
+[GitHub issues](https://github.com/Jesssullivan/tinyland-cleanup/issues).

@@ -1,0 +1,40 @@
+# tinyland-cleanup
+
+> A conservative, cross-platform disk-pressure cleanup daemon for developer
+> machines and CI hosts. It reclaims build-system and developer-tool caches on
+> graduated levels (warning to critical), driven by whichever is worse — disk
+> bytes or filesystem inodes — with dry-run review, per-plugin cooldown, and a
+> stable JSON report. Conservative by default; disruptive actions are opt-in.
+
+## Start here
+
+- [README](README.md): overview, quick start, run modes
+- [AGENTS.md](AGENTS.md): repository authority, safety defaults, agent operating notes
+- [Usage](docs/usage.md): run modes, daemon lifecycle, reports, exit codes
+- [Configuration](docs/configuration.md): config keys and Home Manager options
+
+## Machine surfaces
+
+- [JSON report schema](docs/json-report-schema.md): the `cycleReport` object from `--output json`
+- [Plugins](docs/plugins.md): stable plugin names and what each cleans
+- `main.go`: CLI flags and the `cycleReport`/`mountReport`/`pluginCycleReport` structs
+- `config/default.yaml`: documented config schema; `config/config.go`: the typed schema
+
+## Operating the daemon
+
+- Modes: `--once --dry-run` (review), `--once` (clean once), `--daemon` (poll + cooldown).
+- Force a level: `--level {warning,moderate,aggressive,critical}`.
+- Constrain plugins: `--plugins bazel,nix`; list them: `--list-plugins --output json`.
+- Effectiveness signal: `host_free_delta_bytes` and `host_inodes_free_delta` in the JSON report.
+- Exit codes: `0` success, `1` runtime error, `2` config/flag error.
+- Example: `tinyland-cleanup --once --dry-run --level critical --output json | jq '.plugins[] | {name, skip_reason, estimated_bytes_freed}'`
+
+## Policy
+
+- [Nix cleanup](docs/nix-cleanup-policy.md), [Bazel cache](docs/bazel-cache-policy.md),
+  [Darwin dev caches](docs/darwin-dev-caches.md), [Podman compaction](docs/podman-darwin-compaction.md)
+- [Operator workflow](docs/operator-workflow.md): dry-run review and applying cleanup
+
+## Build
+
+- [Development](docs/development.md): Go (fast authority), Nix (package authority), Bazel (hermetic graph)
