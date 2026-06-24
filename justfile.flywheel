@@ -4,9 +4,10 @@
 #
 #   import? "justfile.flywheel"
 #
-# The commands assume `gloriousflywheel-profile-tools` is on PATH through the
-# fleet-managed NixOS/Home Manager profile, `nix develop`, or an equivalent
-# operator-managed tool profile.
+# The profile commands assume `gloriousflywheel-profile-tools` is on PATH
+# through the fleet-managed NixOS/Home Manager profile, `nix develop`, or an
+# equivalent operator-managed tool profile. Bazel commands use the local copied
+# wrapper so CI can dogfood the front door without relying on a global PATH shim.
 
 set dotenv-load := true
 
@@ -28,20 +29,20 @@ flywheel-consumer-env profile *args:
 
 # Run the GloriousFlywheel Bazel wrapper directly.
 flywheel-bazel command *args:
-    @gloriousflywheel-bazel "{{command}}" {{args}}
+    @./scripts/gloriousflywheel-bazel.sh "{{command}}" {{args}}
 
 # Cache-backed Bazel build through the wrapper.
 flywheel-build *targets:
-    @gloriousflywheel-bazel build {{targets}}
+    @./scripts/gloriousflywheel-bazel.sh build {{targets}}
 
 # Cache-backed Bazel test through the wrapper.
 flywheel-test *targets:
-    @gloriousflywheel-bazel test {{targets}}
+    @./scripts/gloriousflywheel-bazel.sh test {{targets}}
 
 # Cache-backed Bazel fetch through the wrapper.
 flywheel-fetch *targets:
-    @gloriousflywheel-bazel fetch {{targets}}
+    @./scripts/gloriousflywheel-bazel.sh fetch {{targets}}
 
 # Print Bazel info through the wrapper after profile validation.
 flywheel-info *args:
-    @gloriousflywheel-bazel info {{args}}
+    @./scripts/gloriousflywheel-bazel.sh info {{args}}

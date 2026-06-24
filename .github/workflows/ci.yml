@@ -36,7 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Test
-        run: nix develop --command bazelisk --output_user_root=/tmp/tinyland-cleanup-bazel test //...
+        env:
+          BAZEL_OUTPUT_USER_ROOT: /tmp/tinyland-cleanup-bazel
+        run: nix develop --command just flywheel-test //...
 
   nix:
     name: Nix package

@@ -42,6 +42,7 @@ require_contains .bazelrc 'build:executor-backed --config=ci' "endpoint-free exe
 
 contract="scripts/validation/bazel-cache-contract.sh"
 require_contains "$contract" 'GF_BAZEL_SUBSTRATE_MODE' "Bazel substrate mode contract"
+require_contains .bazelrc 'experimental_convenience_symlinks=ignore' "Bazel convenience symlink suppression"
 require_contains "$contract" 'BAZEL_REMOTE_CACHE' "Bazel remote cache contract"
 require_contains "$contract" 'BAZEL_REMOTE_EXECUTOR' "Bazel remote executor contract"
 require_contains "$contract" 'executor-backed' "executor-backed mode contract"

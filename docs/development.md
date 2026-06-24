@@ -22,8 +22,7 @@ nix build .#default --no-link --print-build-logs
 ## Bazel graph
 
 ```sh
-nix shell nixpkgs#bazelisk --command bazelisk \
-  --output_user_root=/tmp/tinyland-cleanup-bazel test //...
+nix develop --command just flywheel-test //...
 ```
 
 ## Shared-cache and remote-execution proof
@@ -46,8 +45,13 @@ BAZEL_REMOTE_CACHE=grpc://example.internal:9092 \
 ```
 
 Pull-request CI dogfoods the shared `tinyland-nix` runner lane and enters the
-same Nix devshell before Go, Bazel, and Nix package checks. Do not move normal
-CI back to `ubuntu-latest` as a cache or runner fallback.
+same Nix devshell before Go, Bazel, and Nix package checks. Bazel CI uses the
+front-door kit (`just flywheel-test`), not a raw `bazelisk` command. Do not move
+normal CI back to `ubuntu-latest` as a cache or runner fallback.
+
+The shared runner currently executes jobs as root, so `MODULE.bazel` explicitly
+opts the docs Python toolchain into rules_python's root-user escape hatch. Remove
+that setting when the runner lane executes Bazel as a non-root user.
 
 Remote-execution proof is separate from cache-backed validation:
 

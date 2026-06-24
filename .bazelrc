@@ -2,6 +2,7 @@ common --enable_bzlmod
 
 build --announce_rc
 build --spawn_strategy=sandboxed
+build --experimental_convenience_symlinks=ignore
 
 test --test_output=errors
 test --test_summary=detailed

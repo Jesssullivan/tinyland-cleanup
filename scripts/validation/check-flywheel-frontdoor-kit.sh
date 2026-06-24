@@ -45,7 +45,7 @@ require_contains justfile.flywheel '^flywheel-doctor\b' "flywheel-doctor recipe"
 require_contains justfile.flywheel '^flywheel-enroll\b' "flywheel-enroll recipe"
 require_contains justfile.flywheel '^flywheel-verify\b' "flywheel-verify recipe"
 require_contains justfile.flywheel '^flywheel-bazel\b' "flywheel-bazel recipe"
-require_contains justfile.flywheel 'gloriousflywheel-bazel' "GloriousFlywheel Bazel wrapper invocation"
+require_contains justfile.flywheel './scripts/gloriousflywheel-bazel.sh' "local GloriousFlywheel Bazel wrapper invocation"
 
 require_contains .bazelrc 'try-import %workspace%/\.bazelrc\.flywheel' "front-door Bazel rc import"
 require_contains .bazelrc.flywheel '^build:ci-cached\b' "shared-cache Bazel config"
