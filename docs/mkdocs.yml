@@ -1,6 +1,6 @@
 site_name: tinyland-cleanup
 site_description: Conservative disk-pressure cleanup daemon for developer machines and CI hosts
-site_url: https://jesssullivan.github.io/tinyland-cleanup/
+site_url: https://transscendsurvival.org/tinyland-cleanup/
 repo_url: https://github.com/Jesssullivan/tinyland-cleanup
 repo_name: Jesssullivan/tinyland-cleanup
 docs_dir: .
