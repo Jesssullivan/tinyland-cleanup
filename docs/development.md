@@ -28,6 +28,16 @@ nix shell nixpkgs#bazelisk --command bazelisk \
 
 ## Shared-cache and remote-execution proof
 
+The repo imports the GloriousFlywheel front-door kit through `Justfile` and
+`.bazelrc`. The advertised consumer commands are:
+
+```sh
+just flywheel-doctor
+just flywheel-enroll shared-cache-backed --cache-endpoint "$BAZEL_REMOTE_CACHE"
+just flywheel-verify
+just flywheel-test //...
+```
+
 Cache-backed validation on GloriousFlywheel runners:
 
 ```sh

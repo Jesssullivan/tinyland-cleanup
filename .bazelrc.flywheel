@@ -1,0 +1,24 @@
+# GloriousFlywheel consumer Bazel cache/RBE contract.
+#
+# This file is endpoint-free on purpose. Set BAZEL_REMOTE_CACHE,
+# BAZEL_REMOTE_EXECUTOR, GF_BAZEL_SUBSTRATE_MODE, and runtime auth through the
+# fleet-managed profile, CI runtime, or .env.flywheel.local fallback. The
+# gloriousflywheel-bazel wrapper passes concrete endpoint flags after validating
+# the profile shape.
+
+build:ci-cached --remote_upload_local_results=true
+build:ci-cached --remote_timeout=60
+build:ci-cached --experimental_remote_cache_compression
+
+test:ci-cached --remote_upload_local_results=true
+test:ci-cached --remote_timeout=60
+test:ci-cached --experimental_remote_cache_compression
+
+# Opt-in executor-backed contract. The executor endpoint is intentionally not
+# set here; gloriousflywheel-bazel passes --remote_executor from
+# BAZEL_REMOTE_EXECUTOR only after it validates executor-backed mode.
+build:executor-backed --config=ci-cached
+build:executor-backed --remote_local_fallback=false
+build:executor-backed --spawn_strategy=remote
+build:executor-backed --remote_download_minimal
+test:executor-backed --config=executor-backed

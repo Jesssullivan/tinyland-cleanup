@@ -39,3 +39,5 @@ test:ci-local --test_summary=short
 # Backward-compatible alias retained for older docs and proof invocations.
 build:ci-cached --config=ci
 test:ci-cached --config=ci
+
+try-import %workspace%/.bazelrc.flywheel
