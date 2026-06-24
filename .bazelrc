@@ -13,7 +13,9 @@ test --test_summary=detailed
 build:remote --remote_upload_local_results=false
 build:remote --remote_download_outputs=toplevel
 build:remote --remote_timeout=300
-build:remote --remote_local_fallback=true
+# Fail loud: do not silently fall back to local when the remote cache is
+# unavailable — a red build is the honest signal, not a quietly-degraded one.
+build:remote --remote_local_fallback=false
 
 # Remote executor endpoints are never stored in .bazelrc. Use
 # scripts/bazel-rbe-proof.sh with BAZEL_REMOTE_EXECUTOR, BAZEL_REMOTE_CACHE, and
