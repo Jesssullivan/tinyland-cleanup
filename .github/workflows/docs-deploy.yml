@@ -1,6 +1,12 @@
 name: Docs Deploy
 
 on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'MODULE.bazel'
+      - '.github/workflows/docs-deploy.yml'
   push:
     branches: [main]
     paths:
@@ -23,21 +29,26 @@ concurrency:
 jobs:
   build:
     name: Build site
-    runs-on: ubuntu-latest
+    runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@v6.0.2
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v22
       - name: Build //docs:site
+        env:
+          BAZEL_OUTPUT_USER_ROOT: /tmp/tinyland-cleanup-bazel
+          GF_BAZEL_REMOTE_UPLOAD: "false"
         run: |
-          nix shell nixpkgs#bazelisk --command bazelisk \
-            --output_user_root=/tmp/tinyland-cleanup-bazel build //docs:site
+          nix develop --command just flywheel-build //docs:site
       - name: Stage site output
+        env:
+          BAZEL_OUTPUT_USER_ROOT: /tmp/tinyland-cleanup-bazel
+          GF_BAZEL_REMOTE_UPLOAD: "false"
         run: |
+          bazel_bin="$(nix develop --command just flywheel-info bazel-bin | tail -n 1)"
           mkdir -p _site
-          # bazel-bin is the convenience symlink to the built TreeArtifact;
-          # -L dereferences Bazel's read-only symlinks into real files for Pages.
-          cp -RL bazel-bin/docs/_site/. _site/
+          # -L dereferences Bazel's read-only TreeArtifact symlinks into real
+          # files for Pages. Do not rely on workspace convenience symlinks; the
+          # repo suppresses them so //... cannot recurse into bazel-* outputs.
+          cp -RL "${bazel_bin}/docs/_site/." _site/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -45,7 +56,8 @@ jobs:
   deploy:
     name: Deploy to Pages
     needs: build
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    runs-on: tinyland-nix
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}

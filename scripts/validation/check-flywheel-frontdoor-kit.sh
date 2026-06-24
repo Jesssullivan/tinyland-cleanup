@@ -66,4 +66,15 @@ require_contains .github/workflows/ci.yml 'runs-on: tinyland-nix' "shared tinyla
 reject_contains .github/workflows/ci.yml 'ubuntu-latest' "hosted-runner fallback"
 reject_contains .github/workflows/ci.yml 'DeterminateSystems/nix-installer-action' "hosted-runner Nix installer fallback"
 
+if [[ -f .github/workflows/docs-deploy.yml ]]; then
+  require_contains .github/workflows/docs-deploy.yml 'pull_request:' "docs deploy pull-request build trigger"
+  require_contains .github/workflows/docs-deploy.yml 'runs-on: tinyland-nix' "docs deploy shared runner"
+  require_contains .github/workflows/docs-deploy.yml "if: github.event_name != 'pull_request'" "docs deploy PR deploy gate"
+  require_contains .github/workflows/docs-deploy.yml 'just flywheel-build //docs:site' "docs deploy front-door build"
+  require_contains .github/workflows/docs-deploy.yml 'just flywheel-info bazel-bin' "docs deploy Bazel output discovery"
+  reject_contains .github/workflows/docs-deploy.yml 'ubuntu-latest' "hosted runner fallback in docs deploy"
+  reject_contains .github/workflows/docs-deploy.yml 'DeterminateSystems/nix-installer-action' "hosted-runner Nix installer fallback in docs deploy"
+  reject_contains .github/workflows/docs-deploy.yml 'cp -RL bazel-bin/' "docs deploy convenience-symlink staging"
+fi
+
 echo "Flywheel front-door kit check passed"
