@@ -26,3 +26,23 @@ use_repo(
     "in_gopkg_yaml_v3",
     "net_pgregory_rapid",
 )
+
+# Documentation site: hermetic MkDocs Material build (pure-Bazel flow inspired by
+# site.scaffold). Python wheels are pinned by sha256 in //docs:requirements.lock.
+bazel_dep(name = "rules_python", version = "0.40.0")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = "3.12",
+)
+use_repo(python, "python_3_12")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "docs_pip",
+    python_version = "3.12",
+    requirements_lock = "//docs:requirements.lock",
+)
+use_repo(pip, "docs_pip")

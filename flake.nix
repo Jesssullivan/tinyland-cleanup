@@ -37,6 +37,29 @@
           };
         };
 
+        # Documentation site (MkDocs Material), built hermetically through Nix.
+        # Mirrors the pure-Bazel //docs:site target; SOURCE_DATE_EPOCH keeps the
+        # output byte-identical across Nix and Bazel.
+        packages.docs = pkgs.stdenvNoCC.mkDerivation {
+          pname = "tinyland-cleanup-docs";
+          version = buildVersion;
+          src = ./.;
+          nativeBuildInputs = [
+            (pkgs.python3.withPackages (ps: with ps; [
+              mkdocs
+              mkdocs-material
+              pymdown-extensions
+            ]))
+          ];
+          SOURCE_DATE_EPOCH = "315532800";
+          dontBuild = true;
+          installPhase = ''
+            runHook preInstall
+            mkdocs build --strict --config-file docs/mkdocs.yml --site-dir "$out"
+            runHook postInstall
+          '';
+        };
+
         devShells.default = pkgs.mkShell {
           inputsFrom = [ self'.packages.default ];
           packages = with pkgs; [

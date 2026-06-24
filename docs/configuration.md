@@ -69,11 +69,12 @@ enable:
 
 Use `tinyland-cleanup --list-plugins --output json` to inspect the effective
 plugin set for a host. Plugin-specific keys are documented in
-[Plugins](plugins.md) and the policy docs under [README](../README.md).
+[Plugins](plugins.md) and the policy docs ([Nix](nix-cleanup-policy.md),
+[Bazel](bazel-cache-policy.md), [Darwin caches](darwin-dev-caches.md)).
 
 ## Source of Truth
 
-- Example config: [`config/default.yaml`](../config/default.yaml)
-- Typed schema: [`config/config.go`](../config/config.go)
+- Example config: [`config/default.yaml`](https://github.com/Jesssullivan/tinyland-cleanup/blob/main/config/default.yaml)
+- Typed schema: [`config/config.go`](https://github.com/Jesssullivan/tinyland-cleanup/blob/main/config/config.go)
 - Home Manager integration lives in the consuming `lab` repo; this upstream
   repo owns the runtime YAML contract.

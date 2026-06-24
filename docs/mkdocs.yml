@@ -1,0 +1,66 @@
+site_name: tinyland-cleanup
+site_description: Conservative disk-pressure cleanup daemon for developer machines and CI hosts
+site_url: https://jesssullivan.github.io/tinyland-cleanup/
+repo_url: https://github.com/Jesssullivan/tinyland-cleanup
+repo_name: Jesssullivan/tinyland-cleanup
+docs_dir: .
+strict: true
+
+# docs/ is also the Bazel package, so keep build files out of the published site.
+exclude_docs: |
+  mkdocs.yml
+  BUILD.bazel
+  requirements.in
+  requirements.lock
+  requirements.txt
+  scripts/
+
+theme:
+  name: material
+  font: false
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - toc.permalink
+    - content.code.copy
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - admonition
+  - tables
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.details
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Usage: usage.md
+  - Configuration: configuration.md
+  - Operator workflow: operator-workflow.md
+  - Plugins: plugins.md
+  - JSON report schema: json-report-schema.md
+  - Policies:
+      - Nix cleanup: nix-cleanup-policy.md
+      - Bazel cache: bazel-cache-policy.md
+      - Darwin dev caches: darwin-dev-caches.md
+      - Podman compaction: podman-darwin-compaction.md
+  - Packaging: rpm-packaging.md
+  - Development: development.md
+  - Validation status: validation-status.md
