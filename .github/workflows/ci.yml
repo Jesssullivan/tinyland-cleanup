@@ -10,7 +10,7 @@ on:
 jobs:
   go:
     name: Go
-    runs-on: ubuntu-latest
+    runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@v6.0.2
       - name: Version consistency
@@ -23,40 +23,26 @@ jobs:
             echo "::error::version mismatch — keep VERSION, MODULE.bazel, and main.go in sync"
             exit 1
           fi
-      - uses: actions/setup-go@v6.4.0
-        with:
-          go-version-file: go.mod
-          cache: true
       - name: Build
-        run: go build ./...
-        env:
-          GOFLAGS: -mod=vendor
+        run: nix develop --command go build ./...
       - name: Test
-        run: go test ./...
-        env:
-          GOFLAGS: -mod=vendor
+        run: nix develop --command go test ./...
       - name: Vet
-        run: go vet ./...
-        env:
-          GOFLAGS: -mod=vendor
+        run: nix develop --command go vet ./...
 
   bazel:
     name: Bazel
-    runs-on: ubuntu-latest
+    runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@v6.0.2
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v22
       - name: Test
-        run: nix shell nixpkgs#bazelisk --command bazelisk --output_user_root=/tmp/tinyland-cleanup-bazel test //...
+        run: nix develop --command bazelisk --output_user_root=/tmp/tinyland-cleanup-bazel test //...
 
   nix:
     name: Nix package
-    runs-on: ubuntu-latest
+    runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@v6.0.2
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@v22
       - name: Flake metadata
         run: nix flake check --no-build
       - name: Build package

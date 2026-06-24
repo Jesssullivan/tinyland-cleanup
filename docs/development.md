@@ -45,6 +45,10 @@ BAZEL_REMOTE_CACHE=grpc://example.internal:9092 \
   bash scripts/bazel-cache-backed.sh test //...
 ```
 
+Pull-request CI dogfoods the shared `tinyland-nix` runner lane and enters the
+same Nix devshell before Go, Bazel, and Nix package checks. Do not move normal
+CI back to `ubuntu-latest` as a cache or runner fallback.
+
 Remote-execution proof is separate from cache-backed validation:
 
 ```sh

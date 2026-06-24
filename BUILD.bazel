@@ -15,6 +15,7 @@ gazelle(name = "gazelle")
 exports_files([
     ".bazelrc",
     ".github/actionlint.yaml",
+    ".github/workflows/ci.yml",
     ".github/workflows/gloriousflywheel-proof.yml",
     ".bazelrc.flywheel",
     "config/bazel-rbe-target-eligibility.json",
@@ -37,6 +38,7 @@ filegroup(
     srcs = [
         ".bazelrc",
         ".github/actionlint.yaml",
+        ".github/workflows/ci.yml",
         ".github/workflows/gloriousflywheel-proof.yml",
         ".bazelrc.flywheel",
         "config/bazel-rbe-target-eligibility.json",

@@ -37,6 +37,8 @@ for path in Justfile justfile.flywheel .bazelrc.flywheel scripts/gloriousflywhee
   [[ -f "$path" ]] || fail "$path is missing"
 done
 
+[[ -f .github/workflows/ci.yml ]] || fail ".github/workflows/ci.yml is missing"
+
 require_contains Justfile '^import\? "justfile\.flywheel"$' "front-door Just import"
 
 require_contains justfile.flywheel '^flywheel-doctor\b' "flywheel-doctor recipe"
@@ -59,5 +61,9 @@ require_contains scripts/gloriousflywheel-bazel.sh 'BAZEL_REMOTE_CACHE' "wrapper
 require_contains scripts/gloriousflywheel-bazel.sh 'BAZEL_REMOTE_EXECUTOR' "wrapper executor endpoint contract"
 require_contains scripts/gloriousflywheel-bazel.sh 'remote_local_fallback=false' "wrapper executor fallback refusal"
 reject_contains scripts/gloriousflywheel-bazel.sh 'ubuntu-latest' "hosted-runner fallback"
+
+require_contains .github/workflows/ci.yml 'runs-on: tinyland-nix' "shared tinyland-nix CI runner"
+reject_contains .github/workflows/ci.yml 'ubuntu-latest' "hosted-runner fallback"
+reject_contains .github/workflows/ci.yml 'DeterminateSystems/nix-installer-action' "hosted-runner Nix installer fallback"
 
 echo "Flywheel front-door kit check passed"
