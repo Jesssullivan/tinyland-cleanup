@@ -4,6 +4,10 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
     flake-parts.url = "github:hercules-ci/flake-parts";
+    gloriousflywheel = {
+      url = "github:tinyland-inc/GloriousFlywheel";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs@{ flake-parts, ... }:
@@ -70,6 +74,7 @@
             golangci-lint
             just
             ripgrep
+            inputs.gloriousflywheel.packages.${system}.gloriousflywheel-frontdoor-tools
           ];
         };
       };

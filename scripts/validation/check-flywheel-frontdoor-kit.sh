@@ -33,7 +33,7 @@ reject_contains() {
   fi
 }
 
-for path in Justfile justfile.flywheel .bazelrc.flywheel scripts/gloriousflywheel-bazel.sh; do
+for path in Justfile justfile.flywheel .bazelrc.flywheel flake.nix; do
   [[ -f "$path" ]] || fail "$path is missing"
 done
 
@@ -45,7 +45,14 @@ require_contains justfile.flywheel '^flywheel-doctor\b' "flywheel-doctor recipe"
 require_contains justfile.flywheel '^flywheel-enroll\b' "flywheel-enroll recipe"
 require_contains justfile.flywheel '^flywheel-verify\b' "flywheel-verify recipe"
 require_contains justfile.flywheel '^flywheel-bazel\b' "flywheel-bazel recipe"
-require_contains justfile.flywheel './scripts/gloriousflywheel-bazel.sh' "local GloriousFlywheel Bazel wrapper invocation"
+require_contains justfile.flywheel 'gloriousflywheel-bazel' "packaged GloriousFlywheel Bazel wrapper invocation"
+require_contains justfile.flywheel '_flywheel_env' ".env.flywheel.local sourcing shim"
+reject_contains justfile.flywheel '^set dotenv-load' "global Just dotenv-load setting"
+reject_contains justfile.flywheel './scripts/gloriousflywheel-bazel.sh' "local GloriousFlywheel Bazel wrapper invocation"
+
+require_contains flake.nix 'github:tinyland-inc/GloriousFlywheel' "GloriousFlywheel flake input"
+require_contains flake.nix 'gloriousflywheel-frontdoor-tools' "lightweight front-door tools package"
+reject_contains flake.nix 'gloriousflywheel-profile-tools' "auth-capable profile package in default devshell"
 
 require_contains .bazelrc 'try-import %workspace%/\.bazelrc\.flywheel' "front-door Bazel rc import"
 require_contains .bazelrc.flywheel '^build:ci-cached\b' "shared-cache Bazel config"
@@ -55,12 +62,6 @@ reject_contains .bazelrc.flywheel 'remote_cache=' "hard-coded remote cache endpo
 reject_contains .bazelrc.flywheel 'remote_executor=' "hard-coded remote executor endpoint"
 reject_contains .bazelrc.flywheel 'ubuntu-latest' "hosted-runner fallback"
 reject_contains .bazelrc.flywheel 'localhost|127\.0\.0\.1' "local proof endpoint"
-
-require_contains scripts/gloriousflywheel-bazel.sh 'GF_BAZEL_SUBSTRATE_MODE' "wrapper substrate-mode contract"
-require_contains scripts/gloriousflywheel-bazel.sh 'BAZEL_REMOTE_CACHE' "wrapper cache endpoint contract"
-require_contains scripts/gloriousflywheel-bazel.sh 'BAZEL_REMOTE_EXECUTOR' "wrapper executor endpoint contract"
-require_contains scripts/gloriousflywheel-bazel.sh 'remote_local_fallback=false' "wrapper executor fallback refusal"
-reject_contains scripts/gloriousflywheel-bazel.sh 'ubuntu-latest' "hosted-runner fallback"
 
 require_contains .github/workflows/ci.yml 'runs-on: tinyland-nix' "shared tinyland-nix CI runner"
 reject_contains .github/workflows/ci.yml 'ubuntu-latest' "hosted-runner fallback"

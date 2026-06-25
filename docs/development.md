@@ -28,7 +28,10 @@ nix develop --command just flywheel-test //...
 ## Shared-cache and remote-execution proof
 
 The repo imports the GloriousFlywheel front-door kit through `Justfile` and
-`.bazelrc`. The advertised consumer commands are:
+`.bazelrc`. The default devshell includes the lightweight
+`gloriousflywheel-frontdoor-tools` package, so the advertised consumer commands
+resolve from repo-managed Nix tooling without pulling REAPI token-exchange or
+credential-helper binaries into this first-adoption cache path:
 
 ```sh
 just flywheel-doctor
