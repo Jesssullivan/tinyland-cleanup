@@ -1,86 +1,53 @@
-# Validation Status: 2026-06-23
+# Validation status
 
-Branch: `jess/tin-2170-inode-awareness`
-Commit: `4041891`
+Updated: 2026-06-24
 
-## Scope
+## v0.3.0 — inode-aware disk-pressure handling (TIN-2170 / TIN-2165)
 
-This validation covers inode-aware pressure handling for TIN-2170/TIN-2165:
+Inode-awareness is shipped, released, and deployed.
 
-- byte and inode pressure are evaluated independently;
-- inode pressure can escalate cleanup even when byte usage is healthy;
-- real cleanup does not stop at the byte target while inode pressure remains;
-- daemon state records inode no-progress cycles so unrelieved inode-only
-  escalation can back off to cooldown cadence;
-- JSON and text reports include host and mount inode evidence.
+- **Merged to `main`** and released as **v0.3.0** (tarballs + RPMs + SHA256SUMS).
+- **CI green**: Go (build/vet/test), Bazel (`//...`), and the Nix package build.
+- **Deployed** to the fleet: honey and bumble run the inode-aware daemon; honey's
+  `/nix` mount uses inode thresholds `warning 70` / `critical 90`.
 
-## Local Validation
+### What it does
 
-Passed in this session on aarch64-darwin (Go is the fast local authority):
+- Byte and inode pressure are evaluated independently; the cleanup level is the
+  higher of the two (`max(byte, inode)`), so an inode-exhausted filesystem with
+  free bytes still escalates and fires nix-GC.
+- Cleanup does not stop while any monitored mount still has inode pressure.
+- Daemon state records consecutive inode no-progress cycles; inode-only critical
+  escalation that nothing can relieve backs off to the cooldown cadence
+  (`policy.inode_no_progress_limit`, default 3).
+- JSON and text reports carry host and per-mount inode evidence
+  (`host_inode_level`, `host_byte_level`, `max_inode_level`, `inode_backoff`).
 
-```sh
-env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go build ./...   # PASS
-env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go vet ./...     # PASS
-env GOCACHE=/tmp/tinyland-cleanup-gocache GOFLAGS=-mod=vendor go test ./...    # PASS
-gofmt -l .                                                                     # clean
-```
+### Validation performed
 
-New tests cover: inode-driven escalation, the combined-level `max(byte, inode)`
-property, the unavailable-inode guard, the inode-pressure circuit breaker
-engaging after repeated no-progress cycles, the multi-mount stop condition, and
-inode no-progress state round-tripping.
+- `go build` / `vet` / `test` / `test -race`, gofmt — green.
+- Cross-platform safety confirmed: APFS reports large dynamic inode counts, so
+  inode level stays `none` and never falsely escalates; ext4/xfs fixed inode
+  pools (honey's `/nix`) escalate correctly.
+- Strict config parsing accepts the shipped `inode_thresholds` keys.
+- The lab Home Manager contract test (`tinyland-cleanup-config-test`) passes
+  against the shipped binary; lab renders the inode threshold keys onto
+  honey/bumble.
 
-Strict config parsing (`KnownFields(true)`) verified for the shipped configs:
+### Release ordering (completed)
 
-```sh
-tinyland-cleanup -config config/default.yaml -list-plugins           # PASS
-tinyland-cleanup -config packaging/linux/config.yaml -list-plugins   # PASS
-```
+The strict-config skew is resolved: the inode-supporting binary shipped to `main`
+and lab's flake input was bumped to it before honey/bumble switched. New config
+keys must always ship in the binary before lab renders them.
 
-Report smoke test (`-once -dry-run` monitoring `/` and `/nix` on this APFS host)
-confirmed the intended safe behavior: both mounts read byte `critical` (disk is
-genuinely ~95% full) while inode level is `none` (0.2% / 2.9% inodes used), i.e.
-APFS dynamic inode counts do not falsely escalate. `host_byte_level`,
-`host_inode_level`, and `max_inode_level` render distinctly in JSON.
+## Documentation site
 
-No cleanup mutation was performed during validation.
+The MkDocs Material site is built by the pure-Bazel `//docs:site` target
+(`//docs:site_smoke_test` gates it) with a Nix parity build (`nix build .#docs`),
+and deploys to GitHub Pages at <https://jesssullivan.github.io/tinyland-cleanup/>.
 
-### Not re-run in this session
+## GloriousFlywheel
 
-`nix build .#default` (Nix package authority) and
-`bazelisk test //...` (hermetic Bazel graph) are part of the validation contract
-(AGENTS.md) but were not re-run here; they remain CI's responsibility before
-release.
-
-## Lab Consumer Proof
-
-The lab Home Manager contract was checked against this working tree using the
-same upstream input that lab normally consumes from GitHub:
-
-```sh
-nix eval  .#checks.aarch64-darwin.tinyland-cleanup-config-test.drvPath \
-  --override-input tinyland-cleanup-upstream path:/Users/jess/git/tinyland-cleanup   # evaluates
-nix build .#checks.aarch64-darwin.tinyland-cleanup-config-test \
-  --override-input tinyland-cleanup-upstream path:/Users/jess/git/tinyland-cleanup \
-  --no-link -L --builders '' --max-jobs 4                                            # see status below
-```
-
-Verified by reading `lab/nix/home-manager/tinyland-cleanup.nix`: the module
-renders global `inode_thresholds` and per-mount `threshold_inode_warning` /
-`threshold_inode_critical`; `lab/nix/hosts/honey.nix` sets honey's `/nix` mount
-to `thresholdInodeWarning = 70` / `thresholdInodeCritical = 90`. The
-`tinyland-cleanup-config-test` check is exposed at
-`flake.nix` `checks.aarch64-darwin.tinyland-cleanup-config-test` and its
-derivation evaluates cleanly against this working tree via `--override-input`.
-
-> RELEASE ORDERING (do not skip): lab's flake input is still pinned to
-> `debbdaa` (byte-only `main`), and the lab home-manager change is on branch
-> `chore/codex-0.142.0`. A byte-only binary rejects an `inode_thresholds` config
-> under strict parsing, so the binary with inode support MUST ship to the pinned
-> rev BEFORE lab's flake input is bumped and switched onto honey/bumble.
-
-## GloriousFlywheel Proof
-
-The Bazel workflow remains shared-cache-backed only. This validation does not
-prove remote execution/offload. Continue using `scripts/bazel-cache-backed.sh`
-with an explicit `BAZEL_REMOTE_CACHE` endpoint for GloriousFlywheel cache proof.
+The Bazel graph is shared-cache-backed; remote-execution proof remains explicit
+(`scripts/bazel-rbe-proof.sh`) and is not claimed by default. See
+`config/bazel-rbe-target-eligibility.json`.
