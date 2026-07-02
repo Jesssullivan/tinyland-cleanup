@@ -1052,6 +1052,75 @@ func TestPlanCleanupReportsPnpmStorePruneTarget(t *testing.T) {
 	}
 }
 
+func TestPlanCleanupReportsStaleTCFSRustTargetCache(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	staleTarget := filepath.Join(home, ".cache", "tcfs-513-target", "debug")
+	recentTarget := filepath.Join(home, ".cache", "tcfs-999-target", "debug")
+	ignoredTarget := filepath.Join(home, ".cache", "tcfs-999-not-target", "debug")
+	for _, dir := range []string{staleTarget, recentTarget, ignoredTarget} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "artifact"), []byte("artifact"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-15 * 24 * time.Hour)
+	if err := os.Chtimes(filepath.Dir(staleTarget), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := tcfsRustTargetCacheConfig()
+	plan := p.PlanCleanup(context.Background(), LevelAggressive, cfg, slog.Default())
+
+	stale := findDevArtifactTarget(t, plan.Targets, "tcfs-rust-target", filepath.Dir(staleTarget))
+	if stale.Action != "delete" || stale.Protected {
+		t.Fatalf("expected stale TCFS Rust target cache to be deletable, got %#v", stale)
+	}
+	recent := findDevArtifactTarget(t, plan.Targets, "tcfs-rust-target", filepath.Dir(recentTarget))
+	if recent.Action != "protect" || !recent.Protected {
+		t.Fatalf("expected recent TCFS Rust target cache to be protected, got %#v", recent)
+	}
+	if _, ok := findDevArtifactTargetMaybe(plan.Targets, "tcfs-rust-target", filepath.Dir(ignoredTarget)); ok {
+		t.Fatalf("unexpected non-TCFS target cache in plan: %s", filepath.Dir(ignoredTarget))
+	}
+}
+
+func TestCleanupDeletesStaleTCFSRustTargetCache(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	staleTarget := filepath.Join(home, ".cache", "tcfs-513-target")
+	recentTarget := filepath.Join(home, ".cache", "tcfs-999-target")
+	for _, dir := range []string{filepath.Join(staleTarget, "debug"), filepath.Join(recentTarget, "debug")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "artifact"), []byte("artifact"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-15 * 24 * time.Hour)
+	if err := os.Chtimes(staleTarget, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := tcfsRustTargetCacheConfig()
+	result := p.Cleanup(context.Background(), LevelAggressive, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("items cleaned = %d, want 1", result.ItemsCleaned)
+	}
+	if _, err := os.Stat(staleTarget); !os.IsNotExist(err) {
+		t.Fatalf("expected stale TCFS Rust target cache to be deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(recentTarget); err != nil {
+		t.Fatalf("expected recent TCFS Rust target cache to remain, stat err=%v", err)
+	}
+}
+
 func TestPlanCleanupReportsGeneratedArtifactsInsideStaleTemporaryRoots(t *testing.T) {
 	p := newDevArtifactsPluginWithActive(nil)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -1271,6 +1340,23 @@ func pnpmStoreConfig() *config.Config {
 	cfg.DevArtifacts.RustTargets = false
 	cfg.DevArtifacts.ZigArtifacts = false
 	cfg.DevArtifacts.PnpmStore = true
+	cfg.DevArtifacts.GoBuildCache = false
+	cfg.DevArtifacts.HaskellCache = false
+	cfg.DevArtifacts.LargeLocalArtifacts = false
+	cfg.DevArtifacts.LMStudioModels = false
+	return cfg
+}
+
+func tcfsRustTargetCacheConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.DevArtifacts.ScanPaths = nil
+	cfg.DevArtifacts.TempArtifacts = false
+	cfg.DevArtifacts.AgentWorktreeArtifacts = false
+	cfg.DevArtifacts.NodeModules = false
+	cfg.DevArtifacts.PythonVenvs = false
+	cfg.DevArtifacts.RustTargets = true
+	cfg.DevArtifacts.ZigArtifacts = false
+	cfg.DevArtifacts.PnpmStore = false
 	cfg.DevArtifacts.GoBuildCache = false
 	cfg.DevArtifacts.HaskellCache = false
 	cfg.DevArtifacts.LargeLocalArtifacts = false

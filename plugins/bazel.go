@@ -89,9 +89,10 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		WouldRun: true,
 		Steps: []string{
 			"Discover Bazel output bases, repository caches, disk caches, and Bazelisk downloads",
+			"Discover Bazel server logs that may contain captured client environments",
 			"Measure logical and physical bytes without following repo-local bazel-* symlinks",
 			"Protect active output bases, protected workspace output bases, and newest output bases",
-			"Delete only stale inactive output bases and budget-excess cache tiers in real cleanup mode at moderate or higher levels",
+			"Delete only stale inactive output bases, stale inactive server logs, and budget-excess cache tiers in real cleanup mode at moderate or higher levels",
 			"Remove repo-local bazel-* symlinks only after their target output base was deleted",
 		},
 		Metadata: map[string]string{
@@ -308,7 +309,10 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 
 	var candidates []bazelCandidate
 	if isBazelOutputBase(root) {
-		return []bazelCandidate{newBazelCandidate("output_base", filepath.Base(root), root, info.ModTime())}
+		return append(
+			[]bazelCandidate{newBazelCandidate("output_base", filepath.Base(root), root, info.ModTime())},
+			discoverBazelServerLogCandidates(root)...,
+		)
 	}
 	if isBazelPartialOutputBase(root) {
 		return []bazelCandidate{newBazelCandidate("partial_output_base", filepath.Base(root), root, info.ModTime())}
@@ -336,6 +340,7 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 		case isBazelOutputBase(path):
 			if info, err := entry.Info(); err == nil {
 				candidates = append(candidates, newBazelCandidate("output_base", entry.Name(), path, info.ModTime()))
+				candidates = append(candidates, discoverBazelServerLogCandidates(path)...)
 			}
 		case isBazelPartialOutputBase(path):
 			if info, err := entry.Info(); err == nil {
@@ -392,11 +397,37 @@ func discoverBazelOutputBases(outputUserRoot string) []bazelCandidate {
 		switch {
 		case isBazelOutputBase(path):
 			candidates = append(candidates, newBazelCandidate("output_base", entry.Name(), path, info.ModTime()))
+			candidates = append(candidates, discoverBazelServerLogCandidates(path)...)
 		case isBazelPartialOutputBase(path):
 			candidates = append(candidates, newBazelCandidate("partial_output_base", entry.Name(), path, info.ModTime()))
 		}
 	}
 	return candidates
+}
+
+func discoverBazelServerLogCandidates(outputBase string) []bazelCandidate {
+	entries, err := os.ReadDir(outputBase)
+	if err != nil {
+		return nil
+	}
+
+	var candidates []bazelCandidate
+	for _, entry := range entries {
+		if entry.IsDir() || !bazelServerLogNameAllowed(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		path := filepath.Join(outputBase, entry.Name())
+		candidates = append(candidates, newBazelCandidate("server_log", entry.Name(), path, info.ModTime()))
+	}
+	return candidates
+}
+
+func bazelServerLogNameAllowed(name string) bool {
+	return name == "command.log" || name == "jvm.out" || strings.HasPrefix(name, "java.log")
 }
 
 func discoverBazeliskCandidates(root string) []bazelCandidate {
@@ -733,6 +764,15 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 	case level == LevelWarning:
 		action = "review"
 		reason = "warning level reports Bazel cache footprint only"
+	case candidate.Type == "server_log":
+		if candidate.ModTime.After(now.Add(-staleAfter)) {
+			action = "keep"
+			protected = true
+			reason = "newer than configured Bazel server-log stale threshold"
+		} else {
+			action = "delete_server_log"
+			reason = "stale inactive Bazel server log; server logs can contain captured client environments"
+		}
 	case !outputBaseLike:
 		if !budgetExceeded {
 			action = "review_cache_budget"
@@ -777,6 +817,8 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 func bazelCandidateTier(candidateType string) string {
 	switch candidateType {
 	case "bazelisk":
+		return CleanupTierSafe
+	case "server_log":
 		return CleanupTierSafe
 	case "repository_cache", "disk_cache", "remote_cache", "output_base", "partial_output_base":
 		return CleanupTierWarm
@@ -851,6 +893,8 @@ func bazelTargetEligibleForDeletion(target CleanupTarget) bool {
 		return target.Type == "partial_output_base"
 	case "stop_idle_server_then_delete_output_base":
 		return target.Type == "output_base"
+	case "delete_server_log":
+		return target.Type == "server_log"
 	case "delete_cache_tier":
 		return target.Type == "repository_cache" || target.Type == "disk_cache" || target.Type == "remote_cache" || target.Type == "bazelisk"
 	default:
@@ -867,6 +911,8 @@ func deleteBazelTarget(ctx context.Context, target CleanupTarget, logger *slog.L
 		return deleteBazelOutputBase(target.Path, logger)
 	case "partial_output_base":
 		return deleteBazelPartialOutputBase(target.Path, logger)
+	case "server_log":
+		return deleteBazelServerLog(target.Path, logger)
 	case "repository_cache", "disk_cache", "remote_cache", "bazelisk":
 		return deleteBazelCacheTier(target.Type, target.Path, logger)
 	default:
@@ -1121,6 +1167,20 @@ func deleteBazelPartialOutputBase(path string, logger *slog.Logger) error {
 		return err
 	}
 	return os.RemoveAll(path)
+}
+
+func deleteBazelServerLog(path string, logger *slog.Logger) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || !bazelServerLogNameAllowed(filepath.Base(path)) {
+		return fmt.Errorf("refusing to delete unsafe Bazel server log path: %s", path)
+	}
+	if err := normalizeBazelDeletionPermissions(path, logger); err != nil {
+		return err
+	}
+	return os.Remove(path)
 }
 
 func cleanupRepoLocalBazelSymlinksForDeletedOutputBase(workspaceRoots []string, home string, outputBase string, logger *slog.Logger) int {
