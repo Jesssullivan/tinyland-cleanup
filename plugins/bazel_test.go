@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -903,6 +904,125 @@ func TestApplyBazelCleanupTargetsDeletesEligibleCacheTier(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected %s to be deleted, stat err=%v", path, err)
 		}
+	}
+}
+
+func TestDiscoverBazelRootCandidatesReportsServerLogs(t *testing.T) {
+	root := t.TempDir()
+	outputBase := filepath.Join(root, "_bazel_jess", "loggy")
+	makeBazelOutputBase(t, outputBase)
+	logPath := filepath.Join(outputBase, "java.log.neo.jess.log.java.20260702")
+	if err := os.WriteFile(logPath, []byte("client env"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outputBase, "not-a-bazel-log.txt"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resolvedLogPath, err := filepath.EvalSymlinks(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := discoverBazelRootCandidates(outputBase)
+	var found bool
+	for _, candidate := range candidates {
+		if candidate.Type == "server_log" && candidate.Path == resolvedLogPath && candidate.Name == filepath.Base(logPath) {
+			found = true
+		}
+		if candidate.Type == "server_log" && strings.Contains(candidate.Path, "not-a-bazel-log") {
+			t.Fatalf("unexpected non-Bazel log candidate: %+v", candidate)
+		}
+	}
+	if !found {
+		t.Fatalf("did not discover Bazel server log candidate in %+v", candidates)
+	}
+}
+
+func TestBazelPlanTargetsDeletesOnlyStaleInactiveServerLogs(t *testing.T) {
+	now := time.Now()
+	cfg := config.DefaultConfig().Bazel
+	cfg.StaleAfter = "24h"
+
+	targets, _ := bazelPlanTargets([]bazelCandidate{
+		{
+			Type:     "server_log",
+			Name:     "java.log.old",
+			Path:     "/tmp/output-base/java.log.old",
+			ModTime:  now.Add(-48 * time.Hour),
+			Physical: 11,
+		},
+		{
+			Type:     "server_log",
+			Name:     "java.log.new",
+			Path:     "/tmp/output-base/java.log.new",
+			ModTime:  now.Add(-1 * time.Hour),
+			Physical: 13,
+		},
+		{
+			Type:     "server_log",
+			Name:     "java.log.active",
+			Path:     "/tmp/output-base/java.log.active",
+			ModTime:  now.Add(-48 * time.Hour),
+			Physical: 17,
+			Active:   true,
+			Reason:   "active Bazel process or output-base lock detected",
+		},
+	}, cfg, LevelModerate, now, false)
+
+	actions := map[string]CleanupTarget{}
+	for _, target := range targets {
+		actions[target.Name] = target
+	}
+	if got := actions["java.log.old"].Action; got != "delete_server_log" {
+		t.Fatalf("old server log action = %q, want delete_server_log", got)
+	}
+	if got := actions["java.log.new"].Action; got != "keep" {
+		t.Fatalf("new server log action = %q, want keep", got)
+	}
+	if got := actions["java.log.active"].Action; got != "keep" {
+		t.Fatalf("active server log action = %q, want keep", got)
+	}
+}
+
+func TestApplyBazelCleanupTargetsDeletesEligibleServerLog(t *testing.T) {
+	root := t.TempDir()
+	outputBase := filepath.Join(root, "_bazel_jess", "loggy")
+	makeBazelOutputBase(t, outputBase)
+	logPath := filepath.Join(outputBase, "command.log")
+	if err := os.WriteFile(logPath, []byte("client env"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	unsafePath := filepath.Join(outputBase, "not-a-bazel-log.txt")
+	if err := os.WriteFile(unsafePath, []byte("keep"), 0400); err != nil {
+		t.Fatal(err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := applyBazelCleanupTargets(context.Background(), "bazel", LevelModerate, []CleanupTarget{
+		{
+			Type:   "server_log",
+			Name:   "command.log",
+			Path:   logPath,
+			Bytes:  10,
+			Action: "delete_server_log",
+		},
+		{
+			Type:   "server_log",
+			Name:   "not-a-bazel-log.txt",
+			Path:   unsafePath,
+			Bytes:  20,
+			Action: "delete_server_log",
+		},
+	}, nil, root, logger)
+
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("items cleaned = %d, want 1", result.ItemsCleaned)
+	}
+	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+		t.Fatalf("expected server log to be deleted, stat err=%v", err)
+	}
+	if _, err := os.Stat(unsafePath); err != nil {
+		t.Fatalf("unsafe path should remain, err=%v", err)
 	}
 }
 

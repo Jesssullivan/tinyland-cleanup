@@ -32,6 +32,7 @@ var tempArtifactPathPattern = regexp.MustCompile(`(?:/private)?/tmp/[^\s"'<>]+|/
 var absoluteDevArtifactPathPattern = regexp.MustCompile(`(?:~|/)[^\s"'<>]+`)
 var nixTempRootNamePattern = regexp.MustCompile(`^(?:nix-shell\.[A-Za-z0-9]+|nix-develop-\d+-\d+|nix-\d+-\d+|nix-build-[A-Za-z0-9._+@=-]+-\d+)$`)
 var temporaryProofLaneNamePattern = regexp.MustCompile(`^t[0-9]+[A-Za-z]*-[A-Za-z0-9._-]+$`)
+var tcfsRustTargetCacheNamePattern = regexp.MustCompile(`^tcfs-[A-Za-z0-9._]+-target$`)
 
 var errDevArtifactScanBudgetExceeded = errors.New("dev artifact scan budget exceeded")
 
@@ -308,6 +309,9 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 	if daCfg.AgentWorktreeArtifacts && daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
 		p.planAgentWorktreeArtifacts(scanCtx, home, rustAge, mutates, daCfg, active, tracker, &targets, scanBudget)
 	}
+	if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
+		p.planTCFSRustTargetCaches(scanCtx, home, rustAge, mutates, daCfg, active, &targets, scanBudget)
+	}
 
 	if daCfg.GoBuildCache {
 		p.planGoBuildCache(ctx, level, active, &targets)
@@ -491,6 +495,13 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			result.ItemsCleaned++
 		}
 	}
+	if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
+		freed := p.cleanTCFSRustTargetCaches(scanCtx, home, rustAge, daCfg, active, logger, scanBudget)
+		result.BytesFreed += freed
+		if freed > 0 {
+			result.ItemsCleaned++
+		}
+	}
 	if scanBudget.exhausted() {
 		logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
 		return result
@@ -598,6 +609,12 @@ func (p *DevArtifactsPlugin) planAgentWorktreeArtifacts(ctx context.Context, hom
 		}
 		p.planRustTargets(ctx, root, rustAge, mutates, daCfg.ProtectPaths, active, tracker, targets, budgets...)
 	}
+}
+
+func (p *DevArtifactsPlugin) planTCFSRustTargetCaches(ctx context.Context, home string, maxAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active devArtifactActivity, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+	p.forEachTCFSRustTargetCache(ctx, home, daCfg, active, func(path string, info os.FileInfo, bytes int64, protected bool, activeReason string) {
+		*targets = append(*targets, p.tcfsRustTargetCacheTarget(path, bytes, info.ModTime(), maxAge, mutates, protected, activeReason))
+	}, budgets...)
 }
 
 func (p *DevArtifactsPlugin) planAgentTranscripts(ctx context.Context, home string, staleAfter time.Duration, mutates bool, daCfg config.DevArtifactsConfig, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
@@ -766,6 +783,38 @@ func (p *DevArtifactsPlugin) agentTranscriptTarget(home string, path string, byt
 		target.Reason = fmt.Sprintf("agent transcript JSONL is older than %s and can be gzip-compressed without deleting history", formatDevArtifactAge(staleAfter))
 	}
 	annotateCleanupTargetPolicy(&target, CleanupTierSafe, hostReclaimForAction(target.Action))
+	return target
+}
+
+func (p *DevArtifactsPlugin) tcfsRustTargetCacheTarget(path string, bytes int64, modTime time.Time, maxAge time.Duration, mutates bool, protected bool, activeReason string) CleanupTarget {
+	active := activeReason != ""
+	stale := maxAge == 0 || !modTime.After(time.Now().Add(-maxAge))
+	target := CleanupTarget{
+		Type:      "tcfs-rust-target",
+		Name:      filepath.Base(path),
+		Path:      path,
+		Bytes:     bytes,
+		Active:    active,
+		Protected: active || protected || !stale,
+	}
+	switch {
+	case active:
+		target.Action = "protect"
+		target.Reason = "active development process detected: " + activeReason
+	case protected:
+		target.Action = "protect"
+		target.Reason = "path is covered by dev_artifacts.protect_paths"
+	case !mutates:
+		target.Action = "report"
+		target.Reason = "warning level reports TCFS Rust target caches without deleting them"
+	case stale:
+		target.Action = "delete"
+		target.Reason = fmt.Sprintf("TCFS Rust target cache is stale for %s", formatDevArtifactAge(maxAge))
+	default:
+		target.Action = "protect"
+		target.Reason = fmt.Sprintf("TCFS Rust target cache is newer than %s", formatDevArtifactAge(maxAge))
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(target.Action))
 	return target
 }
 
@@ -2782,6 +2831,66 @@ func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath stri
 	}
 
 	return totalFreed
+}
+
+func (p *DevArtifactsPlugin) cleanTCFSRustTargetCaches(ctx context.Context, home string, maxAge time.Duration, daCfg config.DevArtifactsConfig, active devArtifactActivity, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+	var totalFreed int64
+	p.forEachTCFSRustTargetCache(ctx, home, daCfg, active, func(path string, info os.FileInfo, bytes int64, protected bool, activeReason string) {
+		if protected || activeReason != "" {
+			return
+		}
+		if maxAge > 0 && info.ModTime().After(time.Now().Add(-maxAge)) {
+			return
+		}
+		logger.Debug("removing stale TCFS Rust target cache", "path", path, "size_mb", bytes/(1024*1024))
+		if err := os.RemoveAll(path); err != nil {
+			logger.Debug("failed to remove TCFS Rust target cache", "path", path, "error", err)
+			return
+		}
+		totalFreed += bytes
+	}, budgets...)
+	if totalFreed > 0 {
+		logger.Info("cleaned stale TCFS Rust target caches", "freed_mb", totalFreed/(1024*1024))
+	}
+	return totalFreed
+}
+
+func (p *DevArtifactsPlugin) forEachTCFSRustTargetCache(ctx context.Context, home string, daCfg config.DevArtifactsConfig, active devArtifactActivity, callback func(path string, info os.FileInfo, bytes int64, protected bool, activeReason string), budgets ...*devArtifactScanBudget) {
+	cacheRoot := filepath.Join(home, ".cache")
+	entries, err := os.ReadDir(cacheRoot)
+	if err != nil {
+		return
+	}
+	budget := optionalDevArtifactScanBudget(budgets)
+	for _, entry := range entries {
+		if !entry.IsDir() || !tcfsRustTargetCacheNamePattern.MatchString(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(cacheRoot, entry.Name())
+		if budget != nil {
+			if err := budget.checkPath(ctx, path); err != nil {
+				return
+			}
+		} else if err := ctx.Err(); err != nil {
+			return
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		bytes, err := getDirSizeContext(ctx, path)
+		if err != nil {
+			if budget != nil {
+				budget.markContextError(ctx, path)
+			}
+			return
+		}
+		if bytes <= 0 {
+			continue
+		}
+		activeReason, _ := active.TargetReason("rust-target", path)
+		callback(path, info, bytes, p.isProtected(path, daCfg.ProtectPaths), activeReason)
+	}
 }
 
 // cleanRustTargets removes stale Rust target/ directories.
