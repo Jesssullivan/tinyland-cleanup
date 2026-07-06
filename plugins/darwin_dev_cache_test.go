@@ -4,10 +4,12 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -249,6 +251,22 @@ func TestRemoveAllDarwinCacheTargetWithRetryHandlesTransientNonEmptyDirectory(t 
 	}
 	if pathExists(dir) {
 		t.Fatalf("expected cache directory to be removed")
+	}
+}
+
+func TestDarwinDeveloperCacheNonFatalRemoveErrorIncludesDirectoryNotEmpty(t *testing.T) {
+	if !isDarwinDeveloperCacheNonFatalRemoveError(&os.PathError{
+		Op:   "unlinkat",
+		Path: filepath.Join(t.TempDir(), "uv"),
+		Err:  syscall.ENOTEMPTY,
+	}) {
+		t.Fatal("expected ENOTEMPTY to be treated as non-fatal for live-mutating cache cleanup")
+	}
+	if !isDarwinDeveloperCacheNonFatalRemoveError(errors.New("unlinkat /Users/jess/.cache/uv: directory not empty")) {
+		t.Fatal("expected directory-not-empty text to be treated as non-fatal for live-mutating cache cleanup")
+	}
+	if isDarwinDeveloperCacheNonFatalRemoveError(os.ErrPermission) {
+		t.Fatal("permission errors must remain fatal")
 	}
 }
 
