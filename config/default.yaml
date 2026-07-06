@@ -213,6 +213,10 @@ dev_artifacts:
     - ~/projects
   scan_max_duration: 30s
   scan_max_entries: 250000
+  # Broad workspace roots such as ~/git are scanned one top-level repo at a
+  # time. A daemon-state cursor rotates the next cycle so one giant repo cannot
+  # starve later node_modules/.venv/target cleanup forever.
+  workspace_scan_max_roots: 8
   # Review-only: surface large top-level temp proof/output trees without
   # deleting them automatically. Darwin compiled defaults use /private/tmp.
   temp_artifacts: true

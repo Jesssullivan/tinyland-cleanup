@@ -311,6 +311,8 @@ type DevArtifactsConfig struct {
 	ScanMaxDuration string `yaml:"scan_max_duration"`
 	// ScanMaxEntries bounds recursive filesystem entries visited per dev-artifact scan
 	ScanMaxEntries int `yaml:"scan_max_entries"`
+	// WorkspaceScanMaxRoots bounds top-level workspace roots visited per artifact family per cycle.
+	WorkspaceScanMaxRoots int `yaml:"workspace_scan_max_roots"`
 	// TempArtifacts enables review-only reporting for large top-level temp artifacts
 	TempArtifacts bool `yaml:"temp_artifacts"`
 	// TempScanPaths are top-level temporary directories scanned for large generated artifacts
@@ -555,6 +557,7 @@ func DefaultConfig() *Config {
 			ScanPaths:                defaultScanPaths,
 			ScanMaxDuration:          "30s",
 			ScanMaxEntries:           250000,
+			WorkspaceScanMaxRoots:    8,
 			TempArtifacts:            true,
 			TempScanPaths:            defaultTempScanPaths,
 			TempScanMaxRoots:         128,

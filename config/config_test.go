@@ -326,6 +326,9 @@ func TestPackagedLinuxConfigParsesCurrentNixPolicy(t *testing.T) {
 	if cfg.DevArtifacts.ScanMaxEntries != 250000 {
 		t.Errorf("expected dev_artifacts.scan_max_entries=250000, got %d", cfg.DevArtifacts.ScanMaxEntries)
 	}
+	if cfg.DevArtifacts.WorkspaceScanMaxRoots != 8 {
+		t.Errorf("expected dev_artifacts.workspace_scan_max_roots=8, got %d", cfg.DevArtifacts.WorkspaceScanMaxRoots)
+	}
 	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
 		t.Errorf("expected dev_artifacts.temp_scan_max_roots=128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
 	}
@@ -426,6 +429,9 @@ func TestDevArtifactsConfigDefaults(t *testing.T) {
 	}
 	if cfg.DevArtifacts.ScanMaxEntries != 250000 {
 		t.Errorf("DevArtifacts.ScanMaxEntries should default to 250000, got %d", cfg.DevArtifacts.ScanMaxEntries)
+	}
+	if cfg.DevArtifacts.WorkspaceScanMaxRoots != 8 {
+		t.Errorf("DevArtifacts.WorkspaceScanMaxRoots should default to 8, got %d", cfg.DevArtifacts.WorkspaceScanMaxRoots)
 	}
 	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
 		t.Errorf("DevArtifacts.TempScanMaxRoots should default to 128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
@@ -705,6 +711,7 @@ dev_artifacts:
     - ~/src
   scan_max_duration: 5s
   scan_max_entries: 42
+  workspace_scan_max_roots: 2
   temp_artifacts: false
   temp_scan_paths:
     - /tmp/tinyland-cleanup
@@ -861,6 +868,9 @@ darwin_dev_caches:
 	}
 	if cfg.DevArtifacts.ScanMaxEntries != 42 {
 		t.Errorf("DevArtifacts.ScanMaxEntries should be 42 per config, got %d", cfg.DevArtifacts.ScanMaxEntries)
+	}
+	if cfg.DevArtifacts.WorkspaceScanMaxRoots != 2 {
+		t.Errorf("DevArtifacts.WorkspaceScanMaxRoots should be 2 per config, got %d", cfg.DevArtifacts.WorkspaceScanMaxRoots)
 	}
 	if cfg.DevArtifacts.TempScanMaxRoots != 3 {
 		t.Errorf("DevArtifacts.TempScanMaxRoots should be 3 per config, got %d", cfg.DevArtifacts.TempScanMaxRoots)

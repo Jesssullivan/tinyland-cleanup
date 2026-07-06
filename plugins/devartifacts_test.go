@@ -1474,6 +1474,112 @@ func TestCleanupDoesNotDeleteAfterDevArtifactScanBudgetExhaustion(t *testing.T) 
 	}
 }
 
+func TestPlanCleanupShardsWorkspaceRoots(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	tmpDir := t.TempDir()
+	firstProject := filepath.Join(tmpDir, "aaa-first")
+	secondProject := filepath.Join(tmpDir, "zzz-second")
+	for _, project := range []string{firstProject, secondProject} {
+		if err := os.MkdirAll(filepath.Join(project, "node_modules", "pkg"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		packageJSON := filepath.Join(project, "package.json")
+		if err := os.WriteFile(packageJSON, []byte(`{"name":"test"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(project, "node_modules", "pkg", "index.js"), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		oldTime := time.Now().Add(-60 * 24 * time.Hour)
+		if err := os.Chtimes(packageJSON, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := budgetedDevArtifactConfig(tmpDir)
+	cfg.Policy.StateFile = filepath.Join(t.TempDir(), "state.json")
+	cfg.DevArtifacts.ScanMaxEntries = 100
+	cfg.DevArtifacts.WorkspaceScanMaxRoots = 1
+
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	if len(plan.Targets) != 1 {
+		t.Fatalf("expected one sharded workspace target, got %#v", plan.Targets)
+	}
+	if plan.Metadata["workspace_roots_visited"] != "1" {
+		t.Fatalf("expected one workspace root visited, metadata=%#v", plan.Metadata)
+	}
+	if plan.Metadata["workspace_roots_skipped"] != "1" {
+		t.Fatalf("expected one workspace root skipped, metadata=%#v", plan.Metadata)
+	}
+	if plan.Metadata["scan_budget_exhausted"] == "true" {
+		t.Fatalf("shard limit alone should not mark scan evidence incomplete, metadata=%#v", plan.Metadata)
+	}
+}
+
+func TestCleanupRotatesWorkspaceShardCursorAfterBudgetExhaustion(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	tmpDir := t.TempDir()
+	heavyProject := filepath.Join(tmpDir, "aaa-heavy")
+	staleProject := filepath.Join(tmpDir, "zzz-stale")
+	heavyNodeModules := filepath.Join(heavyProject, "node_modules")
+	staleNodeModules := filepath.Join(staleProject, "node_modules")
+	if err := os.MkdirAll(filepath.Join(heavyNodeModules, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(staleNodeModules, "pkg"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(heavyProject, "package.json"), []byte(`{"name":"heavy"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stalePackageJSON := filepath.Join(staleProject, "package.json")
+	if err := os.WriteFile(stalePackageJSON, []byte(`{"name":"stale"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a00", "a01", "a02", "a03", "a04", "a05"} {
+		if err := os.MkdirAll(filepath.Join(heavyProject, name, "nested"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(heavyNodeModules, "pkg", "index.js"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleNodeModules, "pkg", "index.js"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-60 * 24 * time.Hour)
+	if err := os.Chtimes(stalePackageJSON, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := budgetedDevArtifactConfig(tmpDir)
+	cfg.Policy.StateFile = filepath.Join(t.TempDir(), "state.json")
+	cfg.DevArtifacts.ScanMaxEntries = 4
+	cfg.DevArtifacts.WorkspaceScanMaxRoots = 1
+
+	first := p.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	if first.BytesFreed != 0 || first.ItemsCleaned != 0 {
+		t.Fatalf("first budget-exhausted shard should not delete anything, got %#v", first)
+	}
+	if !pathExists(heavyNodeModules) {
+		t.Fatal("heavy node_modules should be preserved when its shard exhausts before complete evidence")
+	}
+	if !pathExists(staleNodeModules) {
+		t.Fatal("stale node_modules should not be reached in the first shard-limited pass")
+	}
+
+	second := p.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	if second.BytesFreed <= 0 || second.ItemsCleaned != 1 {
+		t.Fatalf("second pass should advance cursor and clean stale node_modules, got %#v", second)
+	}
+	if !pathExists(heavyNodeModules) {
+		t.Fatal("heavy node_modules should remain protected by incomplete evidence")
+	}
+	if pathExists(staleNodeModules) {
+		t.Fatal("stale node_modules should be deleted after cursor advances to its shard")
+	}
+}
+
 func budgetedDevArtifactConfig(scanPath string) *config.Config {
 	cfg := config.DefaultConfig()
 	cfg.DevArtifacts.ScanPaths = []string{scanPath}

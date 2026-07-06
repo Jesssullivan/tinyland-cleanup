@@ -233,7 +233,12 @@ preserving scan budget for surfaces that can still reclaim space. Zig
 modified within the recent-output grace window, even at critical pressure.
 Dev-artifact filesystem walking is bounded by
 `dev_artifacts.scan_max_duration`, `dev_artifacts.scan_max_entries`, and
-`dev_artifacts.temp_scan_max_roots`; when a budget is hit, dry-run metadata sets
+`dev_artifacts.workspace_scan_max_roots`; broad workspace scan paths such as
+`~/git` are sharded by top-level repo and rotated with a cursor stored beside
+the daemon state file, so one giant worktree cannot starve later
+`node_modules`, `.venv`, `target`, or Zig artifact cleanup indefinitely.
+Temporary-root discovery is separately bounded by
+`dev_artifacts.temp_scan_max_roots`. When a budget is hit, dry-run metadata sets
 `scan_budget_exhausted: true`, reports `scan_truncated_paths`, and treats the
 omitted evidence as non-actionable. Symlink-heavy temporary roots, including Nix
 shell symlink forests, are measured as symlink entries rather than as the
