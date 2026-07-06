@@ -4,6 +4,7 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
@@ -1391,6 +1393,24 @@ func (p *CachePlugin) cleanupDarwinDeveloperCacheTargets(ctx context.Context, le
 		}
 		result.EstimatedBytesFreed += sizeBefore
 		if err := removeDarwinDeveloperCacheTarget(target.Path); err != nil {
+			if isDarwinDeveloperCacheNonFatalRemoveError(err) {
+				sizeAfter := int64(0)
+				if pathExistsAndIsDir(target.Path) {
+					sizeAfter = getDirAllocatedBytes(target.Path)
+				}
+				freed := safeBytesDiff(sizeBefore, sizeAfter)
+				result.BytesFreed += freed
+				if freed > 0 {
+					result.ItemsCleaned++
+				}
+				logger.Warn("Darwin developer cache target remained active during deletion; treating partial cleanup as non-fatal",
+					"path", target.Path,
+					"type", target.Type,
+					"freed_mb", freed/(1024*1024),
+					"remaining_mb", sizeAfter/(1024*1024),
+					"error", err)
+				continue
+			}
 			result.Error = err
 			logger.Warn("failed to delete Darwin developer cache target", "path", target.Path, "type", target.Type, "error", err)
 			continue
@@ -1408,6 +1428,16 @@ func (p *CachePlugin) cleanupDarwinDeveloperCacheTargets(ctx context.Context, le
 			"freed_mb", freed/(1024*1024))
 	}
 	return result
+}
+
+func isDarwinDeveloperCacheNonFatalRemoveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOTEMPTY) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "directory not empty")
 }
 
 func removeDarwinDeveloperCacheTarget(path string) error {
