@@ -32,6 +32,7 @@ dev_artifacts:
     - ~/src
   scan_max_duration: 30s
   scan_max_entries: 250000
+  workspace_scan_max_roots: 8
   temp_artifacts: true
   temp_scan_paths:
     - /tmp
