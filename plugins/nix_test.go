@@ -335,6 +335,151 @@ func TestNixContentionReason(t *testing.T) {
 	}
 }
 
+func TestNixGCWedgedAppBundle(t *testing.T) {
+	tests := []struct {
+		name      string
+		output    string
+		storePath string
+		appPath   string
+		ok        bool
+	}{
+		{
+			name: "vscode bundle with spaces",
+			output: `deleting '/nix/store/spzws0l6ll4kfjzvzsvv6f7g0zdc1v6a-vscode-1.106.2'
+error: chmod "/nix/store/spzws0l6ll4kfjzvzsvv6f7g0zdc1v6a-vscode-1.106.2/Applications/Visual Studio Code.app": Operation not permitted
+0 store paths deleted, 0.0 KiB freed`,
+			storePath: "/nix/store/spzws0l6ll4kfjzvzsvv6f7g0zdc1v6a-vscode-1.106.2",
+			appPath:   "/nix/store/spzws0l6ll4kfjzvzsvv6f7g0zdc1v6a-vscode-1.106.2/Applications/Visual Studio Code.app",
+			ok:        true,
+		},
+		{
+			name:      "cmux bundle",
+			output:    `error: chmod "/nix/store/hav811c46mqmvmcgfmbfaq7cpi77fbwq-cmux-lab-0.75.0/Applications/cmux.app": Operation not permitted`,
+			storePath: "/nix/store/hav811c46mqmvmcgfmbfaq7cpi77fbwq-cmux-lab-0.75.0",
+			appPath:   "/nix/store/hav811c46mqmvmcgfmbfaq7cpi77fbwq-cmux-lab-0.75.0/Applications/cmux.app",
+			ok:        true,
+		},
+		{
+			name:   "chmod EPERM on non-app store path",
+			output: `error: chmod "/nix/store/abc123-some-tool-1.0/bin/tool": Operation not permitted`,
+			ok:     false,
+		},
+		{
+			name:   "sqlite contention",
+			output: "error: SQLite database '/nix/var/nix/db/db.sqlite' is busy",
+			ok:     false,
+		},
+		{
+			name:   "directory not empty",
+			output: "error: cannot delete '/nix/store/abc123-foo': Directory not empty",
+			ok:     false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			ok:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			storePath, appPath, ok := nixGCWedgedAppBundle(tt.output)
+			if ok != tt.ok || storePath != tt.storePath || appPath != tt.appPath {
+				t.Fatalf("nixGCWedgedAppBundle(%q) = %q, %q, %t; want %q, %q, %t",
+					tt.output, storePath, appPath, ok, tt.storePath, tt.appPath, tt.ok)
+			}
+		})
+	}
+}
+
+func TestNixCollectGarbageTreatsTCCWedgedAppBundleAsPartial(t *testing.T) {
+	oldGOOS := goosValue
+	goosValue = "darwin"
+	t.Cleanup(func() { goosValue = oldGOOS })
+
+	binDir := t.TempDir()
+	fakeGC := filepath.Join(binDir, "nix-collect-garbage")
+	script := `#!/bin/sh
+printf '%s\n' "deleting '/nix/store/1234567890abcdefghijklmnopqrstuv-old-cache'"
+printf '%s\n' 'error: chmod "/nix/store/spzws0l6ll4kfjzvzsvv6f7g0zdc1v6a-vscode-1.106.2/Applications/Visual Studio Code.app": Operation not permitted' >&2
+printf '%s\n' "3 store paths deleted, 16.0 MiB freed"
+exit 1
+`
+	if err := os.WriteFile(fakeGC, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := config.DefaultConfig().Nix
+	cfg.HostMeasurePath = t.TempDir()
+	p := NewNixPlugin()
+	p.freeDiskSpace = func(string) (uint64, error) { return 1000, nil }
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := p.collectGarbage(context.Background(), LevelWarning, nil, cfg, logger)
+	if result.Error != nil {
+		t.Fatalf("TCC-wedged app bundle should be a partial cleanup, not an error: %v", result.Error)
+	}
+	if result.CommandBytesFreed != 16*1024*1024 || result.BytesFreed != result.CommandBytesFreed {
+		t.Fatalf("partial reclaim from GC output should be kept: %+v", result)
+	}
+	if result.ItemsCleaned != 3 {
+		t.Fatalf("partial deleted-path count from GC output should be kept: %+v", result)
+	}
+}
+
+func TestNixCollectGarbageStillFailsOnUnclassifiedError(t *testing.T) {
+	binDir := t.TempDir()
+	fakeGC := filepath.Join(binDir, "nix-collect-garbage")
+	script := `#!/bin/sh
+printf '%s\n' "error: chmod \"/nix/store/abc123-some-tool-1.0/bin/tool\": Operation not permitted" >&2
+exit 1
+`
+	if err := os.WriteFile(fakeGC, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := config.DefaultConfig().Nix
+	cfg.HostMeasurePath = t.TempDir()
+	p := NewNixPlugin()
+	p.freeDiskSpace = func(string) (uint64, error) { return 1000, nil }
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := p.collectGarbage(context.Background(), LevelWarning, nil, cfg, logger)
+	if result.Error == nil {
+		t.Fatalf("non-app-bundle chmod failure should remain a hard error: %+v", result)
+	}
+}
+
+func TestNixCollectGarbageWedgedAppBundleRemainsErrorOffDarwin(t *testing.T) {
+	oldGOOS := goosValue
+	goosValue = "linux"
+	t.Cleanup(func() { goosValue = oldGOOS })
+
+	binDir := t.TempDir()
+	fakeGC := filepath.Join(binDir, "nix-collect-garbage")
+	script := `#!/bin/sh
+printf '%s\n' 'error: chmod "/nix/store/spzws0l6ll4kfjzvzsvv6f7g0zdc1v6a-vscode-1.106.2/Applications/Visual Studio Code.app": Operation not permitted' >&2
+exit 1
+`
+	if err := os.WriteFile(fakeGC, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := config.DefaultConfig().Nix
+	cfg.HostMeasurePath = t.TempDir()
+	p := NewNixPlugin()
+	p.freeDiskSpace = func(string) (uint64, error) { return 1000, nil }
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	result := p.collectGarbage(context.Background(), LevelWarning, nil, cfg, logger)
+	if result.Error == nil {
+		t.Fatalf("app-bundle chmod failure off darwin should remain a hard error: %+v", result)
+	}
+}
+
 func TestParseNixGenerations(t *testing.T) {
 	output := `
    1   2026-04-01 10:00:00

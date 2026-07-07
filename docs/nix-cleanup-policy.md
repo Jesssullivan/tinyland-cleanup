@@ -114,6 +114,38 @@ Runtime behavior:
   output is truncated;
 - `nix-store --optimize` runs only when `allow_store_optimize: true`.
 
+Darwin TCC-protected app bundle wedge:
+
+On macOS, launching a nix-packaged GUI app stamps its `Applications/*.app`
+bundle with the `com.apple.macl` extended attribute. App Management TCC then
+denies `chmod` on that bundle even for root and the nix-daemon. When such a
+store path later becomes dead, `nix-collect-garbage` cannot make it writable
+and aborts the entire pass:
+
+```
+deleting '/nix/store/<hash>-vscode-1.106.2'
+error: chmod "/nix/store/<hash>-vscode-1.106.2/Applications/Visual Studio Code.app": Operation not permitted
+0 store paths deleted, 0.0 KiB freed
+```
+
+After the failed pass the path is DB-orphaned, so every later GC re-hits it
+first and aborts again — the GC lane stays wedged until an operator removes
+the path.
+
+Daemon behavior: the plugin classifies this signature, keeps any partial
+reclaim counts parsed from the GC output, and emits a WARN with `store_path`,
+`app_path`, and a `remediation` field instead of failing the cleanup result.
+The WARN log is the operator contract; GC remains blocked until remediation.
+
+Remediation, from a TCC-privileged terminal (one granted App Management):
+
+```sh
+sudo chmod -R u+w /nix/store/<hash>-<name> && sudo rm -rf /nix/store/<hash>-<name>
+```
+
+This recurs per GUI-app update: each upgrade leaves the old macl-stamped store
+path behind for a future GC to trip over.
+
 Recommended Darwin developer-machine defaults are the repo defaults above.
 They preserve Home Manager rollback safety, avoid fighting active
 `home-manager switch` or `darwin-rebuild` work, and keep store optimization

@@ -346,6 +346,21 @@ func (p *NixPlugin) collectGarbage(ctx context.Context, level CleanupLevel, args
 			logger.Warn("skipping Nix garbage collection because store contention was reported", "reason", reason)
 			return result
 		}
+		// com.apple.macl / App Management TCC semantics are Darwin-only; a chmod
+		// EPERM on other platforms is a real failure that must stay an error.
+		if storePath, appPath, ok := nixGCWedgedAppBundle(string(output)); ok && goos() == "darwin" {
+			result.CommandBytesFreed = p.parseFreedSpace(string(output))
+			result.BytesFreed = result.CommandBytesFreed
+			result.ItemsCleaned = p.parseDeletedPaths(string(output))
+			if beforeOK {
+				result.HostBytesFreed = p.measuredHostDelta(before, measurePath, logger)
+			}
+			logger.Warn("Nix GC wedged by TCC-protected app bundle (com.apple.macl); GC stays blocked until the store path is removed from a TCC-privileged terminal",
+				"store_path", storePath,
+				"app_path", appPath,
+				"remediation", "sudo chmod -R u+w "+storePath+" && sudo rm -rf "+storePath)
+			return result
+		}
 		result.Error = err
 		return result
 	}
@@ -1373,6 +1388,29 @@ func nixContentionReason(output string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// nixGCWedgedAppBundleRe matches the chmod failure nix-collect-garbage emits
+// when a dead store path's Applications/*.app bundle cannot be made writable.
+// The quoted path may contain spaces ("Visual Studio Code.app").
+var nixGCWedgedAppBundleRe = regexp.MustCompile(`chmod "(/nix/store/[^/"]+/(?:[^"]*/)?Applications/[^"]*\.app)": Operation not permitted`)
+
+// nixGCWedgedAppBundle reports whether nix-collect-garbage aborted on a
+// TCC-protected macOS app bundle inside the store. Launching a nix-packaged
+// GUI app stamps its .app bundle with the com.apple.macl xattr; App Management
+// TCC then denies chmod on the bundle even for root, so GC aborts the whole
+// pass, the path stays DB-orphaned, and every later GC re-hits it first.
+func nixGCWedgedAppBundle(output string) (storePath, appPath string, ok bool) {
+	matches := nixGCWedgedAppBundleRe.FindStringSubmatch(output)
+	if len(matches) < 2 {
+		return "", "", false
+	}
+	appPath = matches[1]
+	entry, _, found := strings.Cut(strings.TrimPrefix(appPath, "/nix/store/"), "/")
+	if !found || entry == "" {
+		return "", "", false
+	}
+	return "/nix/store/" + entry, appPath, true
 }
 
 func (p *NixPlugin) parseDryRunFreedSpace(output string) int64 {
