@@ -358,7 +358,7 @@ func (p *NixPlugin) collectGarbage(ctx context.Context, level CleanupLevel, args
 			logger.Warn("Nix GC wedged by TCC-protected app bundle (com.apple.macl); GC stays blocked until the store path is removed from a TCC-privileged terminal",
 				"store_path", storePath,
 				"app_path", appPath,
-				"remediation", "sudo chmod -R u+w "+storePath+" && sudo rm -rf "+storePath)
+				"remediation", "sudo rm -rf "+storePath)
 			return result
 		}
 		result.Error = err
