@@ -137,11 +137,16 @@ reclaim counts parsed from the GC output, and emits a WARN with `store_path`,
 `app_path`, and a `remediation` field instead of failing the cleanup result.
 The WARN log is the operator contract; GC remains blocked until remediation.
 
-Remediation, from a TCC-privileged terminal (one granted App Management):
+Remediation, from a TCC-privileged terminal:
 
 ```sh
-sudo chmod -R u+w /nix/store/<hash>-<name> && sudo rm -rf /nix/store/<hash>-<name>
+sudo rm -rf /nix/store/<hash>-<name>
 ```
+
+Do not prepend `chmod -R u+w`: macl denies chmod on every stamped entry even
+under sudo (verified live 2026-07-07), and chaining with `&&` aborts before
+the `rm` ever runs. Plain `rm -rf` succeeds because unlink only needs write on
+the parent directory, which macl does not protect.
 
 This recurs per GUI-app update: each upgrade leaves the old macl-stamped store
 path behind for a future GC to trip over.
