@@ -38,6 +38,28 @@ func TestNixPluginParseDryRunFreedSpace(t *testing.T) {
 	}
 }
 
+func TestNixPluginParseOptimizedSpace(t *testing.T) {
+	p := NewNixPlugin()
+
+	tests := []struct {
+		name     string
+		output   string
+		expected int64
+	}{
+		{"nix 2.33 output", "512.0 MiB freed by hard-linking 12345 files", 536870912},
+		{"legacy saved output", "saved 1.25 GiB", 1342177280},
+		{"empty", "", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.parseOptimizedSpace(tt.output); got != tt.expected {
+				t.Fatalf("parseOptimizedSpace(%q) = %d, want %d", tt.output, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestNixPluginParseDryRunStorePaths(t *testing.T) {
 	p := NewNixPlugin()
 
