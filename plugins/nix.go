@@ -1465,6 +1465,7 @@ func (p *NixPlugin) parseDeletedPaths(output string) int {
 
 func (p *NixPlugin) parseOptimizedSpace(output string) int64 {
 	return parseNixByteQuantity(output, []string{
+		`([\d.]+)\s*(B|KiB|MiB|GiB|TiB)\s+freed by hard-linking`,
 		`saved\s*([\d.]+)\s*(B|KiB|MiB|GiB|TiB)`,
 	})
 }
