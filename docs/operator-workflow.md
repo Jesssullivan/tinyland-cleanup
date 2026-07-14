@@ -245,6 +245,30 @@ shell symlink forests, are measured as symlink entries rather than as the
 `/nix/store` paths they point at, so dry-run byte counts do not attribute store
 closures to temporary proof directories.
 
+Agent-harness scratch containers (matched by
+`dev_artifacts.harness_scratch_dir_patterns`, default `claude-*`, e.g.
+`/private/tmp/claude-501`) get session-level treatment instead of the generic
+one-root walk (TIN-2690): each `<container>/<project>/<session>` directory is
+evaluated individually. Liveness signals, checked in order of cost: process
+attribution at the session path (both argv references and an all-process lsof
+cwd sweep, so deep background jobs count), a shallow newest-mtime probe
+(depth 3, so task-output writes keep a live session fresh), and the harness
+transcript mtime (`~/.claude/projects/<project>/<session>.jsonl`, resolved
+against the container OWNER's home so root-run daemons probe the right user).
+Stale sessions are deleted at aggressive/critical levels, gated by
+`dev_artifacts.harness_scratch_stale_after` (default 36h — deliberately its
+own knob, not `temp_artifact_stale_after`, because idle-but-open multi-day
+sessions are normal), with a cheap liveness re-check immediately before each
+deletion. Size accounting is best-effort: a scan-budget hit mid-measure keeps
+the partial figure and still deletes, so a pathological session cannot strand
+the lane. Containers and per-project directories are always retained.
+`protect_paths` entries pointing at OR INSIDE a session protect that whole
+session. Only add dir patterns whose layout really is
+`<container>/<project>/<session>`; the transcript probe is Claude-specific.
+Generic temp roots are now sized only when already stale: fresh or protected
+roots are skipped without the recursive walk, so a young multi-gigabyte tree
+can no longer exhaust the shared scan budget before deletable families run.
+
 For Docker, the plan reports Docker daemon disk-usage rows from `docker system
 df`, including images, stopped containers, local volumes, and build cache when
 available. Docker cleanup is deferred when active Docker build, buildx, compose,

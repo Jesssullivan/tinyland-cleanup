@@ -225,6 +225,22 @@ dev_artifacts:
   temp_scan_max_roots: 128
   temp_artifact_min_mb: 256
   temp_artifact_stale_after: 6h
+  # Agent-harness scratch containers (e.g. /private/tmp/claude-<uid>) hold
+  # per-project directories of per-session scratch. Sessions are evaluated
+  # INDIVIDUALLY (session-dir staleness via a shallow newest-mtime probe, live
+  # process attribution at session level) so one huge or active container can
+  # no longer exhaust the scan budget or shield expired siblings (TIN-2690).
+  # Stale sessions are deleted at aggressive/critical levels.
+  harness_scratch: true
+  harness_scratch_dir_patterns:
+    - "claude-*"
+  # Deliberately its own knob (NOT temp_artifact_stale_after, which gates
+  # review-only reporting): idle-but-open multi-day harness sessions are
+  # normal on this fleet, and liveness probes (transcript mtime, argv/cwd
+  # process attribution) only see actively-working sessions. Only add
+  # dir patterns whose layout really is <container>/<project>/<session> —
+  # the transcript liveness probe is Claude-specific today.
+  harness_scratch_stale_after: 36h
   # Stale top-level Nix shell/develop/build scratch roots are rebuildable but
   # can accumulate quickly under /private/tmp. These are only deleted under
   # aggressive/critical pressure, never while referenced by active processes.

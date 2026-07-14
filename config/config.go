@@ -323,6 +323,19 @@ type DevArtifactsConfig struct {
 	TempArtifactMinMB int `yaml:"temp_artifact_min_mb"`
 	// TempArtifactStaleAfter is the age after which temp artifacts become review candidates
 	TempArtifactStaleAfter string `yaml:"temp_artifact_stale_after"`
+	// HarnessScratch enables session-level cleanup of agent-harness scratch
+	// containers (e.g. /private/tmp/claude-<uid>/<project>/<session-uuid>)
+	// found under temp_scan_paths. Sessions are evaluated individually so a
+	// huge container is never sized or protected as one opaque root.
+	HarnessScratch bool `yaml:"harness_scratch"`
+	// HarnessScratchDirPatterns are glob patterns matching top-level temp
+	// entries treated as harness scratch containers.
+	HarnessScratchDirPatterns []string `yaml:"harness_scratch_dir_patterns"`
+	// HarnessScratchStaleAfter is the age after which an idle scratch session
+	// becomes a deletion candidate. Deliberately its own knob (NOT
+	// temp_artifact_stale_after, which gates review-only reporting) and
+	// conservative by default: idle-but-open multi-day sessions are normal.
+	HarnessScratchStaleAfter string `yaml:"harness_scratch_stale_after"`
 	// NixTempRoots enables deletion of stale top-level nix-shell/nix-develop temp roots
 	NixTempRoots bool `yaml:"nix_temp_roots"`
 	// NixTempRootMinMB is the minimum physical size for stale Nix temp-root deletion candidates
@@ -554,15 +567,20 @@ func DefaultConfig() *Config {
 			MinFileSizeMB:  10,
 		},
 		DevArtifacts: DevArtifactsConfig{
-			ScanPaths:                defaultScanPaths,
-			ScanMaxDuration:          "30s",
-			ScanMaxEntries:           250000,
-			WorkspaceScanMaxRoots:    8,
-			TempArtifacts:            true,
-			TempScanPaths:            defaultTempScanPaths,
-			TempScanMaxRoots:         128,
-			TempArtifactMinMB:        256,
-			TempArtifactStaleAfter:   "6h",
+			ScanPaths:              defaultScanPaths,
+			ScanMaxDuration:        "30s",
+			ScanMaxEntries:         250000,
+			WorkspaceScanMaxRoots:  8,
+			TempArtifacts:          true,
+			TempScanPaths:          defaultTempScanPaths,
+			TempScanMaxRoots:       128,
+			TempArtifactMinMB:      256,
+			TempArtifactStaleAfter: "6h",
+			HarnessScratch:         true,
+			HarnessScratchDirPatterns: []string{
+				"claude-*",
+			},
+			HarnessScratchStaleAfter: "36h",
 			NixTempRoots:             true,
 			NixTempRootMinMB:         1,
 			NixTempRootStaleAfter:    "24h",
