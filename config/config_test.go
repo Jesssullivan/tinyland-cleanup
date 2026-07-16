@@ -332,6 +332,15 @@ func TestPackagedLinuxConfigParsesCurrentNixPolicy(t *testing.T) {
 	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
 		t.Errorf("expected dev_artifacts.temp_scan_max_roots=128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
 	}
+	if !cfg.DevArtifacts.HarnessScratch {
+		t.Error("expected dev_artifacts.harness_scratch=true")
+	}
+	if len(cfg.DevArtifacts.HarnessScratchDirPatterns) != 1 || cfg.DevArtifacts.HarnessScratchDirPatterns[0] != "claude-*" {
+		t.Errorf("expected dev_artifacts.harness_scratch_dir_patterns=[claude-*], got %#v", cfg.DevArtifacts.HarnessScratchDirPatterns)
+	}
+	if cfg.DevArtifacts.HarnessScratchStaleAfter != "36h" {
+		t.Errorf("expected dev_artifacts.harness_scratch_stale_after=36h, got %q", cfg.DevArtifacts.HarnessScratchStaleAfter)
+	}
 	if !cfg.DevArtifacts.NixTempRoots {
 		t.Error("expected dev_artifacts.nix_temp_roots=true")
 	}
@@ -718,6 +727,11 @@ dev_artifacts:
   temp_scan_max_roots: 3
   temp_artifact_min_mb: 128
   temp_artifact_stale_after: 2h
+  harness_scratch: false
+  harness_scratch_dir_patterns:
+    - "claude-*"
+    - "codex-*"
+  harness_scratch_stale_after: 12h
   node_modules: true
   python_venvs: true
   rust_targets: false
@@ -874,6 +888,15 @@ darwin_dev_caches:
 	}
 	if cfg.DevArtifacts.TempScanMaxRoots != 3 {
 		t.Errorf("DevArtifacts.TempScanMaxRoots should be 3 per config, got %d", cfg.DevArtifacts.TempScanMaxRoots)
+	}
+	if cfg.DevArtifacts.HarnessScratch {
+		t.Error("DevArtifacts.HarnessScratch should be false per config")
+	}
+	if len(cfg.DevArtifacts.HarnessScratchDirPatterns) != 2 || cfg.DevArtifacts.HarnessScratchDirPatterns[1] != "codex-*" {
+		t.Errorf("DevArtifacts.HarnessScratchDirPatterns should be overridden, got %#v", cfg.DevArtifacts.HarnessScratchDirPatterns)
+	}
+	if cfg.DevArtifacts.HarnessScratchStaleAfter != "12h" {
+		t.Errorf("DevArtifacts.HarnessScratchStaleAfter should be 12h per config, got %q", cfg.DevArtifacts.HarnessScratchStaleAfter)
 	}
 	if cfg.DevArtifacts.RustTargets {
 		t.Error("DevArtifacts.RustTargets should be false per config")

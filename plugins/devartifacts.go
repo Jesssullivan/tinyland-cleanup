@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -421,12 +422,18 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 	var targets []CleanupTarget
 	if daCfg.TempArtifacts {
 		activeTempRoots := activeTempArtifactRoots(ctx, daCfg.TempScanPaths, home)
+		activeScratchSessions := activeHarnessScratchSessions(ctx, daCfg.TempScanPaths, home, daCfg)
 		tempMinBytes := tempArtifactMinBytes(daCfg)
 		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
 		for _, scanPath := range daCfg.TempScanPaths {
 			expanded := expandHome(scanPath, home)
 			if !pathExistsAndIsDir(expanded) {
 				continue
+			}
+			// Known-heavy harness scratch first: it is the payload the scan
+			// budget must never starve (TIN-2690).
+			if daCfg.HarnessScratch {
+				p.planHarnessScratchSessions(scanCtx, expanded, home, parseNixPolicyDuration(daCfg.HarnessScratchStaleAfter, 36*time.Hour), level, daCfg, activeScratchSessions, &targets, scanBudget)
 			}
 			nixTempRootMinBytes := nixTempRootMinBytes(daCfg)
 			nixTempRootStaleAfter := parseNixPolicyDuration(daCfg.NixTempRootStaleAfter, 24*time.Hour)
@@ -542,6 +549,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	// deep workspace walks so a large ~/git tree cannot starve /private/tmp cleanup.
 	if daCfg.TempArtifacts {
 		activeTempRoots := activeTempArtifactRoots(ctx, daCfg.TempScanPaths, home)
+		activeScratchSessions := activeHarnessScratchSessions(ctx, daCfg.TempScanPaths, home, daCfg)
 		tempMinBytes := tempArtifactMinBytes(daCfg)
 		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
 		nixTempRootMinBytes := nixTempRootMinBytes(daCfg)
@@ -550,6 +558,19 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			expanded := expandHome(scanPath, home)
 			if !pathExistsAndIsDir(expanded) {
 				continue
+			}
+			// Known-heavy harness scratch first: it is the payload the scan
+			// budget must never starve (TIN-2690).
+			if daCfg.HarnessScratch && level >= LevelAggressive {
+				freed := p.cleanHarnessScratchSessions(scanCtx, expanded, home, parseNixPolicyDuration(daCfg.HarnessScratchStaleAfter, 36*time.Hour), daCfg, activeScratchSessions, logger, scanBudget)
+				result.BytesFreed += freed
+				if freed > 0 {
+					result.ItemsCleaned++
+				}
+			}
+			if scanBudget.exhausted() {
+				logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+				return result
 			}
 			if daCfg.NixTempRoots && level >= LevelAggressive {
 				freed := p.cleanNixTemporaryRoots(scanCtx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, daCfg.ProtectPaths, activeTempRoots, logger, scanBudget)
@@ -1129,10 +1150,22 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 		if err != nil {
 			continue
 		}
+		if isHarnessScratchContainer(entry.Name(), daCfg) {
+			// Harness scratch containers are handled per-session by the
+			// harness-scratch lane; sizing them as one opaque root is what
+			// exhausted the scan budget (TIN-2690).
+			continue
+		}
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
 		protected := p.isProtected(path, daCfg.ProtectPaths)
 		if activeReason != "" {
 			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, info.ModTime(), staleAfter, now, protected, activeReason))
+			continue
+		}
+		// Staleness gates the recursive size walk: fresh or protected roots
+		// are not actionable (the lane is review-only), so walking them only
+		// burns the shared scan budget before it reaches deletable families.
+		if protected || (staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter))) {
 			continue
 		}
 		size, err := getDirAllocatedBytesContext(ctx, path)
@@ -1145,6 +1178,369 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 		}
 		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, protected, ""))
 	}
+}
+
+// isHarnessScratchContainer reports whether a top-level temp entry is an
+// agent-harness scratch container (e.g. claude-501) whose children are
+// per-project directories holding per-session scratch directories.
+func isHarnessScratchContainer(name string, daCfg config.DevArtifactsConfig) bool {
+	if !daCfg.HarnessScratch {
+		return false
+	}
+	for _, pattern := range daCfg.HarnessScratchDirPatterns {
+		if ok, err := filepath.Match(pattern, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// newestShallowMtime returns the newest modification time found on dir itself
+// and entries up to `levels` directory levels below it. It is a bounded probe:
+// harness session directories funnel activity through shallow paths (tasks/,
+// scratchpad/), so a small depth catches live sessions without walking the
+// full tree.
+func newestShallowMtime(ctx context.Context, dir string, levels int, budget *devArtifactScanBudget) (time.Time, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		// Vanished mid-scan (live sessions churn constantly): treat as empty
+		// rather than aborting the whole lane for the cycle.
+		return time.Time{}, nil
+	}
+	newest := info.ModTime()
+	if levels <= 0 {
+		return newest, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return newest, nil
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if err := budget.checkPath(ctx, path); err != nil {
+			return newest, err
+		}
+		if entry.IsDir() {
+			childNewest, err := newestShallowMtime(ctx, path, levels-1, budget)
+			if err != nil {
+				return newest, err
+			}
+			if childNewest.After(newest) {
+				newest = childNewest
+			}
+			continue
+		}
+		if info, err := entry.Info(); err == nil && info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	return newest, nil
+}
+
+// harnessSessionTranscriptMtime returns the modification time of the harness
+// transcript backing a scratch session, when one exists. A live Claude Code
+// session appends to ~/.claude/projects/<project>/<session>.jsonl continuously
+// even when its scratch directory is idle, so the transcript is the strongest
+// cheap liveness signal (an idle-but-open session holds no process whose args
+// reference its scratch path, and its scratch mtimes go stale).
+func harnessSessionTranscriptMtime(home, project, session string) time.Time {
+	if home == "" {
+		return time.Time{}
+	}
+	transcript := filepath.Join(home, ".claude", "projects", project, session+".jsonl")
+	if info, err := os.Lstat(transcript); err == nil {
+		return info.ModTime()
+	}
+	return time.Time{}
+}
+
+// harnessSessionProtected extends protect_paths to cover entries that point
+// INSIDE a session: pinning any subtree of a session protects the whole
+// session, because the lane deletes at session granularity.
+func harnessSessionProtected(p *DevArtifactsPlugin, sessionPath string, protectPaths []string) bool {
+	if p.isProtected(sessionPath, protectPaths) {
+		return true
+	}
+	canonical := canonicalTempArtifactPath(sessionPath)
+	for _, protect := range protectPaths {
+		expanded := canonicalTempArtifactPath(protect)
+		if strings.HasPrefix(expanded, canonical+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// harnessOwnerHome resolves the home directory of the container's OWNER so a
+// root-run daemon probes the right user's transcript store instead of
+// /root/.claude (the container name encodes the uid: claude-501).
+func harnessOwnerHome(container, fallback string) string {
+	info, err := os.Stat(container)
+	if err != nil {
+		return fallback
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) == os.Getuid() {
+		// Same-user daemon: the caller's home is authoritative.
+		return fallback
+	}
+	if owner, err := user.LookupId(strconv.FormatUint(uint64(stat.Uid), 10)); err == nil && owner.HomeDir != "" {
+		return owner.HomeDir
+	}
+	return fallback
+}
+
+// forEachStaleHarnessScratchSession visits stale per-session scratch
+// directories (container/<project>/<session>) under recognized harness
+// containers of scanPath. Staleness keys on the session directory, never the
+// container: containers stay perpetually fresh while any session is active,
+// which previously hid every expired session from cleanup (TIN-2690).
+func (p *DevArtifactsPlugin) forEachStaleHarnessScratchSession(ctx context.Context, scanPath, home string, staleAfter time.Duration, daCfg config.DevArtifactsConfig, activeSessions map[string]string, callback func(session string, modTime time.Time, activeReason string, stale bool), budgets ...*devArtifactScanBudget) {
+	budget := optionalDevArtifactScanBudget(budgets)
+	entries, err := os.ReadDir(scanPath)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+		if !entry.IsDir() || !isHarnessScratchContainer(entry.Name(), daCfg) {
+			continue
+		}
+		container := filepath.Join(scanPath, entry.Name())
+		if err := budget.checkTempRoot(ctx, container); err != nil {
+			return
+		}
+		projects, err := os.ReadDir(container)
+		if err != nil {
+			continue
+		}
+		for _, project := range projects {
+			if ctx.Err() != nil {
+				return
+			}
+			if !project.IsDir() {
+				continue
+			}
+			projectPath := filepath.Join(container, project.Name())
+			sessions, err := os.ReadDir(projectPath)
+			if err != nil {
+				continue
+			}
+			for _, session := range sessions {
+				if ctx.Err() != nil {
+					return
+				}
+				if !session.IsDir() {
+					continue
+				}
+				sessionPath := filepath.Join(projectPath, session.Name())
+				if err := budget.checkPath(ctx, sessionPath); err != nil {
+					return
+				}
+				if harnessSessionProtected(p, sessionPath, daCfg.ProtectPaths) {
+					continue
+				}
+				if activeReason := activeSessions[canonicalTempArtifactPath(sessionPath)]; activeReason != "" {
+					// Live sessions need no staleness probe.
+					callback(sessionPath, now, activeReason, false)
+					continue
+				}
+				newest, err := newestShallowMtime(ctx, sessionPath, 3, budget)
+				if err != nil {
+					budget.markContextError(ctx, sessionPath)
+					return
+				}
+				if transcript := harnessSessionTranscriptMtime(harnessOwnerHome(container, home), project.Name(), session.Name()); transcript.After(newest) {
+					newest = transcript
+				}
+				stale := staleAfter > 0 && !newest.After(now.Add(-staleAfter))
+				callback(sessionPath, newest, "", stale)
+			}
+		}
+	}
+}
+
+func (p *DevArtifactsPlugin) planHarnessScratchSessions(ctx context.Context, scanPath, home string, staleAfter time.Duration, level CleanupLevel, daCfg config.DevArtifactsConfig, activeSessions map[string]string, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
+	budget := optionalDevArtifactScanBudget(budgets)
+	canDelete := level >= LevelAggressive
+	p.forEachStaleHarnessScratchSession(ctx, scanPath, home, staleAfter, daCfg, activeSessions, func(session string, modTime time.Time, activeReason string, stale bool) {
+		if !stale && activeReason == "" {
+			return
+		}
+		var size int64
+		if stale && activeReason == "" {
+			measured, err := getDirAllocatedBytesContext(ctx, session)
+			if err != nil {
+				// Keep the partial figure: the target must still surface so
+				// dry-runs never hide the lane payload behind a budget hit.
+				budget.markContextError(ctx, session)
+			}
+			size = measured
+		}
+		*targets = append(*targets, p.harnessScratchSessionTarget(session, size, staleAfter, activeReason, canDelete))
+	}, budgets...)
+}
+
+func (p *DevArtifactsPlugin) cleanHarnessScratchSessions(ctx context.Context, scanPath, home string, staleAfter time.Duration, daCfg config.DevArtifactsConfig, activeSessions map[string]string, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+	budget := optionalDevArtifactScanBudget(budgets)
+	var totalFreed int64
+	p.forEachStaleHarnessScratchSession(ctx, scanPath, home, staleAfter, daCfg, activeSessions,
+		func(session string, modTime time.Time, activeReason string, stale bool) {
+			if !stale || activeReason != "" {
+				return
+			}
+			// Size is accounting only. On a budget hit keep the partial figure
+			// and DELETE ANYWAY: skipping would strand the very payload this
+			// lane exists for and re-burn the budget every cycle (TIN-2690).
+			size, sizeErr := getDirAllocatedBytesContext(ctx, session)
+			if sizeErr != nil {
+				budget.markContextError(ctx, session)
+			}
+			// The size walk of a large session takes real time: re-check the
+			// cheap liveness signals immediately before deleting so a
+			// just-resumed session survives.
+			if harnessSessionRevived(session, home, staleAfter) {
+				logger.Info("skipping revived harness scratch session", "path", session)
+				return
+			}
+			if err := os.RemoveAll(session); err != nil {
+				logger.Warn("failed to delete stale harness scratch session", "path", session, "error", err)
+				return
+			}
+			totalFreed += size
+			logger.Info("deleted stale harness scratch session", "path", session, "freed_mb", size/(1024*1024))
+		}, budgets...)
+	// Emptied per-project directories are retained: pruning them races the
+	// harness's own MkdirAll(project/session) at session start.
+	return totalFreed
+}
+
+// harnessSessionRevived re-probes the cheap liveness signals (session dir
+// mtime + transcript mtime) right before deletion.
+func harnessSessionRevived(session, home string, staleAfter time.Duration) bool {
+	if staleAfter <= 0 {
+		return false
+	}
+	threshold := time.Now().Add(-staleAfter)
+	if info, err := os.Lstat(session); err == nil && info.ModTime().After(threshold) {
+		return true
+	}
+	projectPath := filepath.Dir(session)
+	container := filepath.Dir(projectPath)
+	transcript := harnessSessionTranscriptMtime(harnessOwnerHome(container, home), filepath.Base(projectPath), filepath.Base(session))
+	return transcript.After(threshold)
+}
+
+func (p *DevArtifactsPlugin) harnessScratchSessionTarget(path string, physicalBytes int64, staleAfter time.Duration, activeReason string, canDelete bool) CleanupTarget {
+	action := "delete"
+	reason := fmt.Sprintf("harness scratch session is older than %s", formatDevArtifactAge(staleAfter))
+	active := activeReason != ""
+	isProtected := false
+	switch {
+	case active:
+		action = "protect"
+		reason = "active process references this scratch session: " + activeReason
+		isProtected = true
+	case !canDelete:
+		action = "report"
+		reason = "harness scratch session deletion requires aggressive or critical cleanup level"
+		isProtected = true
+	}
+	target := CleanupTarget{
+		Type:      "harness-scratch-session",
+		Name:      filepath.Join(filepath.Base(filepath.Dir(path)), filepath.Base(path)),
+		Path:      path,
+		Bytes:     physicalBytes,
+		Active:    active,
+		Protected: isProtected,
+		Action:    action,
+		Reason:    reason,
+	}
+	annotateCleanupTargetPolicy(&target, CleanupTierDestructive, hostReclaimForAction(target.Action))
+	return target
+}
+
+// activeHarnessScratchSessions attributes live process paths to individual
+// session directories (container/<project>/<session>) instead of the whole
+// container, so one live session no longer shields every expired sibling.
+func activeHarnessScratchSessions(ctx context.Context, scanPaths []string, home string, daCfg config.DevArtifactsConfig) map[string]string {
+	if len(scanPaths) == 0 || !daCfg.HarnessScratch {
+		return nil
+	}
+	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	sessions := harnessScratchSessionsFromProcessOutput(string(output), scanPaths, home, daCfg)
+	// argv attribution misses processes whose WORKING DIRECTORY is inside a
+	// session (deep background jobs reference no scratch path in args). One
+	// bounded all-process lsof cwd sweep closes that gap.
+	if lsofPath, err := exec.LookPath("lsof"); err == nil {
+		lsofCtx, cancelLsof := context.WithTimeout(ctx, 10*time.Second)
+		defer cancelLsof()
+		if cwdOutput, err := exec.CommandContext(lsofCtx, lsofPath, "-a", "-d", "cwd", "-Fpn").Output(); err == nil {
+			for pid, cwd := range parseDevArtifactProcessCWDs(string(cwdOutput)) {
+				if session := harnessScratchSessionForPath(cwd, scanPaths, home, daCfg); session != "" {
+					if _, ok := sessions[session]; !ok {
+						if sessions == nil {
+							sessions = map[string]string{}
+						}
+						sessions[session] = "cwd of pid " + pid
+					}
+				}
+			}
+		}
+	}
+	return sessions
+}
+
+func harnessScratchSessionsFromProcessOutput(output string, scanPaths []string, home string, daCfg config.DevArtifactsConfig) map[string]string {
+	sessions := map[string]string{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		command := filepath.Base(fields[0])
+		if len(fields) > 1 {
+			command = filepath.Base(fields[1])
+		}
+		for _, rawPath := range tempArtifactPathPattern.FindAllString(line, -1) {
+			if session := harnessScratchSessionForPath(rawPath, scanPaths, home, daCfg); session != "" {
+				if _, ok := sessions[session]; !ok {
+					sessions[session] = command
+				}
+			}
+		}
+	}
+	return sessions
+}
+
+func harnessScratchSessionForPath(path string, scanPaths []string, home string, daCfg config.DevArtifactsConfig) string {
+	path = canonicalTempArtifactPath(path)
+	for _, scanPath := range scanPaths {
+		root := canonicalTempArtifactPath(expandHome(scanPath, home))
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		parts := strings.Split(rel, string(os.PathSeparator))
+		if len(parts) < 3 {
+			continue
+		}
+		if !isHarnessScratchContainer(parts[0], daCfg) {
+			continue
+		}
+		return filepath.Join(root, parts[0], parts[1], parts[2])
+	}
+	return ""
 }
 
 func (p *DevArtifactsPlugin) planNixTemporaryRoots(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, canDelete bool, daCfg config.DevArtifactsConfig, activeRoots map[string]string, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
