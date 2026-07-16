@@ -258,10 +258,16 @@ against the container OWNER's home so root-run daemons probe the right user).
 Stale sessions are deleted at aggressive/critical levels, gated by
 `dev_artifacts.harness_scratch_stale_after` (default 36h — deliberately its
 own knob, not `temp_artifact_stale_after`, because idle-but-open multi-day
-sessions are normal), with a cheap liveness re-check immediately before each
-deletion. Size accounting is best-effort: a scan-budget hit mid-measure keeps
-the partial figure and still deletes, so a pathological session cannot strand
-the lane. Containers and per-project directories are always retained.
+sessions are normal). The same full liveness probe runs during discovery and
+again immediately before each deletion. A `ps`, `lsof`, filesystem, owner,
+transcript, or path-canonicalization error is incomplete evidence and protects
+the session. Deletion also requires complete recursive sizing and a complete
+same-mount pre-delete walk; both charge the shared entry budget. Cancellation,
+scan-budget exhaustion, sizing errors, and nested filesystem device or mount
+boundaries veto mutation. The guarded remover rechecks mount identity while
+deleting, binds the root to its evaluated device/inode identity, and charges
+the shared time/entry budget during removal. Containers and
+per-project directories are always retained.
 `protect_paths` entries pointing at OR INSIDE a session protect that whole
 session. Only add dir patterns whose layout really is
 `<container>/<project>/<session>`; the transcript probe is Claude-specific.

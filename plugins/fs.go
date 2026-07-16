@@ -4,11 +4,24 @@ package plugins
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"time"
 )
+
+var errFilesystemBoundary = errors.New("filesystem mount boundary encountered")
+var errFilesystemIdentityChanged = errors.New("filesystem identity changed")
+
+type pathIdentity struct {
+	device  uint64
+	inode   uint64
+	mountID string
+}
+
+type pathIdentityFunc func(path string, info os.FileInfo) (pathIdentity, error)
 
 // deviceID returns the device ID for a given path.
 // Used to detect mount point boundaries during traversal.
@@ -196,6 +209,222 @@ func getDirAllocatedBytesContext(ctx context.Context, path string) (int64, error
 		return size, err
 	}
 	return size, ctx.Err()
+}
+
+// getDirAllocatedBytesSameDeviceContext measures a directory only when every
+// visited entry is on the root directory's device. charge is called once for
+// every visited entry so callers can enforce their own traversal budget.
+func getDirAllocatedBytesSameDeviceContext(ctx context.Context, path string, charge func(string) error) (int64, pathIdentity, error) {
+	return getDirAllocatedBytesSameDeviceContextWithIdentity(ctx, path, charge, fileInfoIdentity)
+}
+
+func getDirAllocatedBytesSameDeviceContextWithIdentity(ctx context.Context, path string, charge func(string) error, identityFor pathIdentityFunc) (int64, pathIdentity, error) {
+	var size int64
+	rootIdentity, err := walkDirSameDeviceContext(ctx, path, charge, identityFor, func(_ string, info os.FileInfo) error {
+		if info.IsDir() {
+			return nil
+		}
+		allocated, err := allocatedBytesFromFileInfo(info)
+		if err != nil {
+			return err
+		}
+		size += allocated
+		return nil
+	})
+	return size, rootIdentity, err
+}
+
+func validateDirSameDeviceContext(ctx context.Context, path string, charge func(string) error) (pathIdentity, error) {
+	return walkDirSameDeviceContext(ctx, path, charge, fileInfoIdentity, nil)
+}
+
+func walkDirSameDeviceContext(ctx context.Context, path string, charge func(string) error, identityFor pathIdentityFunc, visit func(string, os.FileInfo) error) (pathIdentity, error) {
+	if identityFor == nil {
+		return pathIdentity{}, errors.New("filesystem identity probe is unavailable")
+	}
+
+	var rootIdentity pathIdentity
+	rootSeen := false
+	err := filepath.Walk(path, func(current string, info os.FileInfo, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if charge != nil {
+			if err := charge(current); err != nil {
+				return err
+			}
+		}
+
+		identity, err := identityFor(current, info)
+		if err != nil {
+			return fmt.Errorf("probe filesystem identity for %s: %w", current, err)
+		}
+		if !rootSeen {
+			if !info.IsDir() {
+				return fmt.Errorf("walk root %s is not a directory", current)
+			}
+			rootIdentity = identity
+			rootSeen = true
+		} else if identity.mountID != rootIdentity.mountID {
+			return fmt.Errorf("%w at %s", errFilesystemBoundary, current)
+		}
+
+		if visit != nil {
+			if err := visit(current, info); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return rootIdentity, err
+	}
+	if err := ctx.Err(); err != nil {
+		return rootIdentity, err
+	}
+	if !rootSeen {
+		return pathIdentity{}, fmt.Errorf("walk root %s was not visited", path)
+	}
+	return rootIdentity, nil
+}
+
+func fileInfoIdentity(path string, info os.FileInfo) (pathIdentity, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return pathIdentity{}, errors.New("filesystem metadata does not expose device and inode IDs")
+	}
+	mountID, err := platformMountID(path)
+	if err != nil {
+		return pathIdentity{}, err
+	}
+	if mountID == "" {
+		return pathIdentity{}, errors.New("filesystem metadata does not expose a mount identity")
+	}
+	return pathIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino), mountID: mountID}, nil
+}
+
+func allocatedBytesFromFileInfo(info os.FileInfo) (int64, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, errors.New("filesystem metadata does not expose allocated blocks")
+	}
+	if stat.Blocks <= 0 {
+		return info.Size(), nil
+	}
+	return stat.Blocks * 512, nil
+}
+
+// removeAllSameDevice removes path without following symlinks or descending
+// into an entry whose device differs from the validated root device.
+func removeAllSameDevice(ctx context.Context, path string, rootIdentity pathIdentity, charge func(string) error) error {
+	return removeAllSameDeviceWithIdentity(ctx, path, rootIdentity, charge, fileInfoIdentity)
+}
+
+func removeAllSameDeviceWithIdentity(ctx context.Context, path string, rootIdentity pathIdentity, charge func(string) error, identityFor pathIdentityFunc) error {
+	if identityFor == nil {
+		return errors.New("filesystem identity probe is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if charge != nil {
+		if err := charge(path); err != nil {
+			return err
+		}
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	identity, err := identityFor(path, info)
+	if err != nil {
+		return fmt.Errorf("probe filesystem identity for %s: %w", path, err)
+	}
+	if identity.mountID != rootIdentity.mountID {
+		return fmt.Errorf("%w at %s", errFilesystemBoundary, path)
+	}
+	if path == filepath.Clean(path) && (identity.device != rootIdentity.device || identity.inode != rootIdentity.inode || !info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+		return fmt.Errorf("%w at %s", errFilesystemIdentityChanged, path)
+	}
+	if !info.IsDir() {
+		return os.Remove(path)
+	}
+
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	type childEntry struct {
+		path string
+		info os.FileInfo
+	}
+	children := make([]childEntry, 0, len(entries))
+	for _, entry := range entries {
+		childPath := filepath.Join(path, entry.Name())
+		childInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		childIdentity, err := identityFor(childPath, childInfo)
+		if err != nil {
+			return fmt.Errorf("probe filesystem identity for %s: %w", childPath, err)
+		}
+		if childIdentity.mountID != rootIdentity.mountID {
+			return fmt.Errorf("%w at %s", errFilesystemBoundary, childPath)
+		}
+		children = append(children, childEntry{path: childPath, info: childInfo})
+	}
+
+	for _, child := range children {
+		if child.info.IsDir() {
+			if err := removeAllSameDeviceChild(ctx, child.path, rootIdentity, charge, identityFor); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Remove(child.path); err != nil {
+			return err
+		}
+	}
+	return os.Remove(path)
+}
+
+func removeAllSameDeviceChild(ctx context.Context, path string, rootIdentity pathIdentity, charge func(string) error, identityFor pathIdentityFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if charge != nil {
+		if err := charge(path); err != nil {
+			return err
+		}
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	identity, err := identityFor(path, info)
+	if err != nil {
+		return err
+	}
+	if identity.mountID != rootIdentity.mountID {
+		return fmt.Errorf("%w at %s", errFilesystemBoundary, path)
+	}
+	if !info.IsDir() {
+		return os.Remove(path)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := removeAllSameDeviceChild(ctx, filepath.Join(path, entry.Name()), rootIdentity, charge, identityFor); err != nil {
+			return err
+		}
+	}
+	return os.Remove(path)
 }
 
 // safeBytesDiff returns the difference between two sizes, floored at 0.
