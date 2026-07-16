@@ -1247,22 +1247,33 @@ func nixGenerationTargetsWithMax(generations []nixGeneration, now time.Time, min
 		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
 	})
 
-	protectedByMinimum := map[int]bool{}
-	for idx, generation := range sorted {
-		if idx >= minKeep {
-			break
+	protectNewestIncludingCurrent := func(limit int) map[int]bool {
+		protected := map[int]bool{}
+		protectedCount := 0
+		for _, generation := range sorted {
+			if generation.Current && !protected[generation.Number] {
+				protected[generation.Number] = true
+				protectedCount++
+			}
 		}
-		protectedByMinimum[generation.Number] = true
+		for _, generation := range sorted {
+			if protectedCount >= limit {
+				break
+			}
+			if protected[generation.Number] {
+				continue
+			}
+			protected[generation.Number] = true
+			protectedCount++
+		}
+		return protected
 	}
+
+	protectedByMinimum := protectNewestIncludingCurrent(minKeep)
 
 	protectedByMaximum := map[int]bool{}
 	if maxKeep > 0 {
-		for idx, generation := range sorted {
-			if idx >= maxKeep {
-				break
-			}
-			protectedByMaximum[generation.Number] = true
-		}
+		protectedByMaximum = protectNewestIncludingCurrent(maxKeep)
 	}
 
 	ageEnabled := olderThan > 0

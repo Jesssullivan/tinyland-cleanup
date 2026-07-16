@@ -848,6 +848,30 @@ func TestNixHomeManagerGenerationTargetsRequireOptIn(t *testing.T) {
 	}
 }
 
+func TestNixGenerationTargetsCountRolledBackCurrentInRetentionLimits(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	generations := []nixGeneration{
+		{Number: 41, CreatedAt: now.Add(-72 * time.Hour), Scope: "home-manager", Current: true},
+		{Number: 42, CreatedAt: now.Add(-48 * time.Hour), Scope: "home-manager"},
+		{Number: 43, CreatedAt: now.Add(-24 * time.Hour), Scope: "home-manager"},
+	}
+
+	targets := nixGenerationTargetsWithMax(generations, now, 1, 0, 1)
+	actions := map[string]CleanupTarget{}
+	for _, target := range targets {
+		actions[target.Version] = target
+	}
+
+	if actions["41"].Action != "keep_generation" || !actions["41"].Protected {
+		t.Fatalf("rolled-back current generation must remain protected: %+v", actions["41"])
+	}
+	for _, generation := range []string{"42", "43"} {
+		if actions[generation].Action != "delete_generation" || actions[generation].Protected {
+			t.Fatalf("non-current generation %s must exceed the one-generation cap: %+v", generation, actions[generation])
+		}
+	}
+}
+
 func TestNixPluginDeleteHomeManagerGenerationsByPolicyUsesRemoveGenerations(t *testing.T) {
 	tempHome := t.TempDir()
 	profileDir := filepath.Join(tempHome, ".local", "state", "nix", "profiles")
@@ -968,15 +992,17 @@ func TestNixGenerationTargetsCountCapPreservesCurrentAndMinimum(t *testing.T) {
 		actions[target.Version] = target
 	}
 
-	for _, generation := range []string{"1", "3", "4", "5"} {
+	for _, generation := range []string{"1", "4", "5"} {
 		target := actions[generation]
 		if target.Action != "keep_generation" || !target.Protected {
 			t.Fatalf("expected generation %s to stay protected: %+v", generation, target)
 		}
 	}
-	target := actions["2"]
-	if target.Action != "delete_generation" || target.Protected {
-		t.Fatalf("expected only generation 2 to be over the normalized cap: %+v", target)
+	for _, generation := range []string{"2", "3"} {
+		target := actions[generation]
+		if target.Action != "delete_generation" || target.Protected {
+			t.Fatalf("expected generation %s to be over the normalized cap: %+v", generation, target)
+		}
 	}
 }
 
