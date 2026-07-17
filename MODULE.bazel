@@ -26,6 +26,7 @@ use_repo(
     "com_github_shirou_gopsutil_v3",
     "in_gopkg_yaml_v3",
     "net_pgregory_rapid",
+    "org_golang_x_sys",
 )
 
 # Documentation site: hermetic MkDocs Material build (pure-Bazel flow inspired by

@@ -39,14 +39,14 @@ filegroup(
     name = "bazel_control_plane_files",
     srcs = [
         ".bazelrc",
+        ".bazelrc.flywheel",
         ".github/actionlint.yaml",
         ".github/workflows/ci.yml",
         ".github/workflows/docs-deploy.yml",
         ".github/workflows/gloriousflywheel-proof.yml",
-        ".bazelrc.flywheel",
+        "Justfile",
         "config/bazel-rbe-target-eligibility.json",
         "flake.nix",
-        "Justfile",
         "justfile.flywheel",
         "scripts/bazel-cache-backed.sh",
         "scripts/bazel-rbe-proof.sh",
@@ -233,17 +233,25 @@ go_library(
             "plugins/apfs_darwin.go",
             "plugins/darwin.go",
             "plugins/lima.go",
+            "plugins/nix_process_argv_darwin.go",
+        ],
+        "@platforms//os:linux": [
+            "plugins/github_runner.go",
+            "plugins/nix_process_argv_linux.go",
+            "plugins/yum.go",
         ],
         "//conditions:default": [
             "plugins/github_runner.go",
+            "plugins/nix_process_argv_other.go",
             "plugins/yum.go",
         ],
     }),
     importpath = "github.com/Jesssullivan/tinyland-cleanup/plugins",
     visibility = ["//visibility:public"],
-    deps = [
-        ":config",
-    ],
+    deps = [":config"] + select({
+        "@platforms//os:macos": ["@org_golang_x_sys//unix"],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
@@ -261,6 +269,11 @@ go_test(
         "@platforms//os:macos": [
             "plugins/apfs_darwin_test.go",
             "plugins/darwin_dev_cache_test.go",
+            "plugins/nix_process_argv_darwin_test.go",
+        ],
+        "@platforms//os:linux": [
+            "plugins/github_runner_linux_test.go",
+            "plugins/nix_process_argv_linux_test.go",
         ],
         "//conditions:default": ["plugins/github_runner_linux_test.go"],
     }),
