@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -721,12 +722,16 @@ func (p *NixPlugin) activeNixProcesses(ctx context.Context) ([]string, error) {
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	cmd := exec.CommandContext(psCtx, "ps", "-axo", "pid=,ppid=,uid=,comm=")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
-	return nixBusyProcessReasons(string(output)), nil
+	snapshots, err := nixProcessSnapshots(psCtx, string(output), nixProcessArgv)
+	if err != nil {
+		return nil, err
+	}
+	return nixBusyProcessReasons(snapshots)
 }
 
 func nixReviewOnlyGenerationTargets(targets []CleanupTarget, action string, deleteReason string, tier string) []CleanupTarget {
@@ -1325,7 +1330,19 @@ func nixGenerationTargetsWithMax(generations []nixGeneration, now time.Time, min
 	return targets
 }
 
-func nixBusyProcessReasons(output string) []string {
+type nixProcessSnapshot struct {
+	PID        int
+	PPID       int
+	UID        uint32
+	Comm       string
+	ParentComm string
+	Argv       []string
+	ArgvErr    error
+}
+
+type nixProcessArgvReader func(int) ([]string, error)
+
+func nixBusyProcessReasons(processes []nixProcessSnapshot) ([]string, error) {
 	seen := map[string]bool{}
 	var reasons []string
 
@@ -1336,45 +1353,309 @@ func nixBusyProcessReasons(output string) []string {
 		}
 	}
 
-	nixCommandPattern := regexp.MustCompile(`\bnix\s+(build|develop|shell|flake|profile|store|copy|run|log)\b`)
-	nixStoreGCPattern := regexp.MustCompile(`\bnix-store\s+.*\s--gc\b|\bnix-store\s+--gc\b`)
-	nixStoreGCShortPattern := regexp.MustCompile(`\bnix\s+store\s+gc\b`)
-
-	for _, line := range strings.Split(output, "\n") {
-		normalized := strings.ToLower(strings.Join(strings.Fields(line), " "))
-		if normalized == "" {
-			continue
+	for _, process := range processes {
+		if process.ArgvErr != nil {
+			command := nixBusyProcessCommandName(process.Comm)
+			switch {
+			case command == "nix-daemon":
+				if reason, busy := nixDaemonProcessReason(process, nil); busy {
+					add(reason)
+				}
+				continue
+			case command != "":
+				add(command)
+				continue
+			default:
+				return nil, fmt.Errorf("inspect candidate pid %d (%s): %w", process.PID, process.Comm, process.ArgvErr)
+			}
 		}
 
-		switch {
-		case strings.Contains(normalized, "home-manager switch"):
-			add("home-manager switch")
-		case strings.Contains(normalized, "darwin-rebuild"):
-			add("darwin-rebuild")
-		case strings.Contains(normalized, "nixos-rebuild"):
-			add("nixos-rebuild")
-		case strings.Contains(normalized, "nix-collect-garbage"):
-			add("nix-collect-garbage")
-		case nixStoreGCShortPattern.MatchString(normalized):
-			add("nix store gc")
-		case nixStoreGCPattern.MatchString(normalized):
-			add("nix-store --gc")
-		case strings.Contains(normalized, "nix-store") && strings.ContainsAny(normalized, "-"):
-			add("nix-store")
-		case nixCommandPattern.MatchString(normalized):
-			add("nix " + nixCommandPattern.FindStringSubmatch(normalized)[1])
-		case strings.Contains(normalized, "nix-daemon") &&
-			(strings.Contains(normalized, "--stdio") ||
-				strings.Contains(normalized, "--serve") ||
-				strings.Contains(normalized, "realise") ||
-				strings.Contains(normalized, "realize") ||
-				strings.Contains(normalized, "substitute")):
-			add("nix-daemon worker")
+		command := nixBusyProcessCommandName(process.Comm)
+		unknownNixCandidate := nixProcessNixPrefixedName(process.Comm)
+		interpreter := nixProcessInterpreterName(process.Comm)
+		if len(process.Argv) > 0 {
+			if argvCommand := nixBusyProcessCommandName(process.Argv[0]); argvCommand != "" {
+				command = argvCommand
+				interpreter = ""
+			} else if argvInterpreter := nixProcessInterpreterName(process.Argv[0]); argvInterpreter != "" {
+				interpreter = argvInterpreter
+			}
+		}
+
+		args := process.Argv
+		if len(args) > 0 {
+			args = args[1:]
+		}
+
+		if command == "" && unknownNixCandidate {
+			add("nix-prefixed process")
+			continue
+		}
+		if command == "" && interpreter != "" {
+			var ok bool
+			command, args, ok = nixInterpreterScriptProcess(interpreter, args)
+			if !ok {
+				continue
+			}
+		}
+		if command == "" {
+			continue
+		}
+		args = nixNormalizedProcessArgs(args)
+		if reason, busy := nixBusyProcessReason(process, command, args); busy {
+			add(reason)
 		}
 	}
 
 	sort.Strings(reasons)
-	return reasons
+	return reasons, nil
+}
+
+func nixBusyProcessCommandName(raw string) string {
+	name := strings.ToLower(filepath.Base(strings.Trim(raw, `"'`)))
+	switch name {
+	case "nix", "nix-store", "nix-build", "nix-shell", "nix-instantiate", "nix-collect-garbage", "nix-env", "nix-prefetch-url", "nix-copy-closure", "nix-channel", "home-manager", "darwin-rebuild", "nixos-rebuild", "nix-daemon":
+		return name
+	default:
+		return ""
+	}
+}
+
+func nixProcessCandidateName(raw string) bool {
+	if nixBusyProcessCommandName(raw) != "" || nixProcessInterpreterName(raw) != "" {
+		return true
+	}
+
+	// Linux comm is limited to 15 bytes. Accept every Nix-prefixed candidate,
+	// then validate its exact identity from boundary-preserving argv[0].
+	return nixProcessNixPrefixedName(raw)
+}
+
+func nixProcessNixPrefixedName(raw string) bool {
+	name := strings.ToLower(filepath.Base(strings.TrimSpace(raw)))
+	return strings.HasPrefix(name, "nix")
+}
+
+func nixProcessSnapshots(ctx context.Context, output string, readArgv nixProcessArgvReader) ([]nixProcessSnapshot, error) {
+	type processRow struct {
+		pid  int
+		ppid int
+		uid  uint32
+		comm string
+	}
+
+	var rows []processRow
+	parentNames := map[int]string{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			return nil, fmt.Errorf("parse process row %q", line)
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return nil, fmt.Errorf("parse process id from %q: %w", line, err)
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("parse parent process id from %q: %w", line, err)
+		}
+		uid, err := strconv.ParseUint(fields[2], 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("parse process uid from %q: %w", line, err)
+		}
+		comm := strings.Join(fields[3:], " ")
+		rows = append(rows, processRow{pid: pid, ppid: ppid, uid: uint32(uid), comm: comm})
+		parentNames[pid] = comm
+	}
+
+	var snapshots []nixProcessSnapshot
+	for _, row := range rows {
+		if !nixProcessCandidateName(row.comm) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		argv, err := readArgv(row.pid)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		snapshots = append(snapshots, nixProcessSnapshot{
+			PID:        row.pid,
+			PPID:       row.ppid,
+			UID:        row.uid,
+			Comm:       row.comm,
+			ParentComm: parentNames[row.ppid],
+			Argv:       argv,
+			ArgvErr:    err,
+		})
+	}
+	return snapshots, nil
+}
+
+func nixProcessInterpreterName(raw string) string {
+	name := strings.TrimPrefix(strings.ToLower(filepath.Base(raw)), "-")
+	switch name {
+	case "sh", "bash", "dash", "zsh", "ksh", "perl", "python", "python2", "python3":
+		return name
+	default:
+		return ""
+	}
+}
+
+func nixInterpreterScriptProcess(interpreter string, args []string) (string, []string, bool) {
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		if arg == "--" {
+			idx++
+			if idx >= len(args) {
+				return "", nil, false
+			}
+			return nixInterpreterScriptAt(args, idx)
+		}
+		if arg == "-" || nixInterpreterCommandPayloadOption(interpreter, arg) {
+			return "", nil, false
+		}
+		if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "+") {
+			if nixInterpreterOptionTakesValue(interpreter, arg) {
+				idx++
+			}
+			continue
+		}
+
+		return nixInterpreterScriptAt(args, idx)
+	}
+	return "", nil, false
+}
+
+func nixInterpreterScriptAt(args []string, idx int) (string, []string, bool) {
+	command := nixBusyProcessCommandName(args[idx])
+	return command, nixNormalizedProcessArgs(args[idx+1:]), command != ""
+}
+
+func nixInterpreterCommandPayloadOption(interpreter, raw string) bool {
+	option := strings.ToLower(raw)
+	switch interpreter {
+	case "sh", "bash", "dash", "zsh", "ksh":
+		return option == "--command" ||
+			(strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "--") && strings.Contains(option[1:], "c")) ||
+			(strings.HasPrefix(option, "-") && !strings.HasPrefix(option, "--") && strings.Contains(option[1:], "s"))
+	case "python", "python2", "python3":
+		return nixPythonCommandPayloadOption(raw)
+	case "perl":
+		return strings.HasPrefix(raw, "-") && !strings.HasPrefix(raw, "--") && strings.ContainsAny(raw[1:], "eE")
+	default:
+		return false
+	}
+}
+
+func nixInterpreterOptionTakesValue(interpreter, raw string) bool {
+	option := strings.ToLower(raw)
+	switch interpreter {
+	case "sh", "bash", "dash", "zsh", "ksh":
+		switch raw {
+		case "-o", "+o", "-O", "+O":
+			return true
+		}
+		return option == "--rcfile" || option == "--init-file" || option == "--startup-file"
+	case "python", "python2", "python3":
+		return nixPythonOptionTakesValue(raw) || option == "--check-hash-based-pycs"
+	case "perl":
+		return raw == "-I" || raw == "-M" || raw == "-m"
+	default:
+		return false
+	}
+}
+
+func nixPythonCommandPayloadOption(raw string) bool {
+	if len(raw) < 2 || raw[0] != '-' || strings.HasPrefix(raw, "--") {
+		return false
+	}
+	for idx := 1; idx < len(raw); idx++ {
+		switch raw[idx] {
+		case 'c', 'm':
+			return true
+		case 'W', 'X':
+			// The rest of this token is the value for -W or -X, not more
+			// interpreter options.
+			return false
+		}
+	}
+	return false
+}
+
+func nixPythonOptionTakesValue(raw string) bool {
+	if len(raw) < 2 || raw[0] != '-' || strings.HasPrefix(raw, "--") {
+		return false
+	}
+	for idx := 1; idx < len(raw); idx++ {
+		switch raw[idx] {
+		case 'c', 'm':
+			return false
+		case 'W', 'X':
+			return idx == len(raw)-1
+		}
+	}
+	return false
+}
+
+func nixNormalizedProcessArgs(args []string) []string {
+	normalized := make([]string, len(args))
+	for idx, arg := range args {
+		normalized[idx] = strings.ToLower(arg)
+	}
+	return normalized
+}
+
+func nixBusyProcessReason(process nixProcessSnapshot, command string, args []string) (string, bool) {
+	switch command {
+	case "nix-daemon":
+		return nixDaemonProcessReason(process, args)
+	case "nix":
+		if len(args) == 1 && args[0] == "daemon" {
+			return "", false
+		}
+		if len(args) > 1 && args[0] == "daemon" && nixDaemonWorker(args[1:]) {
+			return "nix-daemon worker", true
+		}
+		return "nix", true
+	default:
+		return command, true
+	}
+}
+
+func nixDaemonProcessReason(process nixProcessSnapshot, args []string) (string, bool) {
+	if nixDaemonWorker(args) || nixDaemonProcessName(process.ParentComm) == "nix-daemon" {
+		return "nix-daemon worker", true
+	}
+	if process.UID != 0 {
+		return "nix-daemon state unknown", true
+	}
+	if process.PPID == 1 {
+		return "", false
+	}
+	parent := nixDaemonProcessName(process.ParentComm)
+	if parent == "determinate-nix" || parent == "determinate-nixd" {
+		return "", false
+	}
+	return "nix-daemon state unknown", true
+}
+
+func nixDaemonProcessName(raw string) string {
+	return strings.ToLower(filepath.Base(strings.TrimSpace(raw)))
+}
+
+func nixDaemonWorker(args []string) bool {
+	for _, arg := range args {
+		switch arg {
+		case "--stdio", "--serve", "realise", "realize", "substitute":
+			return true
+		}
+	}
+	return false
 }
 
 func nixContentionReason(output string) (string, bool) {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -247,26 +248,188 @@ func TestParseNixPolicyDuration(t *testing.T) {
 }
 
 func TestNixBusyProcessReasons(t *testing.T) {
-	ps := `
-/nix/var/nix/profiles/default/bin/nix nix build .#package
-/nix/var/nix/profiles/default/bin/nix nix store gc --dry-run
-/run/current-system/sw/bin/home-manager home-manager switch --flake .#jess
-/nix/store/abc/bin/nix-daemon nix-daemon --daemon
-/nix/store/def/bin/nix-daemon nix-daemon --stdio
-/nix/store/ghi/bin/nix-store nix-store --gc --print-roots
-/nix/store/jkl/bin/nix-collect-garbage nix-collect-garbage --dry-run
-/usr/bin/zsh zsh -lc echo idle
-`
-	reasons := nixBusyProcessReasons(ps)
-	want := []string{"home-manager switch", "nix build", "nix store gc", "nix-collect-garbage", "nix-daemon worker", "nix-store --gc"}
-
-	if len(reasons) != len(want) {
-		t.Fatalf("got reasons %v, want %v", reasons, want)
+	tests := []struct {
+		name      string
+		processes []nixProcessSnapshot
+		want      []string
+	}{
+		{
+			name: "all direct nix clients are busy",
+			processes: []nixProcessSnapshot{
+				{Comm: "nix", Argv: []string{"nix", "eval", ".#value"}},
+				{Comm: "nix-store", Argv: []string{"nix-store", "--query", "/nix/store/value"}},
+				{Comm: "home-manager", Argv: []string{"home-manager", "generations"}},
+				{Comm: "darwin-rebuild", Argv: []string{"darwin-rebuild", "--help"}},
+				{Comm: "nix-channel", Argv: []string{"nix-channel", "--list"}},
+				{Comm: "nix-prefetch-url", Argv: []string{"nix-prefetch-url", "https://example.test/archive"}},
+				{Comm: "nix-copy-closure", Argv: []string{"nix-copy-closure", "--to", "honey"}},
+			},
+			want: []string{"darwin-rebuild", "home-manager", "nix", "nix-channel", "nix-copy-closure", "nix-prefetch-url", "nix-store"},
+		},
+		{
+			name: "path-qualified direct client",
+			processes: []nixProcessSnapshot{{
+				Comm: "/nix/var/nix/profiles/default/bin/nix",
+				Argv: []string{"/nix/var/nix/profiles/default/bin/nix", "store", "gc"},
+			}},
+			want: []string{"nix"},
+		},
+		{
+			name:      "exact modern daemon is idle",
+			processes: []nixProcessSnapshot{{Comm: "nix", Argv: []string{"nix", "daemon"}}},
+		},
+		{
+			name:      "modern daemon worker is busy",
+			processes: []nixProcessSnapshot{{Comm: "nix", Argv: []string{"nix", "daemon", "--stdio"}}},
+			want:      []string{"nix-daemon worker"},
+		},
+		{
+			name:      "noncanonical daemon shape stays busy",
+			processes: []nixProcessSnapshot{{Comm: "nix", Argv: []string{"nix", "--option", "sandbox", "false", "daemon"}}},
+			want:      []string{"nix"},
+		},
+		{
+			name:      "nix build with daemon payload stays busy",
+			processes: []nixProcessSnapshot{{Comm: "nix", Argv: []string{"nix", "build", "daemon"}}},
+			want:      []string{"nix"},
+		},
+		{
+			name:      "unknown nix-prefixed executable stays busy",
+			processes: []nixProcessSnapshot{{Comm: "nix-process-sca", Argv: []string{"nix-process-scanner", "--scan"}}},
+			want:      []string{"nix-prefixed process"},
+		},
+		{
+			name:      "idle legacy daemon",
+			processes: []nixProcessSnapshot{{PPID: 1, Comm: "nix-daemon", Argv: []string{"nix-daemon", "--daemon"}}},
+		},
+		{
+			name:      "non-root legacy daemon is not exempt",
+			processes: []nixProcessSnapshot{{PPID: 1, UID: 501, Comm: "nix-daemon", Argv: []string{"nix-daemon", "--daemon"}}},
+			want:      []string{"nix-daemon state unknown"},
+		},
+		{
+			name:      "legacy daemon workers",
+			processes: []nixProcessSnapshot{{PPID: 1, Comm: "nix-daemon", Argv: []string{"nix-daemon", "--serve"}}, {PPID: 10, ParentComm: "nix-daemon", Comm: "nix-daemon", Argv: []string{"nix-daemon", "--daemon"}}},
+			want:      []string{"nix-daemon worker"},
+		},
+		{
+			name: "inaccessible managed daemon root is idle",
+			processes: []nixProcessSnapshot{{
+				PID: 20, PPID: 10, Comm: "nix-daemon", ParentComm: "determinate-nixd", ArgvErr: errors.New("kern.procargs2: invalid argument"),
+			}},
+		},
+		{
+			name: "unknown daemon topology stays busy",
+			processes: []nixProcessSnapshot{{
+				PID: 20, PPID: 10, Comm: "nix-daemon", ParentComm: "launch-wrapper", ArgvErr: errors.New("argv unavailable"),
+			}},
+			want: []string{"nix-daemon state unknown"},
+		},
+		{
+			name:      "direct client stays busy when argv is inaccessible",
+			processes: []nixProcessSnapshot{{PID: 30, Comm: "nix-store", ArgvErr: errors.New("permission denied")}},
+			want:      []string{"nix-store"},
+		},
+		{
+			name: "interpreter launched clients use exact script operand",
+			processes: []nixProcessSnapshot{
+				{Comm: "/bin/bash", Argv: []string{"bash", "/nix/store/abc/bin/nix-build", "default.nix"}},
+				{Comm: "/nix/store/perl/bin/perl", Argv: []string{"perl", "-I", "/Users/jess/My Perl Lib", "/nix/store/abc/bin/nix-instantiate", "default.nix"}},
+				{Comm: "/bin/bash", Argv: []string{"bash", "--rcfile", "/Users/jess/My RC", "/run/current-system/sw/bin/home-manager", "switch"}},
+				{Comm: "/bin/bash", Argv: []string{"bash", "--rcfile", "", "./nixos-rebuild", "switch"}},
+				{Comm: "/bin/bash", Argv: []string{"bash", "/Users/jess/Nix Tools/bin/home-manager", "switch"}},
+			},
+			want: []string{"home-manager", "nix-build", "nix-instantiate", "nixos-rebuild"},
+		},
+		{
+			name: "interpreter payloads and scanner arguments are not process identity",
+			processes: []nixProcessSnapshot{
+				{Comm: "/bin/sh", Argv: []string{"sh", "-c", "nix build .#package"}},
+				{Comm: "/usr/bin/python3", Argv: []string{"python3", "-mnix_scanner", "/nix/store/abc/bin/nix-build"}},
+				{Comm: "/bin/bash", Argv: []string{"bash", "/opt/process-scanner", "/nix/store/abc/bin/home-manager", "switch"}},
+			},
+		},
+		{
+			name: "ssh scanner and self payloads are ignored",
+			processes: []nixProcessSnapshot{
+				{Comm: "/usr/bin/ssh", Argv: []string{"ssh", "honey", "nix", "build", ".#package"}},
+				{Comm: "/usr/bin/rg", Argv: []string{"rg", "nix build", "plugins/nix.go"}},
+				{Comm: "tinyland-cleanup", Argv: []string{"tinyland-cleanup", "--plugins", "nix", "build"}},
+			},
+		},
+		{
+			name: "reasons stay sorted and deduplicated",
+			processes: []nixProcessSnapshot{
+				{Comm: "nix", Argv: []string{"nix", "build", ".#one"}},
+				{Comm: "nix", Argv: []string{"nix", "eval", ".#two"}},
+				{Comm: "nix-collect-garbage", Argv: []string{"nix-collect-garbage", "--dry-run"}},
+				{Comm: "darwin-rebuild", Argv: []string{"darwin-rebuild", "switch"}},
+			},
+			want: []string{"darwin-rebuild", "nix", "nix-collect-garbage"},
+		},
 	}
-	for i := range want {
-		if reasons[i] != want[i] {
-			t.Fatalf("got reasons %v, want %v", reasons, want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := nixBusyProcessReasons(tt.processes)
+			if err != nil {
+				t.Fatalf("nixBusyProcessReasons returned error: %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("nixBusyProcessReasons(%+v) = %v, want %v", tt.processes, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNixProcessSnapshotsUseStructuredArgvOnlyForCandidates(t *testing.T) {
+	argv := map[int][]string{
+		101: {"/nix/store/abc/bin/nix", "build", ".#package"},
+		103: {"bash", "/run/current-system/sw/bin/home-manager", "switch"},
+		104: {"nix-collect-garbage", "--dry-run"},
+		106: {"nix-prefetch-url", "https://example.test/archive"},
+		107: {"nix-copy-closure", "--to", "honey"},
+		108: {"nix-process-scanner", "--scan"},
+	}
+	var readPIDs []int
+	reader := func(pid int) ([]string, error) {
+		readPIDs = append(readPIDs, pid)
+		if pid == 105 {
+			return nil, os.ErrNotExist
 		}
+		return argv[pid], nil
+	}
+
+	output := "1 0 0 /sbin/launchd\n101 1 501 /nix/store/abc/bin/nix\n102 1 501 /usr/bin/ssh\n103 1 501 /bin/bash\n104 1 0 nix-collect-gar\n105 1 501 /bin/zsh\n106 1 501 nix-prefetch-ur\n107 1 501 nix-copy-closur\n108 1 501 nix-process-sca\n"
+	snapshots, err := nixProcessSnapshots(context.Background(), output, reader)
+	if err != nil {
+		t.Fatalf("nixProcessSnapshots: %v", err)
+	}
+	if got, want := readPIDs, []int{101, 103, 104, 105, 106, 107, 108}; !slices.Equal(got, want) {
+		t.Fatalf("argv reader pids = %v, want %v", got, want)
+	}
+	if len(snapshots) != 6 {
+		t.Fatalf("got %d snapshots, want 6: %+v", len(snapshots), snapshots)
+	}
+	got, err := nixBusyProcessReasons(snapshots)
+	if err != nil {
+		t.Fatalf("nixBusyProcessReasons: %v", err)
+	}
+	if want := []string{"home-manager", "nix", "nix-collect-garbage", "nix-copy-closure", "nix-prefetch-url", "nix-prefixed process"}; !slices.Equal(got, want) {
+		t.Fatalf("busy reasons = %v, want %v", got, want)
+	}
+}
+
+func TestNixProcessSnapshotsFailClosedOnArgvReadError(t *testing.T) {
+	snapshots, err := nixProcessSnapshots(context.Background(), "42 1 501 /bin/bash\n", func(int) ([]string, error) {
+		return nil, errors.New("argv unavailable")
+	})
+	if err != nil {
+		t.Fatalf("nixProcessSnapshots: %v", err)
+	}
+	_, err = nixBusyProcessReasons(snapshots)
+	if err == nil || !strings.Contains(err.Error(), "argv unavailable") {
+		t.Fatalf("expected argv inspection error, got %v", err)
 	}
 }
 
