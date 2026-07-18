@@ -3,6 +3,8 @@ package plugins
 import (
 	"compress/gzip"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2039,6 +2042,14 @@ func newDevArtifactsPluginWithActive(active map[string]string) *DevArtifactsPlug
 	}
 }
 
+func newHarnessScratchTestPlugin() *DevArtifactsPlugin {
+	p := newDevArtifactsPluginWithActive(nil)
+	p.harnessScratchProcesses = func(context.Context, []string, string, config.DevArtifactsConfig) (map[string]string, error) {
+		return nil, nil
+	}
+	return p
+}
+
 func requirePlanMetadataInt64(t *testing.T, metadata map[string]string, key string) int64 {
 	t.Helper()
 	raw, ok := metadata[key]
@@ -2098,15 +2109,15 @@ func TestHarnessScratchPlanTargetsStaleSessionsOnly(t *testing.T) {
 	fresh := makeHarnessSession(t, scanPath, "proj-a", "22222222-bbbb", time.Minute)
 
 	cfg := harnessScratchTestConfig(scanPath)
-	p := newDevArtifactsPluginWithActive(nil)
+	p := newHarnessScratchTestPlugin()
 	plan := p.PlanCleanup(context.Background(), LevelAggressive, cfg, devArtifactTestLogger())
 
 	var staleTarget, freshTarget *CleanupTarget
 	for i := range plan.Targets {
 		switch plan.Targets[i].Path {
-		case stale:
+		case canonicalTempArtifactPath(stale):
 			staleTarget = &plan.Targets[i]
-		case fresh:
+		case canonicalTempArtifactPath(fresh):
 			freshTarget = &plan.Targets[i]
 		}
 	}
@@ -2129,11 +2140,11 @@ func TestHarnessScratchPlanReportsBelowAggressive(t *testing.T) {
 	stale := makeHarnessSession(t, scanPath, "proj-a", "11111111-aaaa", 30*time.Hour)
 
 	cfg := harnessScratchTestConfig(scanPath)
-	p := newDevArtifactsPluginWithActive(nil)
+	p := newHarnessScratchTestPlugin()
 	plan := p.PlanCleanup(context.Background(), LevelModerate, cfg, devArtifactTestLogger())
 
 	for i := range plan.Targets {
-		if plan.Targets[i].Path == stale {
+		if plan.Targets[i].Path == canonicalTempArtifactPath(stale) {
 			if plan.Targets[i].Action != "report" {
 				t.Fatalf("below aggressive the stale session should be report-only, got %#v", plan.Targets[i])
 			}
@@ -2150,14 +2161,14 @@ func TestHarnessScratchCleanupDeletesStaleKeepsFreshAndActive(t *testing.T) {
 	activeStale := makeHarnessSession(t, scanPath, "proj-c", "33333333-cccc", 30*time.Hour)
 
 	cfg := harnessScratchTestConfig(scanPath)
-	p := newDevArtifactsPluginWithActive(nil)
+	p := newHarnessScratchTestPlugin()
 	daCfg := cfg.DevArtifacts
 	activeSessions := map[string]string{
 		canonicalTempArtifactPath(activeStale): "claude",
 	}
 	tempStaleAfter := 2 * time.Hour
 	logger := devArtifactTestLogger()
-	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, "", tempStaleAfter, daCfg, activeSessions, logger)
+	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, t.TempDir(), tempStaleAfter, daCfg, activeSessions, logger)
 
 	if freed == 0 {
 		t.Fatal("expected freed bytes from the stale session")
@@ -2196,8 +2207,8 @@ func TestHarnessScratchShallowMtimeProtectsDeepActivity(t *testing.T) {
 	}
 
 	cfg := harnessScratchTestConfig(scanPath)
-	p := newDevArtifactsPluginWithActive(nil)
-	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, "", 2*time.Hour, cfg.DevArtifacts, nil, devArtifactTestLogger())
+	p := newHarnessScratchTestPlugin()
+	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, t.TempDir(), 2*time.Hour, cfg.DevArtifacts, nil, devArtifactTestLogger())
 	if freed != 0 {
 		t.Fatalf("session with fresh deep write must not be deleted (freed=%d)", freed)
 	}
@@ -2232,7 +2243,7 @@ func TestPlanTemporaryArtifactsSkipsFreshAndContainerRoots(t *testing.T) {
 	makeHarnessSession(t, scanPath, "proj-a", "11111111-aaaa", 30*time.Hour)
 
 	cfg := harnessScratchTestConfig(scanPath)
-	p := newDevArtifactsPluginWithActive(nil)
+	p := newHarnessScratchTestPlugin()
 	var targets []CleanupTarget
 	p.planTemporaryArtifacts(context.Background(), scanPath, 1024*1024, 2*time.Hour, cfg.DevArtifacts, nil, &targets)
 
@@ -2283,7 +2294,7 @@ func TestHarnessScratchFreshTranscriptProtectsIdleSession(t *testing.T) {
 	}
 
 	cfg := harnessScratchTestConfig(scanPath)
-	p := newDevArtifactsPluginWithActive(nil)
+	p := newHarnessScratchTestPlugin()
 	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, home, 2*time.Hour, cfg.DevArtifacts, nil, devArtifactTestLogger())
 	if freed != 0 {
 		t.Fatalf("session with a fresh transcript is live and must not be deleted (freed=%d)", freed)
@@ -2303,5 +2314,388 @@ func TestHarnessScratchFreshTranscriptProtectsIdleSession(t *testing.T) {
 	}
 	if _, err := os.Stat(session); !os.IsNotExist(err) {
 		t.Fatalf("session should be deleted after transcript went stale, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchCleanupProtectsLateProcessRevival(t *testing.T) {
+	scanPath := t.TempDir()
+	home := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "late-process", 30*time.Hour)
+	p := newHarnessScratchTestPlugin()
+	probeCalls := 0
+	p.harnessScratchProcesses = func(context.Context, []string, string, config.DevArtifactsConfig) (map[string]string, error) {
+		probeCalls++
+		return map[string]string{canonicalTempArtifactPath(session): "late worker"}, nil
+	}
+
+	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, home, 2*time.Hour, harnessScratchTestConfig(scanPath).DevArtifacts, nil, devArtifactTestLogger())
+	if freed != 0 {
+		t.Fatalf("late process revival must veto deletion, freed=%d", freed)
+	}
+	if probeCalls != 1 {
+		t.Fatalf("expected one fresh process probe immediately before deletion, got %d", probeCalls)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("late process revival must preserve the session, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchCleanupProtectsLateNestedFileRevival(t *testing.T) {
+	scanPath := t.TempDir()
+	home := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "late-file", 30*time.Hour)
+	p := newHarnessScratchTestPlugin()
+	p.harnessScratchProcesses = func(context.Context, []string, string, config.DevArtifactsConfig) (map[string]string, error) {
+		lateFile := filepath.Join(session, "tasks", "late.output")
+		if err := os.WriteFile(lateFile, []byte("resumed"), 0o644); err != nil {
+			t.Fatalf("write late activity: %v", err)
+		}
+		old := time.Now().Add(-30 * time.Hour)
+		for _, path := range []string{filepath.Join(session, "tasks"), session} {
+			if err := os.Chtimes(path, old, old); err != nil {
+				t.Fatalf("backdate parent %s: %v", path, err)
+			}
+		}
+		return nil, nil
+	}
+
+	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, home, 2*time.Hour, harnessScratchTestConfig(scanPath).DevArtifacts, nil, devArtifactTestLogger())
+	if freed != 0 {
+		t.Fatalf("late nested-file revival must veto deletion, freed=%d", freed)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("late nested-file revival must preserve the session, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchCleanupProtectsFinalProcessProbeError(t *testing.T) {
+	scanPath := t.TempDir()
+	home := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "probe-error", 30*time.Hour)
+	p := newHarnessScratchTestPlugin()
+	p.harnessScratchProcesses = func(context.Context, []string, string, config.DevArtifactsConfig) (map[string]string, error) {
+		return nil, errors.New("lsof unavailable")
+	}
+
+	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, home, 2*time.Hour, harnessScratchTestConfig(scanPath).DevArtifacts, nil, devArtifactTestLogger())
+	if freed != 0 {
+		t.Fatalf("final process-probe error must veto deletion, freed=%d", freed)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("final process-probe error must preserve the session, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchCleanupProtectsInitialProcessProbeError(t *testing.T) {
+	scanPath := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "initial-probe-error", 30*time.Hour)
+	p := newHarnessScratchTestPlugin()
+	p.harnessScratchProcesses = func(context.Context, []string, string, config.DevArtifactsConfig) (map[string]string, error) {
+		return nil, errors.New("ps unavailable")
+	}
+
+	result := p.Cleanup(context.Background(), LevelAggressive, harnessScratchTestConfig(scanPath), devArtifactTestLogger())
+	if result.BytesFreed != 0 || result.ItemsCleaned != 0 {
+		t.Fatalf("initial process-probe error must veto harness mutation, result=%#v", result)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("initial process-probe error must preserve the session, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchCleanupProtectsCanonicalizationError(t *testing.T) {
+	scanPath := t.TempDir()
+	home := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "canonical-error", 30*time.Hour)
+	p := newHarnessScratchTestPlugin()
+	activeWithInvalidPath := map[string]string{"relative/session": "incomplete evidence"}
+
+	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, home, 2*time.Hour, harnessScratchTestConfig(scanPath).DevArtifacts, activeWithInvalidPath, devArtifactTestLogger())
+	if freed != 0 {
+		t.Fatalf("canonicalization error must veto deletion, freed=%d", freed)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("canonicalization error must preserve the session, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchCleanupProtectsTranscriptProbeError(t *testing.T) {
+	scanPath := t.TempDir()
+	home := t.TempDir()
+	project := "proj-a"
+	sessionID := "transcript-error"
+	session := makeHarnessSession(t, scanPath, project, sessionID, 30*time.Hour)
+	transcriptDir := filepath.Join(home, ".claude", "projects", project)
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(transcriptDir, sessionID+".jsonl")
+	if err := os.Symlink(filepath.Base(transcript), transcript); err != nil {
+		t.Fatal(err)
+	}
+
+	p := newHarnessScratchTestPlugin()
+	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, home, 2*time.Hour, harnessScratchTestConfig(scanPath).DevArtifacts, nil, devArtifactTestLogger())
+	if freed != 0 {
+		t.Fatalf("transcript probe error must veto deletion, freed=%d", freed)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("transcript probe error must preserve the session, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchProcessInspectionErrorsFailClosed(t *testing.T) {
+	psPath, err := exec.LookPath("ps")
+	if err != nil {
+		t.Skip("ps is required to exercise the lsof lookup failure")
+	}
+	cfg := config.DefaultConfig().DevArtifacts
+	scanPath := t.TempDir()
+
+	t.Run("ps missing", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if _, err := activeHarnessScratchSessions(context.Background(), []string{scanPath}, t.TempDir(), cfg); err == nil {
+			t.Fatal("missing ps must return incomplete liveness evidence")
+		}
+	})
+
+	t.Run("lsof missing", func(t *testing.T) {
+		binDir := t.TempDir()
+		if err := os.Symlink(psPath, filepath.Join(binDir, "ps")); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir)
+		if _, err := activeHarnessScratchSessions(context.Background(), []string{scanPath}, t.TempDir(), cfg); err == nil {
+			t.Fatal("missing lsof must return incomplete liveness evidence")
+		}
+	})
+}
+
+func TestHarnessScratchProbeHelpersFailClosed(t *testing.T) {
+	if _, err := harnessOwnerHome(filepath.Join(t.TempDir(), "missing-container"), t.TempDir()); err == nil {
+		t.Fatal("owner lookup failure must be returned")
+	}
+	container := t.TempDir()
+	if _, err := harnessOwnerHome(container, filepath.Join(t.TempDir(), "missing-home")); err == nil {
+		t.Fatal("missing owner home must be returned as a probe error")
+	}
+	if _, err := newestShallowMtime(context.Background(), filepath.Join(t.TempDir(), "missing-session"), 3, nil); err == nil {
+		t.Fatal("filesystem probe failure must be returned")
+	}
+}
+
+func TestHarnessScratchDarwinTempAliasesCanonicalize(t *testing.T) {
+	resolvedTmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil || filepath.Clean(resolvedTmp) != "/private/tmp" {
+		t.Skip("host does not use the Darwin /tmp -> /private/tmp alias")
+	}
+	cfg := config.DefaultConfig().DevArtifacts
+	want := "/private/tmp/claude-501/proj/session"
+	for _, tc := range []struct {
+		name     string
+		path     string
+		scanPath string
+	}{
+		{name: "tmp process path", path: "/tmp/claude-501/proj/session/tasks/out", scanPath: "/private/tmp"},
+		{name: "private tmp process path", path: "/private/tmp/claude-501/proj/session/tasks/out", scanPath: "/tmp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := harnessScratchSessionForPathStrict(tc.path, []string{tc.scanPath}, t.TempDir(), cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("canonical session=%q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestHarnessScratchCanonicalizationErrorDoesNotFallBack(t *testing.T) {
+	root := t.TempDir()
+	loop := filepath.Join(root, "loop")
+	if err := os.Symlink(filepath.Base(loop), loop); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(loop, "claude-501", "proj", "session", "tasks", "out")
+	if _, err := canonicalTempArtifactPathStrict(path); err == nil {
+		t.Fatal("symlink-loop canonicalization must return an error")
+	}
+	if _, err := harnessScratchSessionForPathStrict(path, []string{loop}, t.TempDir(), config.DefaultConfig().DevArtifacts); err == nil {
+		t.Fatal("session attribution must propagate temp-path canonicalization errors")
+	}
+}
+
+func TestHarnessScratchRejectsNestedDeviceDuringSizingAndDeletion(t *testing.T) {
+	scanPath := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "mounted", 30*time.Hour)
+	mounted := filepath.Join(session, "aaa-mounted")
+	if err := os.MkdirAll(mounted, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mounted, "payload"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	identityFor := func(path string, info os.FileInfo) (pathIdentity, error) {
+		stat := info.Sys().(*syscall.Stat_t)
+		if pathWithin(path, mounted) {
+			return pathIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino), mountID: "mounted"}, nil
+		}
+		return pathIdentity{device: uint64(stat.Dev), inode: uint64(stat.Ino), mountID: "root"}, nil
+	}
+
+	if _, _, err := getDirAllocatedBytesSameDeviceContextWithIdentity(context.Background(), session, nil, identityFor); !errors.Is(err, errFilesystemBoundary) {
+		t.Fatalf("sizing should reject nested device boundary, err=%v", err)
+	}
+	rootInfo, err := os.Lstat(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootIdentity, err := identityFor(session, rootInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := removeAllSameDeviceWithIdentity(context.Background(), session, rootIdentity, nil, identityFor); !errors.Is(err, errFilesystemBoundary) {
+		t.Fatalf("deletion should reject nested device boundary, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mounted, "payload")); err != nil {
+		t.Fatalf("device-boundary rejection must preserve nested data, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(session, "tasks", "out.log")); err != nil {
+		t.Fatalf("device-boundary rejection must not partially delete siblings, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchSizingHonorsCancellation(t *testing.T) {
+	scanPath := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "canceled", 30*time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	visits := 0
+	_, _, err := getDirAllocatedBytesSameDeviceContext(ctx, session, func(string) error {
+		visits++
+		if visits == 2 {
+			cancel()
+		}
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("sizing should return cancellation, err=%v", err)
+	}
+	if visits < 2 {
+		t.Fatalf("expected cancellation during recursive sizing, visits=%d", visits)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("canceled sizing must preserve the session, stat err=%v", err)
+	}
+}
+
+func TestHarnessScratchCleanupLowEntryBudgetVetoesDeletion(t *testing.T) {
+	scanPath := t.TempDir()
+	home := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "low-budget", 30*time.Hour)
+	cfg := harnessScratchTestConfig(scanPath)
+	cfg.DevArtifacts.ScanMaxEntries = 8
+	budget := newDevArtifactScanBudget(cfg.DevArtifacts)
+	p := newHarnessScratchTestPlugin()
+
+	freed := p.cleanHarnessScratchSessions(context.Background(), scanPath, home, 2*time.Hour, cfg.DevArtifacts, nil, devArtifactTestLogger(), budget)
+	if freed != 0 {
+		t.Fatalf("entry-budget exhaustion must veto deletion, freed=%d", freed)
+	}
+	if !budget.exhausted() {
+		t.Fatalf("expected recursive sizing to exhaust the low entry budget, entries=%d", budget.entries)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("entry-budget exhaustion must preserve the session, stat err=%v", err)
+	}
+}
+
+func TestTemporaryGeneratedArtifactsDefersHarnessRootsToSessionClassifier(t *testing.T) {
+	scanPath := t.TempDir()
+	session := makeHarnessSession(t, scanPath, "proj-a", "live-session", 30*time.Hour)
+	if err := os.MkdirAll(filepath.Join(session, "node_modules", "package"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := harnessScratchTestConfig(scanPath).DevArtifacts
+	called := false
+	newHarnessScratchTestPlugin().forEachStaleTemporaryRoot(context.Background(), scanPath, 0, time.Hour, cfg, nil, func(string) {
+		called = true
+	})
+	if called {
+		t.Fatal("generic generated-artifact lane must not descend into a canonical harness container")
+	}
+	if _, err := os.Stat(filepath.Join(session, "tasks", "out.log")); err != nil {
+		t.Fatalf("live session was disturbed: %v", err)
+	}
+}
+
+func TestGuardedRemovalRejectsReplacedRootIdentity(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "session")
+	replacement := filepath.Join(parent, "replacement")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(replacement, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(replacement, "keep")
+	if err := os.WriteFile(payload, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluated, err := fileInfoIdentity(root, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(replacement, root); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeAllSameDevice(context.Background(), root, evaluated, nil); !errors.Is(err, errFilesystemIdentityChanged) {
+		t.Fatalf("replaced root should fail identity revalidation, err=%v", err)
+	}
+	if _, err := os.Stat(payload); err != nil {
+		t.Fatalf("replacement tree must be preserved: %v", err)
+	}
+}
+
+func TestGuardedRemovalHonorsCancellationAndEntryBudget(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 20; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("%02d", i)), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := fileInfoIdentity(root, info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	visits := 0
+	err = removeAllSameDevice(ctx, root, identity, func(string) error {
+		visits++
+		if visits == 3 {
+			cancel()
+		}
+		return ctx.Err()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("recursive removal should stop on cancellation, err=%v", err)
+	}
+	if visits != 3 {
+		t.Fatalf("recursive removal exceeded cancellation budget: visits=%d", visits)
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("canceled removal should retain the root for retry: %v", err)
 	}
 }
