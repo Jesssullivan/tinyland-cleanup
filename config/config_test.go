@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -214,6 +215,59 @@ poll_interval: "not a number"
 	_, err := LoadConfig(configPath)
 	if err == nil {
 		t.Error("expected error for invalid config")
+	}
+}
+
+func TestLoadConfigExternalNixGCAuthority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+nix:
+  gc_authority: external
+  external_argv:
+    - /nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-neo-gc/bin/neo-gc
+    - gc-current
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Nix.GCAuthority != NixGCAuthorityExternal || len(cfg.Nix.ExternalArgv) != 2 {
+		t.Fatalf("unexpected external Nix authority config: %#v", cfg.Nix)
+	}
+}
+
+func TestLoadConfigRejectsUnsafeExternalNixGCAuthority(t *testing.T) {
+	tests := map[string]string{
+		"unknown authority": `nix: {gc_authority: delegated}`,
+		"missing argv":      `nix: {gc_authority: external}`,
+		"relative command":  `nix: {gc_authority: external, external_argv: [neo-gc]}`,
+		"builtin argv":      `nix: {gc_authority: builtin, external_argv: [/bin/true]}`,
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadConfig(path); err == nil {
+				t.Fatal("unsafe external Nix GC config must fail closed")
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsNonPositivePollInterval(t *testing.T) {
+	for _, interval := range []int{0, -1} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("poll_interval: %d\n", interval)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatalf("poll_interval %d must fail closed", interval)
+		}
 	}
 }
 

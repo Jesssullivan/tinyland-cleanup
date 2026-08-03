@@ -3,9 +3,12 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -175,6 +178,18 @@ type PolicyConfig struct {
 	// inode-only escalation and backs off to the cooldown cadence. Zero uses the
 	// built-in default.
 	InodeNoProgressLimit int `yaml:"inode_no_progress_limit"`
+	// ZeroYieldLimit is the number of consecutive completed plugin attempts
+	// that reclaim neither bytes nor items before daemon-triggered attempts are
+	// backed off. Zero uses the built-in default.
+	ZeroYieldLimit int `yaml:"zero_yield_limit"`
+	// ZeroYieldBackoff is the delay between bounded probe attempts after the
+	// zero-yield circuit breaker opens.
+	ZeroYieldBackoff string `yaml:"zero_yield_backoff"`
+	// LatestCycleReceipt is an atomically replaced JSON receipt for the most
+	// recently completed cycle.
+	LatestCycleReceipt string `yaml:"latest_cycle_receipt"`
+	// AlertRepeatInterval rate-limits identical persisted cycle alerts.
+	AlertRepeatInterval string `yaml:"alert_repeat_interval"`
 }
 
 // DockerConfig holds Docker-specific cleanup settings.
@@ -259,6 +274,16 @@ type BazelConfig struct {
 
 // NixConfig holds Nix store and profile generation cleanup settings.
 type NixConfig struct {
+	// GCAuthority selects the Nix mutation authority. "builtin" preserves the
+	// legacy generation and nix-collect-garbage implementation. "external"
+	// delegates the complete plan/apply operation to ExternalArgv and never
+	// runs builtin generation deletion, raw GC, or store optimization.
+	GCAuthority string `yaml:"gc_authority"`
+	// ExternalArgv is a fixed argv vector. The executable must be a clean
+	// absolute path and is revalidated as a trusted, non-writable executable at
+	// invocation time; no shell, PATH lookup, interpolation, or word splitting
+	// is performed. It speaks the versioned JSON protocol on stdin/stdout.
+	ExternalArgv []string `yaml:"external_argv"`
 	// MinUserGenerations preserves at least this many user profile generations.
 	MinUserGenerations int `yaml:"min_user_generations"`
 	// MinHomeManagerGenerations preserves at least this many Home Manager generations.
@@ -488,6 +513,10 @@ func DefaultConfig() *Config {
 			MinimumFreeGB:        0,
 			StateFile:            stateFile,
 			InodeNoProgressLimit: 3,
+			ZeroYieldLimit:       3,
+			ZeroYieldBackoff:     "30m",
+			LatestCycleReceipt:   filepath.Join(filepath.Dir(stateFile), "latest-cycle.json"),
+			AlertRepeatInterval:  "1h",
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{
@@ -541,6 +570,7 @@ func DefaultConfig() *Config {
 			AllowDeleteActiveOutputBases: false,
 		},
 		Nix: NixConfig{
+			GCAuthority:                                   "builtin",
 			MinUserGenerations:                            5,
 			MinHomeManagerGenerations:                     5,
 			MinSystemGenerations:                          3,
@@ -696,20 +726,20 @@ func LoadConfig(path string) (*Config, error) {
 	config := DefaultConfig()
 
 	if path == "" {
-		return config, nil
+		return config, validateConfig(config)
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return config, nil
+			return config, validateConfig(config)
 		}
 		return nil, err
 	}
 
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
-		return config, nil
+		return config, validateConfig(config)
 	}
 
 	decoder := yaml.NewDecoder(bytes.NewReader(trimmed))
@@ -718,11 +748,87 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
+	if err := validateConfig(config); err != nil {
+		return nil, err
+	}
 	return config, nil
+}
+
+const (
+	NixGCAuthorityBuiltin  = "builtin"
+	NixGCAuthorityExternal = "external"
+)
+
+func validateConfig(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if cfg.PollInterval <= 0 {
+		return fmt.Errorf("poll_interval must be greater than zero, got %d", cfg.PollInterval)
+	}
+	authority := strings.TrimSpace(cfg.Nix.GCAuthority)
+	if authority == "" {
+		authority = NixGCAuthorityBuiltin
+		cfg.Nix.GCAuthority = authority
+	}
+	switch authority {
+	case NixGCAuthorityBuiltin:
+		if len(cfg.Nix.ExternalArgv) != 0 {
+			return fmt.Errorf("nix.external_argv is only valid when nix.gc_authority=external")
+		}
+	case NixGCAuthorityExternal:
+		if err := validateExternalArgv(cfg.Nix.ExternalArgv); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("nix.gc_authority must be %q or %q, got %q", NixGCAuthorityBuiltin, NixGCAuthorityExternal, authority)
+	}
+
+	for name, value := range map[string]string{
+		"policy.cooldown":              cfg.Policy.Cooldown,
+		"policy.zero_yield_backoff":    cfg.Policy.ZeroYieldBackoff,
+		"policy.alert_repeat_interval": cfg.Policy.AlertRepeatInterval,
+	} {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		duration, err := time.ParseDuration(value)
+		if err != nil || duration < 0 {
+			return fmt.Errorf("%s must be a non-negative Go duration, got %q", name, value)
+		}
+	}
+	return nil
+}
+
+func validateExternalArgv(argv []string) error {
+	if len(argv) == 0 {
+		return fmt.Errorf("nix.external_argv is required when nix.gc_authority=external")
+	}
+	if len(argv) > 64 {
+		return fmt.Errorf("nix.external_argv exceeds 64 arguments")
+	}
+	if !filepath.IsAbs(argv[0]) || filepath.Clean(argv[0]) != argv[0] {
+		return fmt.Errorf("nix.external_argv[0] must be a clean absolute executable path")
+	}
+	for index, value := range argv {
+		if value == "" {
+			return fmt.Errorf("nix.external_argv[%d] must not be empty", index)
+		}
+		if len(value) > 4096 {
+			return fmt.Errorf("nix.external_argv[%d] exceeds 4096 bytes", index)
+		}
+		if strings.IndexByte(value, 0) >= 0 {
+			return fmt.Errorf("nix.external_argv[%d] contains NUL", index)
+		}
+	}
+	return nil
 }
 
 // SaveConfig saves configuration to a YAML file.
 func SaveConfig(config *Config, path string) error {
+	if err := validateConfig(config); err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err

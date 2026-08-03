@@ -8,7 +8,7 @@
 |---|---|---|
 | Review | `--once --dry-run` | Plan a cycle and exit; change nothing |
 | One-shot | `--once` | Run one cleanup cycle and exit |
-| Daemon | `--daemon` | Poll every `poll_interval` seconds; persist cooldown state |
+| Daemon | `--daemon` | Wait `poll_interval` after each completed cycle; persist bounded state |
 
 - **Workstations**: run the daemon via Home Manager (it starts on login).
 - **CI runners**: prefer `--once --level critical` from a cron or systemd timer.
@@ -16,6 +16,10 @@
 
 Do not run a daemon and a `--once` cron on the same host. Their cooldown state
 conflicts and runs get skipped unexpectedly.
+
+The daemon schedules from cycle completion, not from a continuously ticking
+clock. A scan that takes longer than `poll_interval` therefore cannot trigger
+an immediate second scan from a pending tick.
 
 ## Choosing a level
 

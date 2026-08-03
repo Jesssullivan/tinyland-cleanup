@@ -22,13 +22,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
-const devArtifactRecentOutputGrace = 2 * time.Hour
+const (
+	devArtifactRecentOutputGrace        = 2 * time.Hour
+	devArtifactDefaultScanMaxEntries    = 250000
+	devArtifactDefaultWorkspaceMaxRoots = 8
+	devArtifactDefaultTempMaxRoots      = 128
+)
 
 var tempArtifactPathPattern = regexp.MustCompile(`(?:/private)?/tmp/[^\s"'<>]+|/var/tmp/[^\s"'<>]+`)
 var absoluteDevArtifactPathPattern = regexp.MustCompile(`(?:~|/)[^\s"'<>]+`)
@@ -54,10 +60,13 @@ type devArtifactProcessCandidate struct {
 type devArtifactScanBudget struct {
 	maxDuration             time.Duration
 	maxEntries              int
+	enforceMaxEntries       bool
 	workspaceMaxRoots       int
 	workspaceCursorFile     string
 	workspaceCursorState    devArtifactWorkspaceCursorState
 	persistWorkspaceCursors bool
+	workspaceCursorDirty    bool
+	workspaceCursorLoadErr  error
 	tempMaxRoots            int
 
 	entries               int
@@ -74,11 +83,24 @@ type devArtifactWorkspaceCursorState struct {
 }
 
 func newDevArtifactScanBudget(cfg config.DevArtifactsConfig) *devArtifactScanBudget {
+	maxEntries := cfg.ScanMaxEntries
+	if maxEntries <= 0 {
+		maxEntries = devArtifactDefaultScanMaxEntries
+	}
+	workspaceMaxRoots := cfg.WorkspaceScanMaxRoots
+	if workspaceMaxRoots <= 0 {
+		workspaceMaxRoots = devArtifactDefaultWorkspaceMaxRoots
+	}
+	tempMaxRoots := cfg.TempScanMaxRoots
+	if tempMaxRoots <= 0 {
+		tempMaxRoots = devArtifactDefaultTempMaxRoots
+	}
 	return &devArtifactScanBudget{
 		maxDuration:       parseNixPolicyDuration(cfg.ScanMaxDuration, 30*time.Second),
-		maxEntries:        cfg.ScanMaxEntries,
-		workspaceMaxRoots: cfg.WorkspaceScanMaxRoots,
-		tempMaxRoots:      cfg.TempScanMaxRoots,
+		maxEntries:        maxEntries,
+		enforceMaxEntries: true,
+		workspaceMaxRoots: workspaceMaxRoots,
+		tempMaxRoots:      tempMaxRoots,
 		tempRootSeen:      map[string]struct{}{},
 		truncatedPath:     map[string]string{},
 	}
@@ -111,10 +133,18 @@ func (b *devArtifactScanBudget) loadWorkspaceCursors() {
 	}
 	data, err := os.ReadFile(b.workspaceCursorFile)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			b.workspaceCursorLoadErr = fmt.Errorf("read dev-artifact workspace cursor: %w", err)
+		}
 		return
 	}
 	var state devArtifactWorkspaceCursorState
 	if err := json.Unmarshal(data, &state); err != nil {
+		b.workspaceCursorLoadErr = fmt.Errorf("decode dev-artifact workspace cursor: %w", err)
+		return
+	}
+	if state.Version != 1 {
+		b.workspaceCursorLoadErr = fmt.Errorf("unsupported dev-artifact workspace cursor version %d", state.Version)
 		return
 	}
 	if state.Cursors == nil {
@@ -123,24 +153,55 @@ func (b *devArtifactScanBudget) loadWorkspaceCursors() {
 	b.workspaceCursorState = state
 }
 
-func (b *devArtifactScanBudget) saveWorkspaceCursors() {
-	if b == nil || !b.persistWorkspaceCursors || b.workspaceCursorFile == "" || len(b.workspaceCursorState.Cursors) == 0 {
-		return
+func (b *devArtifactScanBudget) saveWorkspaceCursors() error {
+	if b == nil || !b.persistWorkspaceCursors || !b.workspaceCursorDirty || b.workspaceCursorFile == "" || len(b.workspaceCursorState.Cursors) == 0 {
+		return nil
 	}
 	state := b.workspaceCursorState
 	state.Version = 1
+	b.workspaceCursorState.Version = 1
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("encode dev-artifact workspace cursor: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(b.workspaceCursorFile), 0755); err != nil {
-		return
+		return fmt.Errorf("create dev-artifact workspace cursor directory: %w", err)
 	}
-	tmp := b.workspaceCursorFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return
+	tmp, err := os.CreateTemp(filepath.Dir(b.workspaceCursorFile), ".tinyland-cleanup-cursor-*")
+	if err != nil {
+		return fmt.Errorf("create dev-artifact workspace cursor temp file: %w", err)
 	}
-	_ = os.Rename(tmp, b.workspaceCursorFile)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod dev-artifact workspace cursor temp file: %w", err)
+	}
+	data = append(data, '\n')
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write dev-artifact workspace cursor temp file: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync dev-artifact workspace cursor temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close dev-artifact workspace cursor temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, b.workspaceCursorFile); err != nil {
+		return fmt.Errorf("publish dev-artifact workspace cursor: %w", err)
+	}
+	dir, err := os.Open(filepath.Dir(b.workspaceCursorFile))
+	if err != nil {
+		return fmt.Errorf("open dev-artifact workspace cursor directory: %w", err)
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
+		return fmt.Errorf("sync dev-artifact workspace cursor directory: %w", err)
+	}
+	b.workspaceCursorDirty = false
+	return nil
 }
 
 func (b *devArtifactScanBudget) selectWorkspaceRoots(key string, roots []string) []string {
@@ -188,32 +249,33 @@ func (b *devArtifactScanBudget) recordWorkspaceCursor(key string, root string) {
 		b.workspaceCursorState.Cursors = map[string]string{}
 	}
 	b.workspaceCursorState.Cursors[key] = filepath.Clean(root)
-	b.saveWorkspaceCursors()
+	b.workspaceCursorDirty = true
 }
 
-func (b *devArtifactScanBudget) workspaceRootBudget(selectedRoots int) *devArtifactScanBudget {
+func (b *devArtifactScanBudget) workspaceRootBudget(remainingRoots int) *devArtifactScanBudget {
 	if b == nil {
 		return nil
 	}
 	maxDuration := b.maxDuration
-	if selectedRoots > 1 && maxDuration > 0 {
-		maxDuration = maxDuration / time.Duration(selectedRoots)
+	if remainingRoots > 1 && maxDuration > 0 {
+		maxDuration = maxDuration / time.Duration(remainingRoots)
 		if maxDuration < time.Second {
 			maxDuration = time.Second
 		}
 	}
-	maxEntries := b.maxEntries
-	if selectedRoots > 1 && maxEntries > 0 {
-		maxEntries = (maxEntries + selectedRoots - 1) / selectedRoots
-		if maxEntries < 1 {
-			maxEntries = 1
-		}
+	maxEntries := b.maxEntries - b.entries
+	if maxEntries < 0 {
+		maxEntries = 0
+	}
+	if remainingRoots > 1 && maxEntries > 0 {
+		maxEntries = (maxEntries + remainingRoots - 1) / remainingRoots
 	}
 	return &devArtifactScanBudget{
-		maxDuration:   maxDuration,
-		maxEntries:    maxEntries,
-		tempRootSeen:  map[string]struct{}{},
-		truncatedPath: map[string]string{},
+		maxDuration:       maxDuration,
+		maxEntries:        maxEntries,
+		enforceMaxEntries: true,
+		tempRootSeen:      map[string]struct{}{},
+		truncatedPath:     map[string]string{},
 	}
 }
 
@@ -252,7 +314,7 @@ func (b *devArtifactScanBudget) checkPath(ctx context.Context, path string) erro
 	if b == nil {
 		return nil
 	}
-	if b.maxEntries > 0 && b.entries >= b.maxEntries {
+	if b.enforceMaxEntries && b.entries >= b.maxEntries {
 		b.markTruncated(path, fmt.Sprintf("scan entry budget exceeded %d entries", b.maxEntries))
 		return errDevArtifactScanBudgetExceeded
 	}
@@ -326,6 +388,10 @@ func (b *devArtifactScanBudget) annotatePlan(plan *CleanupPlan) {
 	plan.Metadata["scan_entries_visited"] = strconv.Itoa(b.entries)
 	plan.Metadata["temp_roots_visited"] = strconv.Itoa(b.tempRoots)
 	plan.Metadata["scan_budget_exhausted"] = strconv.FormatBool(b.exhausted())
+	if b.workspaceCursorLoadErr != nil {
+		plan.Metadata["workspace_cursor_error"] = b.workspaceCursorLoadErr.Error()
+		plan.Warnings = append(plan.Warnings, b.workspaceCursorLoadErr.Error())
+	}
 	if !b.exhausted() {
 		return
 	}
@@ -339,12 +405,50 @@ func (b *devArtifactScanBudget) annotatePlan(plan *CleanupPlan) {
 
 // DevArtifactsPlugin handles stale development artifact cleanup.
 type DevArtifactsPlugin struct {
-	activeProcesses func(context.Context) (map[string]string, error)
+	activeProcesses       func(context.Context) (map[string]string, error)
+	workspaceCursorMu     sync.Mutex
+	workspaceCursorMemory map[string]devArtifactWorkspaceCursorState
 }
 
 // NewDevArtifactsPlugin creates a new development artifact cleanup plugin.
 func NewDevArtifactsPlugin() *DevArtifactsPlugin {
-	return &DevArtifactsPlugin{}
+	return &DevArtifactsPlugin{workspaceCursorMemory: map[string]devArtifactWorkspaceCursorState{}}
+}
+
+func (p *DevArtifactsPlugin) applyWorkspaceCursorMemory(budget *devArtifactScanBudget) {
+	if p == nil || budget == nil || budget.workspaceCursorFile == "" {
+		return
+	}
+	p.workspaceCursorMu.Lock()
+	defer p.workspaceCursorMu.Unlock()
+	if p.workspaceCursorMemory == nil {
+		p.workspaceCursorMemory = map[string]devArtifactWorkspaceCursorState{}
+	}
+	if state, ok := p.workspaceCursorMemory[budget.workspaceCursorFile]; ok {
+		budget.workspaceCursorState = cloneDevArtifactCursorState(state)
+		return
+	}
+	p.workspaceCursorMemory[budget.workspaceCursorFile] = cloneDevArtifactCursorState(budget.workspaceCursorState)
+}
+
+func (p *DevArtifactsPlugin) rememberWorkspaceCursorMemory(budget *devArtifactScanBudget) {
+	if p == nil || budget == nil || budget.workspaceCursorFile == "" {
+		return
+	}
+	p.workspaceCursorMu.Lock()
+	defer p.workspaceCursorMu.Unlock()
+	if p.workspaceCursorMemory == nil {
+		p.workspaceCursorMemory = map[string]devArtifactWorkspaceCursorState{}
+	}
+	p.workspaceCursorMemory[budget.workspaceCursorFile] = cloneDevArtifactCursorState(budget.workspaceCursorState)
+}
+
+func cloneDevArtifactCursorState(state devArtifactWorkspaceCursorState) devArtifactWorkspaceCursorState {
+	cloned := devArtifactWorkspaceCursorState{Version: state.Version, Cursors: map[string]string{}}
+	for key, value := range state.Cursors {
+		cloned.Cursors[key] = value
+	}
+	return cloned
 }
 
 // Name returns the plugin identifier.
@@ -375,6 +479,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 	daCfg := cfg.DevArtifacts
 	nodeAge, venvAge, rustAge, zigAge, mutates := devArtifactThresholds(level)
 	scanBudget := newDevArtifactScanBudgetForConfig(cfg, false)
+	p.applyWorkspaceCursorMemory(scanBudget)
 	scanCtx, cancelScan := scanBudget.context(ctx)
 	defer cancelScan()
 	plan := CleanupPlan{
@@ -457,16 +562,16 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			continue
 		}
 		if daCfg.NodeModules && !active.GlobalFamilyActive("node_modules") {
-			p.planNodeModules(ctx, expanded, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
+			p.planNodeModules(scanCtx, expanded, nodeAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
 		}
 		if daCfg.PythonVenvs && !active.GlobalFamilyActive("python-venv") {
-			p.planPythonVenvs(ctx, expanded, venvAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
+			p.planPythonVenvs(scanCtx, expanded, venvAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
 		}
 		if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
-			p.planRustTargets(ctx, expanded, rustAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
+			p.planRustTargets(scanCtx, expanded, rustAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
 		}
 		if daCfg.ZigArtifacts && !active.GlobalFamilyActive("zig-artifact") {
-			p.planZigArtifacts(ctx, expanded, zigAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
+			p.planZigArtifacts(scanCtx, expanded, zigAge, mutates, daCfg.ProtectPaths, active, tracker, &targets, scanBudget)
 		}
 		if daCfg.LargeLocalArtifacts {
 			p.planLargeLocalArtifacts(scanCtx, expanded, largeLocalArtifactMinBytes(daCfg), daCfg.ProtectPaths, mountedImages, &targets, scanBudget)
@@ -514,8 +619,8 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 }
 
 // Cleanup performs dev artifact cleanup at the specified level.
-func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
-	result := CleanupResult{
+func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) (result CleanupResult) {
+	result = CleanupResult{
 		Plugin: p.Name(),
 		Level:  level,
 	}
@@ -523,6 +628,17 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	home, _ := os.UserHomeDir()
 	daCfg := cfg.DevArtifacts
 	scanBudget := newDevArtifactScanBudgetForConfig(cfg, true)
+	p.applyWorkspaceCursorMemory(scanBudget)
+	if scanBudget.workspaceCursorLoadErr != nil {
+		result.Warnings = append(result.Warnings, scanBudget.workspaceCursorLoadErr.Error())
+	}
+	defer func() {
+		p.rememberWorkspaceCursorMemory(scanBudget)
+		if err := scanBudget.saveWorkspaceCursors(); err != nil {
+			result.Warnings = append(result.Warnings, err.Error())
+			logger.Warn("dev-artifact workspace cursor remains in memory because durable persistence failed", "error", err)
+		}
+	}()
 	scanCtx, cancelScan := scanBudget.context(ctx)
 	defer cancelScan()
 
@@ -621,7 +737,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 
 		if daCfg.NodeModules && !active.GlobalFamilyActive("node_modules") {
-			freed := p.cleanNodeModules(ctx, expanded, nodeAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
+			freed := p.cleanNodeModules(scanCtx, expanded, nodeAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -633,7 +749,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 
 		if daCfg.PythonVenvs && !active.GlobalFamilyActive("python-venv") {
-			freed := p.cleanPythonVenvs(ctx, expanded, venvAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
+			freed := p.cleanPythonVenvs(scanCtx, expanded, venvAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -645,7 +761,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 
 		if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
-			freed := p.cleanRustTargets(ctx, expanded, rustAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
+			freed := p.cleanRustTargets(scanCtx, expanded, rustAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -657,7 +773,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 
 		if daCfg.ZigArtifacts && !active.GlobalFamilyActive("zig-artifact") {
-			freed := p.cleanZigArtifacts(ctx, expanded, zigAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
+			freed := p.cleanZigArtifacts(scanCtx, expanded, zigAge, daCfg.ProtectPaths, active, tracker, logger, scanBudget)
 			result.BytesFreed += freed
 			if freed > 0 {
 				result.ItemsCleaned++
@@ -3707,10 +3823,10 @@ func (p *DevArtifactsPlugin) findArtifactDirs(ctx context.Context, scanPath stri
 	if budget != nil {
 		selectedRoots = budget.selectWorkspaceRoots(key, roots)
 	}
-	for _, root := range selectedRoots {
+	for index, root := range selectedRoots {
 		rootBudget := budget
 		if budget != nil {
-			rootBudget = budget.workspaceRootBudget(len(selectedRoots))
+			rootBudget = budget.workspaceRootBudget(len(selectedRoots) - index)
 		}
 		rootCtx, cancel := rootBudget.context(ctx)
 		p.findArtifactDirsInRoot(rootCtx, scanPath, root, targetName, markerFile, callback, rootBudget)

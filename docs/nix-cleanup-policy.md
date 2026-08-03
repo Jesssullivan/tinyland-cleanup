@@ -45,6 +45,8 @@ Default policy:
 
 ```yaml
 nix:
+  gc_authority: builtin
+  external_argv: []
   min_user_generations: 5
   min_home_manager_generations: 5
   min_system_generations: 3
@@ -62,6 +64,50 @@ nix:
   max_gc_duration: 20m
   root_attribution_limit: 20
 ```
+
+## External GC authority
+
+Hosts with receipt-aware generation custody can delegate the entire Nix lane:
+
+```yaml
+nix:
+  gc_authority: external
+  external_argv:
+    - /nix/store/<hash>-neo-generation-controller/bin/neo-generation-controller
+    - gc-current
+```
+
+The first argv entry must be a clean absolute path. At every invocation the
+daemon resolves and validates the complete path: no symlink component, a
+regular executable owned by root, and no replaceable
+group/world-writable component outside a trusted sticky boundary. The daemon
+calls it directly with the remaining fixed arguments: there is no shell, PATH
+lookup, interpolation, or word splitting. In external mode the plugin never
+inspects or deletes generations and never invokes `nix-collect-garbage`,
+`nix-store --gc`, or `nix-store --optimize`.
+
+The controller reads one JSON object from stdin:
+
+```json
+{"protocol_version":1,"operation":"plan","level":"critical"}
+```
+
+`operation` is `plan` for dry-run and `apply` for cleanup. Stdout is limited to
+64 KiB and must contain exactly one JSON response with matching version,
+operation, and level; an `outcome` of `completed`, `deferred`, `refused`, or
+`no-op`; and a typed `receipt` using schema
+`tinyland.cleanup.nix-external-receipt.v1`. The envelope and receipt repeat the
+same bounded facts. `receipt_digest` must be the lowercase SHA-256 of the
+receipt's canonical compact JSON encoding, with fields ordered as `schema`,
+`protocol_version`, `operation`, `level`, `outcome`, `summary`,
+`estimated_bytes_freed`, `bytes_freed`, `items_cleaned`, and
+`retry_after_seconds`. A deferred response must include a
+positive, bounded `retry_after_seconds`; only an apply `completed` response may
+report non-zero applied bytes or items. Unknown fields, trailing output,
+timeout, non-zero exit, mismatched facts, invalid digest, or an over-limit
+response fail closed. Stderr is independently bounded and never parsed as
+authority. On Darwin and Linux, timeout cancellation kills the controller's
+entire private process group so mutation descendants cannot outlive it.
 
 Runtime behavior:
 

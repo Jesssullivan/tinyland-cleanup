@@ -1265,6 +1265,51 @@ func TestCleanupPrunesNixTemporaryRootsBeforeWorkspaceScanBudget(t *testing.T) {
 	}
 }
 
+func TestDevArtifactScanBudgetsCannotBecomeUnbounded(t *testing.T) {
+	budget := newDevArtifactScanBudget(config.DevArtifactsConfig{})
+	if budget.maxDuration != 30*time.Second {
+		t.Fatalf("default scan duration = %s, want 30s", budget.maxDuration)
+	}
+	if budget.maxEntries != devArtifactDefaultScanMaxEntries {
+		t.Fatalf("default entry budget = %d", budget.maxEntries)
+	}
+	if budget.workspaceMaxRoots != devArtifactDefaultWorkspaceMaxRoots {
+		t.Fatalf("default workspace root budget = %d", budget.workspaceMaxRoots)
+	}
+	if budget.tempMaxRoots != devArtifactDefaultTempMaxRoots {
+		t.Fatalf("default temp root budget = %d", budget.tempMaxRoots)
+	}
+}
+
+func TestDevArtifactWorkspaceFamiliesShareGlobalEntryBudget(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	root := t.TempDir()
+	for _, project := range []struct {
+		name     string
+		artifact string
+		marker   string
+	}{
+		{name: "node", artifact: "node_modules", marker: "package.json"},
+		{name: "rust", artifact: "target", marker: "Cargo.toml"},
+	} {
+		projectRoot := filepath.Join(root, project.name)
+		if err := os.MkdirAll(filepath.Join(projectRoot, project.artifact, "payload"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(projectRoot, project.marker), []byte("marker"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	budget := newDevArtifactScanBudget(config.DevArtifactsConfig{ScanMaxDuration: "30s", ScanMaxEntries: 4, WorkspaceScanMaxRoots: 8})
+	scanCtx, cancel := budget.context(context.Background())
+	defer cancel()
+	p.findArtifactDirs(scanCtx, root, "node_modules", "package.json", func(string, int64) {}, budget)
+	p.findArtifactDirs(scanCtx, root, "target", "Cargo.toml", func(string, int64) {}, budget)
+	if budget.entries > budget.maxEntries {
+		t.Fatalf("workspace families exceeded global entry budget: visited=%d max=%d", budget.entries, budget.maxEntries)
+	}
+}
+
 func TestPlanCleanupProtectsActiveNixTemporaryRoots(t *testing.T) {
 	p := NewDevArtifactsPlugin()
 	tmpDir := t.TempDir()
@@ -1556,7 +1601,7 @@ func TestCleanupRotatesWorkspaceShardCursorAfterBudgetExhaustion(t *testing.T) {
 	}
 
 	cfg := budgetedDevArtifactConfig(tmpDir)
-	cfg.Policy.StateFile = filepath.Join(t.TempDir(), "state.json")
+	cfg.Policy.StateFile = filepath.Join(os.DevNull, "state.json")
 	cfg.DevArtifacts.ScanMaxEntries = 4
 	cfg.DevArtifacts.WorkspaceScanMaxRoots = 1
 
@@ -1569,6 +1614,9 @@ func TestCleanupRotatesWorkspaceShardCursorAfterBudgetExhaustion(t *testing.T) {
 	}
 	if !pathExists(staleNodeModules) {
 		t.Fatal("stale node_modules should not be reached in the first shard-limited pass")
+	}
+	if len(first.Warnings) == 0 {
+		t.Fatal("cursor persistence failure must be surfaced")
 	}
 
 	second := p.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())

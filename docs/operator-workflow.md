@@ -145,9 +145,14 @@ Use `--output json` for automation. The report distinguishes:
   available;
 - `state_file`: path used for persistent daemon cleanup state;
 - `state_error`: load/save failure for daemon cleanup state, when present;
+- `latest_cycle_receipt` and `receipt_digest`: atomically replaced, digest-bound
+  evidence for the most recently completed cycle;
 - `cooldown_seconds`: configured per-plugin cleanup cooldown;
 - `cooldown_remaining_seconds`: per-plugin remaining cooldown when a plugin is
   skipped with `skip_reason: "cooldown"`;
+- `zero_yield_count` and `backoff_remaining_seconds`: the byte+item no-progress
+  circuit breaker; `skip_reason: "zero_yield_backoff"` is still bypassed by an
+  explicit operator-forced `--level` run;
 - `target_used_percent`: the legacy `target_free` config value, interpreted as
   the desired maximum used percentage after cleanup;
 - `target_free_bytes`: the host free-space equivalent of that target;

@@ -110,6 +110,17 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 			return err
 		}
 	}
+	if report.ReceiptDigest != "" {
+		if _, err := fmt.Fprintf(w, "receipt: %s (%s)\n", report.ReceiptDigest, report.LatestCycleReceipt); err != nil {
+			return err
+		}
+	}
+	if report.AlertStatus != "" {
+		if _, err := fmt.Fprintf(w, "alert: %s (%s), suppressed duplicates %d\n",
+			report.AlertStatus, report.AlertDigest, report.SuppressedDuplicateAlerts); err != nil {
+			return err
+		}
+	}
 
 	if len(report.Mounts) > 0 {
 		if _, err := fmt.Fprintln(w, "mounts:"); err != nil {
@@ -215,6 +226,11 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 				return err
 			}
 		}
+		if plan.Outcome != "" {
+			if _, err := fmt.Fprintf(w, "  authority: %s, receipt %s\n", plan.Outcome, plan.ReceiptDigest); err != nil {
+				return err
+			}
+		}
 		if plan.EstimatedBytesFreed > 0 || plan.RequiredFreeBytes > 0 || len(plan.Targets) > 0 {
 			if _, err := fmt.Fprintf(w, "  estimate: %s reclaim, %s required free, %d targets\n",
 				formatByteCount(plan.EstimatedBytesFreed),
@@ -256,8 +272,28 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 			return err
 		}
 	}
+	if len(plugin.Warnings) > 0 {
+		if err := writeTextList(w, "  warnings:", plugin.Warnings, 3); err != nil {
+			return err
+		}
+	}
 	if plugin.CooldownRemainingSeconds > 0 {
 		if _, err := fmt.Fprintf(w, "  cooldown remaining: %ds\n", plugin.CooldownRemainingSeconds); err != nil {
+			return err
+		}
+	}
+	if plugin.BackoffRemainingSeconds > 0 {
+		if _, err := fmt.Fprintf(w, "  backoff: %s, %ds remaining\n", plugin.BackoffReason, plugin.BackoffRemainingSeconds); err != nil {
+			return err
+		}
+	}
+	if plugin.Outcome != "" {
+		if _, err := fmt.Fprintf(w, "  outcome: %s\n", plugin.Outcome); err != nil {
+			return err
+		}
+	}
+	if plugin.ReceiptDigest != "" {
+		if _, err := fmt.Fprintf(w, "  authority receipt: %s\n", plugin.ReceiptDigest); err != nil {
 			return err
 		}
 	}

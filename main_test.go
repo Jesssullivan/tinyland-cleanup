@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -669,6 +670,174 @@ func TestRunOnceSkipsPluginDuringCooldown(t *testing.T) {
 	}
 }
 
+func TestRunOnceSkipsCriticalPluginDuringZeroYieldBackoff(t *testing.T) {
+	var output bytes.Buffer
+	mock := &reportingPlugin{}
+	daemon := newTestDaemon(t, mock, &output)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	daemon.now = func() time.Time { return now }
+	state := newCleanupState()
+	zero := plugins.CleanupResult{Plugin: "reporting", Level: plugins.LevelCritical, Outcome: plugins.CleanupOutcomeNoOp}
+	for index := 0; index < 3; index++ {
+		state.recordPluginRunWithPolicy("reporting", plugins.LevelCritical, now.Add(time.Duration(index-3)*time.Minute), zero, 3, 30*time.Minute)
+	}
+	if err := saveCleanupState(daemon.config.Policy.StateFile, state); err != nil {
+		t.Fatal(err)
+	}
+	daemon.diskStats = sequenceDiskStats(t,
+		diskStats(1000, 20, 98),
+		diskStats(1000, 20, 98),
+	)
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	if mock.called {
+		t.Fatal("critical daemon cycle must respect the zero-yield circuit breaker")
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	if got := report.Plugins[0].SkipReason; got != "zero_yield_backoff" {
+		t.Fatalf("skip reason = %q, want zero_yield_backoff", got)
+	}
+}
+
+func TestRunOnceRetainsZeroYieldBackoffWhenStateSaveFails(t *testing.T) {
+	var output bytes.Buffer
+	mock := &reportingPlugin{
+		result: plugins.CleanupResult{Outcome: plugins.CleanupOutcomeNoOp},
+	}
+	daemon := newTestDaemon(t, mock, &output)
+	daemon.diskStats = func(string) (*monitor.DiskStats, error) {
+		return diskStats(1000, 20, 98), nil
+	}
+
+	for attempt := 0; attempt < 3; attempt++ {
+		// Let the first cycle load and persist valid state. Later writes fail,
+		// proving that the already-authoritative state remains live in memory.
+		if attempt == 1 {
+			daemon.config.Policy.StateFile = filepath.Join(os.DevNull, "state.json")
+		}
+		output.Reset()
+		mock.called = false
+		if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+			t.Fatal(err)
+		}
+		if !mock.called {
+			t.Fatalf("zero-yield probe %d did not run", attempt+1)
+		}
+	}
+
+	output.Reset()
+	mock.called = false
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	if mock.called {
+		t.Fatal("in-memory zero-yield backoff was lost after state save failures")
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	if report.Plugins[0].SkipReason != "zero_yield_backoff" || report.StateError == "" {
+		t.Fatalf("unexpected in-memory fallback report: %#v", report)
+	}
+}
+
+func TestRunOnceWritesAtomicLatestCycleReceipt(t *testing.T) {
+	var output bytes.Buffer
+	daemon := newTestDaemon(t, &reportingPlugin{}, &output)
+	daemon.diskStats = sequenceDiskStats(t, diskStats(1000, 500, 50))
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	data, err := os.ReadFile(daemon.config.Policy.LatestCycleReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptInfo, err := os.Stat(daemon.config.Policy.LatestCycleReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receiptInfo.Mode().Perm() != 0600 {
+		t.Fatalf("latest receipt mode = %o, want 600", receiptInfo.Mode().Perm())
+	}
+	if len(data) > latestCycleReceiptMaxBytes {
+		t.Fatalf("latest receipt is not bounded: %d bytes", len(data))
+	}
+	var receipt latestCycleReceipt
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.ReceiptDigest == "" || receipt.ReceiptDigest != report.ReceiptDigest {
+		t.Fatalf("receipt digest mismatch: file=%q output=%q", receipt.ReceiptDigest, report.ReceiptDigest)
+	}
+	if receipt.Schema != latestCycleReceiptSchema {
+		t.Fatalf("unexpected receipt schema %q", receipt.Schema)
+	}
+	if want := latestCycleReceiptDigest(receipt); receipt.ReceiptDigest != want {
+		t.Fatalf("receipt is not cryptographically bound: got %q want %q", receipt.ReceiptDigest, want)
+	}
+	entries, err := os.ReadDir(filepath.Dir(daemon.config.Policy.LatestCycleReceipt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".tinyland-cleanup-atomic-") {
+			t.Fatalf("atomic temp file was not retired: %s", entry.Name())
+		}
+	}
+}
+
+func TestRunOnceDryRunDoesNotMutateLatestCycleReceipt(t *testing.T) {
+	var output bytes.Buffer
+	daemon := newTestDaemon(t, &reportingPlugin{}, &output)
+	daemon.dryRun = true
+	daemon.diskStats = sequenceDiskStats(t, diskStats(1000, 500, 50))
+	const priorReceipt = "accepted applied-cycle receipt\n"
+	if err := os.WriteFile(daemon.config.Policy.LatestCycleReceipt, []byte(priorReceipt), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(daemon.config.Policy.LatestCycleReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != priorReceipt {
+		t.Fatalf("dry-run replaced durable receipt: %q", data)
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	if report.LatestCycleReceipt != "" || report.ReceiptDigest != "" {
+		t.Fatalf("dry-run claimed a durable receipt: %#v", report)
+	}
+}
+
+func TestLatestCycleReceiptBoundsAdversarialReport(t *testing.T) {
+	// NUL receives the largest common JSON string expansion ("\\u0000"), so
+	// this exercises the serialized-byte cap rather than only the Go string cap.
+	longValue := strings.Repeat("\x00", latestCycleReceiptStringBytes*4)
+	report := cycleReport{
+		Timestamp:   longValue,
+		CompletedAt: longValue,
+		StateError:  longValue,
+	}
+	for index := 0; index < latestCycleReceiptMaxPlugins*4; index++ {
+		report.Plugins = append(report.Plugins, pluginCycleReport{
+			Name:     longValue,
+			Error:    longValue,
+			Warnings: []string{longValue, longValue, longValue, longValue, longValue},
+		})
+	}
+	receipt := boundedLatestCycleReceipt(report)
+	data, _, err := marshalLatestCycleReceipt(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > latestCycleReceiptMaxBytes || len(receipt.Plugins) != latestCycleReceiptMaxPlugins || !receipt.Truncated {
+		t.Fatalf("receipt bounds not enforced: bytes=%d plugins=%d truncated=%t", len(data), len(receipt.Plugins), receipt.Truncated)
+	}
+}
+
 func TestRunOnceCriticalBypassesCooldown(t *testing.T) {
 	var output bytes.Buffer
 	mock := &reportingPlugin{}
@@ -837,6 +1006,7 @@ func newTestDaemonWithPlugins(t *testing.T, output io.Writer, registeredPlugins 
 	stateRoot := t.TempDir()
 	cfg.LogFile = filepath.Join(stateRoot, "disk-cleanup.log")
 	cfg.Policy.StateFile = filepath.Join(stateRoot, "state.json")
+	cfg.Policy.LatestCycleReceipt = filepath.Join(stateRoot, "latest-cycle.json")
 	registry := plugins.NewRegistry()
 	for _, plugin := range registeredPlugins {
 		registry.Register(plugin)

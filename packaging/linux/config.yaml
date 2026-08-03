@@ -16,6 +16,10 @@ policy:
   # Back off inode-only critical escalation to the cooldown cadence after this
   # many consecutive cycles fail to relieve inode pressure (0 = default 3).
   inode_no_progress_limit: 3
+  zero_yield_limit: 3
+  zero_yield_backoff: 30m
+  latest_cycle_receipt: /var/lib/tinyland-cleanup/latest-cycle.json
+  alert_repeat_interval: 1h
 
 thresholds:
   warning: 80
@@ -75,6 +79,8 @@ podman:
   compact_qemu_img_path: ""
 
 nix:
+  gc_authority: builtin
+  external_argv: []
   min_user_generations: 5
   min_home_manager_generations: 5
   min_system_generations: 3

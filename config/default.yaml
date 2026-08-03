@@ -42,6 +42,13 @@ policy:
   # bypassing cooldown and backs off to the cooldown cadence instead of running
   # every plugin every poll interval. Zero uses the built-in default (3).
   inode_no_progress_limit: 3
+  # Back off each plugin after three completed cycles reclaim neither bytes
+  # nor items. One bounded probe is retried after the backoff interval.
+  zero_yield_limit: 3
+  zero_yield_backoff: 30m
+  # Atomically replaced status/receipt and duplicate-alert cadence.
+  latest_cycle_receipt: ~/.local/state/tinyland-cleanup/latest-cycle.json
+  alert_repeat_interval: 1h
 
 # Enable/disable specific cleanup plugins
 enable:
@@ -147,6 +154,11 @@ podman:
 
 # Nix store and profile generation cleanup settings
 nix:
+  # builtin preserves the legacy in-process implementation. external delegates
+  # the complete plan/apply operation and runs no builtin generation deletion,
+  # raw nix-collect-garbage, or store optimization.
+  gc_authority: builtin
+  external_argv: []
   # Preserve rollback safety even under disk pressure
   min_user_generations: 5
   min_home_manager_generations: 5
