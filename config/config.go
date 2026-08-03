@@ -279,9 +279,10 @@ type NixConfig struct {
 	// delegates the complete plan/apply operation to ExternalArgv and never
 	// runs builtin generation deletion, raw GC, or store optimization.
 	GCAuthority string `yaml:"gc_authority"`
-	// ExternalArgv is an immutable argv vector. The executable must be an
-	// absolute path; no shell, PATH lookup, interpolation, or word splitting is
-	// performed. It speaks the versioned JSON protocol on stdin/stdout.
+	// ExternalArgv is a fixed argv vector. The executable must be a clean
+	// absolute path and is revalidated as a trusted, non-writable executable at
+	// invocation time; no shell, PATH lookup, interpolation, or word splitting
+	// is performed. It speaks the versioned JSON protocol on stdin/stdout.
 	ExternalArgv []string `yaml:"external_argv"`
 	// MinUserGenerations preserves at least this many user profile generations.
 	MinUserGenerations int `yaml:"min_user_generations"`
@@ -761,6 +762,9 @@ const (
 func validateConfig(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
+	}
+	if cfg.PollInterval <= 0 {
+		return fmt.Errorf("poll_interval must be greater than zero, got %d", cfg.PollInterval)
 	}
 	authority := strings.TrimSpace(cfg.Nix.GCAuthority)
 	if authority == "" {

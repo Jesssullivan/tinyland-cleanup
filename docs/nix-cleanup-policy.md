@@ -77,8 +77,11 @@ nix:
     - gc-current
 ```
 
-The first argv entry must be a clean absolute path. The daemon calls it
-directly with the remaining immutable arguments: there is no shell, PATH
+The first argv entry must be a clean absolute path. At every invocation the
+daemon resolves and validates the complete path: no symlink component, a
+regular executable owned by root, and no replaceable
+group/world-writable component outside a trusted sticky boundary. The daemon
+calls it directly with the remaining fixed arguments: there is no shell, PATH
 lookup, interpolation, or word splitting. In external mode the plugin never
 inspects or deletes generations and never invokes `nix-collect-garbage`,
 `nix-store --gc`, or `nix-store --optimize`.
@@ -90,13 +93,21 @@ The controller reads one JSON object from stdin:
 ```
 
 `operation` is `plan` for dry-run and `apply` for cleanup. Stdout is limited to
-64 KiB and must contain exactly one JSON response with matching version and
-operation, an `outcome` of `completed`, `deferred`, `refused`, or `no-op`, and
-a lowercase `sha256:<64 hex>` `receipt_digest`. A deferred response must include
-positive `retry_after_seconds`; only `completed` may report non-zero
-`bytes_freed` or `items_cleaned`. Unknown fields, trailing output, timeout,
-non-zero exit, invalid digest, or an over-limit response fail closed. Stderr is
-independently bounded and never parsed as authority.
+64 KiB and must contain exactly one JSON response with matching version,
+operation, and level; an `outcome` of `completed`, `deferred`, `refused`, or
+`no-op`; and a typed `receipt` using schema
+`tinyland.cleanup.nix-external-receipt.v1`. The envelope and receipt repeat the
+same bounded facts. `receipt_digest` must be the lowercase SHA-256 of the
+receipt's canonical compact JSON encoding, with fields ordered as `schema`,
+`protocol_version`, `operation`, `level`, `outcome`, `summary`,
+`estimated_bytes_freed`, `bytes_freed`, `items_cleaned`, and
+`retry_after_seconds`. A deferred response must include a
+positive, bounded `retry_after_seconds`; only an apply `completed` response may
+report non-zero applied bytes or items. Unknown fields, trailing output,
+timeout, non-zero exit, mismatched facts, invalid digest, or an over-limit
+response fail closed. Stderr is independently bounded and never parsed as
+authority. On Darwin and Linux, timeout cancellation kills the controller's
+entire private process group so mutation descendants cannot outlive it.
 
 Runtime behavior:
 

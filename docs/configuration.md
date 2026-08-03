@@ -55,11 +55,14 @@ policy:
 - `cooldown` avoids repeated cleanup churn.
 - `cooldown_bypass_level` lets urgent pressure bypass cooldown.
 - `minimum_free_gb` keeps cleaning until the host reaches a free-space runway.
-- `state_file` stores cooldown and no-progress state.
+- `state_file` stores cooldown and no-progress state. If persistence is
+  temporarily unavailable (including ENOSPC), the daemon retains the current
+  backoff state in memory and surfaces the write failure.
 - `zero_yield_limit` counts completed attempts that report neither reclaimed
   bytes nor cleaned items; `zero_yield_backoff` spaces later bounded probes.
-- `latest_cycle_receipt` is atomically replaced after every cycle and carries a
-  sha256 digest. `alert_repeat_interval` suppresses duplicate persisted alerts.
+- `latest_cycle_receipt` is a bounded, atomically replaced, sha256-bound proof
+  of the latest applied cycle. Dry-runs never create or replace it.
+  `alert_repeat_interval` suppresses duplicate persisted alerts.
 
 ## Plugins
 

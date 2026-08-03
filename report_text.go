@@ -272,6 +272,11 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 			return err
 		}
 	}
+	if len(plugin.Warnings) > 0 {
+		if err := writeTextList(w, "  warnings:", plugin.Warnings, 3); err != nil {
+			return err
+		}
+	}
 	if plugin.CooldownRemainingSeconds > 0 {
 		if _, err := fmt.Fprintf(w, "  cooldown remaining: %ds\n", plugin.CooldownRemainingSeconds); err != nil {
 			return err

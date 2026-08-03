@@ -15,7 +15,8 @@ Targets: Darwin developer machines and Linux/Rocky builder and runner hosts.
 - Cleanup stops once the free-space target is met and inode pressure has cleared.
 - Daemon cleanup honors cooldown below the configured bypass level.
 - Three consecutive zero-yield attempts open a bounded per-plugin backoff.
-- State and the latest cycle receipt are atomically replaced and digest-bound.
+- State and the bounded latest applied-cycle receipt are atomically replaced
+  and digest-bound; dry-runs do not mutate the receipt.
 - Privileged actions, offline compaction, and service disruption are opt-in.
 
 ## Quick start

@@ -85,6 +85,9 @@ type CleanupResult struct {
 	ItemsCleaned int
 	// Error if cleanup failed
 	Error error
+	// Warnings surface non-fatal control-state failures without erasing any
+	// cleanup yield that completed before the diagnostic was observed.
+	Warnings []string
 	// Outcome is the typed completion state for an attempted cleanup.
 	Outcome string
 	// ReceiptDigest binds an external authority receipt to this result.

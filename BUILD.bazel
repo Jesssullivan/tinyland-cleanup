@@ -234,15 +234,18 @@ go_library(
             "plugins/apfs_darwin.go",
             "plugins/darwin.go",
             "plugins/lima.go",
+            "plugins/nix_external_platform_unix.go",
             "plugins/nix_process_argv_darwin.go",
         ],
         "@platforms//os:linux": [
             "plugins/github_runner.go",
+            "plugins/nix_external_platform_unix.go",
             "plugins/nix_process_argv_linux.go",
             "plugins/yum.go",
         ],
         "//conditions:default": [
             "plugins/github_runner.go",
+            "plugins/nix_external_platform_other.go",
             "plugins/nix_process_argv_other.go",
             "plugins/yum.go",
         ],
@@ -271,10 +274,12 @@ go_test(
         "@platforms//os:macos": [
             "plugins/apfs_darwin_test.go",
             "plugins/darwin_dev_cache_test.go",
+            "plugins/nix_external_platform_unix_test.go",
             "plugins/nix_process_argv_darwin_test.go",
         ],
         "@platforms//os:linux": [
             "plugins/github_runner_linux_test.go",
+            "plugins/nix_external_platform_unix_test.go",
             "plugins/nix_process_argv_linux_test.go",
         ],
         "//conditions:default": ["plugins/github_runner_linux_test.go"],

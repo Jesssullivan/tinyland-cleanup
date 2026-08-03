@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -255,6 +256,18 @@ func TestLoadConfigRejectsUnsafeExternalNixGCAuthority(t *testing.T) {
 				t.Fatal("unsafe external Nix GC config must fail closed")
 			}
 		})
+	}
+}
+
+func TestLoadConfigRejectsNonPositivePollInterval(t *testing.T) {
+	for _, interval := range []int{0, -1} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(fmt.Sprintf("poll_interval: %d\n", interval)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatalf("poll_interval %d must fail closed", interval)
+		}
 	}
 }
 

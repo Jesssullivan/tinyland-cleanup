@@ -9,9 +9,11 @@ All notable changes to this project will be documented in this file.
 - Typed Nix GC authority selection. `nix.gc_authority: external` invokes an
   absolute argv directly (never through a shell) using a bounded versioned JSON
   plan/apply protocol and skips every builtin generation/GC mutation.
-- Atomic daemon state and latest-cycle receipts, typed external receipt digests,
-  persisted duplicate-alert rate limiting, and per-plugin byte+item zero-yield
-  circuit breaking.
+- Atomic daemon state and bounded latest applied-cycle receipts, typed and
+  cryptographically bound external receipt digests, persisted duplicate-alert
+  rate limiting, and per-plugin byte+item zero-yield circuit breaking. ENOSPC
+  persistence failures retain backoff state in memory, and dry-runs do not
+  replace durable receipts.
 
 ### Changed
 

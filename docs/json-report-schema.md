@@ -38,7 +38,9 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `cooldown_seconds` (int64, optional)
 - `stop_reason` (string, optional) — e.g. `target_free_met`
 - `state_file` (string, optional), `state_error` (string, optional)
-- `latest_cycle_receipt`, `receipt_digest`, `completed_at` (string, optional)
+- `latest_cycle_receipt`, `receipt_digest`, `completed_at` (string, optional).
+  Dry-runs omit the receipt path and digest and never mutate durable receipt
+  state.
 - `receipt_error` (string, optional) — atomic latest-cycle write failure
 - `alert_digest`, `alert_status` (string, optional) and
   `suppressed_duplicate_alerts` (int, optional)
@@ -65,12 +67,22 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `skip_reason` (string, optional) — e.g. `dry_run`, `cooldown`, `target_free_met`
 - `bytes_freed`, `estimated_bytes_freed`, `command_bytes_freed`, `host_bytes_freed` (int64); `items_cleaned` (int)
 - `cooldown_remaining_seconds` (int64, optional); `error` (string, optional)
+- `warnings` (array of bounded control-state warnings, optional)
 - `outcome` — `completed` | `deferred` | `refused` | `no-op`
 - `receipt_digest` (string, optional), `retry_after_seconds` (int64, optional)
 - `zero_yield_count`, `backoff_remaining_seconds` (int/int64, optional) and
   `backoff_reason` (`zero_yield_backoff`, `external_deferred`, or
   `external_refused_backoff`)
 - `plan` (object, optional) — dry-run plan with `targets`, byte accounting, and warnings
+
+## Durable latest-cycle receipt
+
+`latest_cycle_receipt` is not a copy of the potentially large JSON report. It
+uses schema `tinyland.cleanup-cycle-receipt.v1`, contains bounded cycle and
+plugin outcome summaries, is capped at 256 KiB, and is atomically replaced with
+mode `0600` only after an applied cycle. Its `receipt_digest` is SHA-256 over
+the canonical compact JSON receipt with that field empty. `plugin_count` and
+`truncated` make omitted plugin or warning detail explicit.
 
 ## Example (dry-run)
 
