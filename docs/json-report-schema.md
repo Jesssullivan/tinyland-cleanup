@@ -38,6 +38,10 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `cooldown_seconds` (int64, optional)
 - `stop_reason` (string, optional) — e.g. `target_free_met`
 - `state_file` (string, optional), `state_error` (string, optional)
+- `latest_cycle_receipt`, `receipt_digest`, `completed_at` (string, optional)
+- `receipt_error` (string, optional) — atomic latest-cycle write failure
+- `alert_digest`, `alert_status` (string, optional) and
+  `suppressed_duplicate_alerts` (int, optional)
 - `host_free_error` (string, optional)
 
 ### Plan and totals
@@ -61,6 +65,11 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `skip_reason` (string, optional) — e.g. `dry_run`, `cooldown`, `target_free_met`
 - `bytes_freed`, `estimated_bytes_freed`, `command_bytes_freed`, `host_bytes_freed` (int64); `items_cleaned` (int)
 - `cooldown_remaining_seconds` (int64, optional); `error` (string, optional)
+- `outcome` — `completed` | `deferred` | `refused` | `no-op`
+- `receipt_digest` (string, optional), `retry_after_seconds` (int64, optional)
+- `zero_yield_count`, `backoff_remaining_seconds` (int/int64, optional) and
+  `backoff_reason` (`zero_yield_backoff`, `external_deferred`, or
+  `external_refused_backoff`)
 - `plan` (object, optional) — dry-run plan with `targets`, byte accounting, and warnings
 
 ## Example (dry-run)

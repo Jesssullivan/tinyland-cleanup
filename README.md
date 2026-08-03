@@ -14,6 +14,8 @@ Targets: Darwin developer machines and Linux/Rocky builder and runner hosts.
 - Host free space and inodes are measured before and after each cycle.
 - Cleanup stops once the free-space target is met and inode pressure has cleared.
 - Daemon cleanup honors cooldown below the configured bypass level.
+- Three consecutive zero-yield attempts open a bounded per-plugin backoff.
+- State and the latest cycle receipt are atomically replaced and digest-bound.
 - Privileged actions, offline compaction, and service disruption are opt-in.
 
 ## Quick start
@@ -46,7 +48,7 @@ Linux hosts can install the RPM instead — see [Installation](docs/installation
 |---|---|---|
 | `--once --dry-run` | Plan only; change nothing | Reviewing a pressured host |
 | `--once` | Run one cleanup cycle and exit | Cron / systemd timer on a runner |
-| `--daemon` | Poll every `poll_interval`, keep cooldown state | Workstations (via Home Manager) |
+| `--daemon` | Wait `poll_interval` after each completed cycle, keep bounded state | Workstations (via Home Manager) |
 
 Pick one mode. Do not run `--daemon` and a `--once` cron together — their
 cooldown state conflicts. Details in [Usage](docs/usage.md).

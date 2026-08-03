@@ -224,6 +224,7 @@ go_library(
         "plugins/fs.go",
         "plugins/gitlab_runner.go",
         "plugins/nix.go",
+        "plugins/nix_external.go",
         "plugins/plugin.go",
         "plugins/podman.go",
         "plugins/rke2.go",
@@ -259,6 +260,7 @@ go_test(
     srcs = [
         "plugins/bazel_test.go",
         "plugins/devartifacts_test.go",
+        "plugins/nix_external_test.go",
         "plugins/nix_test.go",
         "plugins/plugin_pbt_test.go",
         "plugins/plugin_test.go",

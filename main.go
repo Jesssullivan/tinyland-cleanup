@@ -30,6 +30,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -266,19 +267,21 @@ type daemon struct {
 }
 
 func (d *daemon) run(ctx context.Context) error {
-	ticker := time.NewTicker(time.Duration(d.config.PollInterval) * time.Second)
-	defer ticker.Stop()
-
 	// Run immediately on start
 	if err := d.runOnce(ctx, monitor.LevelNone); err != nil {
 		d.logger.Error("initial cleanup failed", "error", err)
 	}
 
 	for {
+		// Allocate the next interval only after the prior cycle completes. A long
+		// scan therefore cannot leave a pending ticker event that starts another
+		// cycle immediately and creates a zero-yield scan storm.
+		timer := time.NewTimer(time.Duration(d.config.PollInterval) * time.Second)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
 			if err := d.runOnce(ctx, monitor.LevelNone); err != nil {
 				d.logger.Error("cleanup cycle failed", "error", err)
 			}
@@ -305,6 +308,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		Mounts:        assessment.Mounts,
 		PluginFilter:  d.pluginFilter,
 	}
+	report.LatestCycleReceipt = expandPathHome(d.config.Policy.LatestCycleReceipt)
 
 	cooldown := d.cleanupCooldown()
 	if cooldown > 0 {
@@ -337,7 +341,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 	}
 
 	if level == monitor.LevelNone {
-		return d.writeReport(report)
+		return d.finishCycle(report)
 	}
 
 	// Engage the inode-pressure circuit breaker for this cycle when inode-only
@@ -381,6 +385,18 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 			continue
 		}
 
+		if !d.dryRun && !report.ForcedLevel && stateErr == nil {
+			if remaining, reason := state.pluginBackoff(p.Name(), now); remaining > 0 {
+				pluginReport.WouldRun = false
+				pluginReport.SkipReason = reason
+				pluginReport.BackoffReason = reason
+				pluginReport.ZeroYieldCount = state.zeroYieldCount(p.Name())
+				pluginReport.BackoffRemainingSeconds = int64(remaining.Round(time.Second) / time.Second)
+				report.Plugins = append(report.Plugins, pluginReport)
+				continue
+			}
+		}
+
 		if d.shouldApplyCooldown(report, level) && stateErr == nil {
 			if remaining := state.cooldownRemaining(p.Name(), pluginLevel, now, cooldown); remaining > 0 {
 				pluginReport.WouldRun = false
@@ -412,27 +428,44 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		}
 
 		result := p.Cleanup(ctx, pluginLevel, d.config, d.logger)
+		if result.Outcome == "" {
+			switch {
+			case result.Error != nil:
+				result.Outcome = plugins.CleanupOutcomeRefused
+			case result.BytesFreed > 0 || result.ItemsCleaned > 0:
+				result.Outcome = plugins.CleanupOutcomeCompleted
+			default:
+				result.Outcome = plugins.CleanupOutcomeNoOp
+			}
+		}
 		pluginReport.BytesFreed = result.BytesFreed
 		pluginReport.EstimatedBytesFreed = result.EstimatedBytesFreed
 		pluginReport.CommandBytesFreed = result.CommandBytesFreed
 		pluginReport.HostBytesFreed = result.HostBytesFreed
 		pluginReport.ItemsCleaned = result.ItemsCleaned
+		pluginReport.Outcome = result.Outcome
+		pluginReport.ReceiptDigest = result.ReceiptDigest
+		pluginReport.RetryAfterSeconds = result.RetryAfterSeconds
 		if result.Error != nil {
 			pluginReport.Error = result.Error.Error()
-			report.Plugins = append(report.Plugins, pluginReport)
-			d.logger.Error("plugin failed", "plugin", p.Name(), "error", result.Error)
 			if stateErr == nil {
-				state.recordPluginRun(p.Name(), pluginLevel, now, result)
+				state.recordPluginRunWithPolicy(p.Name(), pluginLevel, d.currentTime(), result, d.zeroYieldLimit(), d.zeroYieldBackoff())
+				pluginReport.ZeroYieldCount = state.zeroYieldCount(p.Name())
 				stateDirty = true
 			}
+			report.Plugins = append(report.Plugins, pluginReport)
+			d.logger.Debug("plugin failed; persisted cycle alert owns warning cadence", "plugin", p.Name(), "error", result.Error)
 			continue
 		}
 
-		report.Plugins = append(report.Plugins, pluginReport)
 		if stateErr == nil {
-			state.recordPluginRun(p.Name(), pluginLevel, now, result)
+			state.recordPluginRunWithPolicy(p.Name(), pluginLevel, d.currentTime(), result, d.zeroYieldLimit(), d.zeroYieldBackoff())
+			pluginReport.ZeroYieldCount = state.zeroYieldCount(p.Name())
+			pluginReport.BackoffRemainingSeconds = int64(state.zeroYieldBackoffRemaining(p.Name(), d.currentTime()).Round(time.Second) / time.Second)
+			_, pluginReport.BackoffReason = state.pluginBackoff(p.Name(), d.currentTime())
 			stateDirty = true
 		}
+		report.Plugins = append(report.Plugins, pluginReport)
 		if result.BytesFreed > 0 || result.ItemsCleaned > 0 {
 			d.logger.Info("plugin completed",
 				"plugin", p.Name(),
@@ -471,6 +504,12 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		}
 	}
 
+	if !d.dryRun && stateErr == nil {
+		if d.recordCycleAlert(&report, state, d.currentTime()) {
+			stateDirty = true
+		}
+	}
+
 	if stateDirty {
 		if err := saveCleanupState(report.StateFile, state); err != nil {
 			report.StateError = err.Error()
@@ -493,7 +532,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		)
 	}
 
-	return d.writeReport(report)
+	return d.finishCycle(report)
 }
 
 type cycleReport struct {
@@ -523,11 +562,18 @@ type cycleReport struct {
 	InodeNoProgressCount int `json:"inode_no_progress_count,omitempty"`
 	// InodeBackoff reports that the inode-pressure circuit breaker engaged this
 	// cycle, so the daemon applied cooldown instead of bypassing it.
-	InodeBackoff    bool   `json:"inode_backoff,omitempty"`
-	HostFreeError   string `json:"host_free_error,omitempty"`
-	StateFile       string `json:"state_file,omitempty"`
-	StateError      string `json:"state_error,omitempty"`
-	CooldownSeconds int64  `json:"cooldown_seconds,omitempty"`
+	InodeBackoff              bool   `json:"inode_backoff,omitempty"`
+	HostFreeError             string `json:"host_free_error,omitempty"`
+	StateFile                 string `json:"state_file,omitempty"`
+	StateError                string `json:"state_error,omitempty"`
+	LatestCycleReceipt        string `json:"latest_cycle_receipt,omitempty"`
+	ReceiptDigest             string `json:"receipt_digest,omitempty"`
+	ReceiptError              string `json:"receipt_error,omitempty"`
+	CompletedAt               string `json:"completed_at,omitempty"`
+	AlertDigest               string `json:"alert_digest,omitempty"`
+	AlertStatus               string `json:"alert_status,omitempty"`
+	SuppressedDuplicateAlerts int    `json:"suppressed_duplicate_alerts,omitempty"`
+	CooldownSeconds           int64  `json:"cooldown_seconds,omitempty"`
 	// TargetUsedPercent is the legacy target_free config value as a maximum used percentage.
 	TargetUsedPercent int `json:"target_used_percent"`
 	// TargetFreeBytes is the free-space equivalent required to satisfy TargetUsedPercent.
@@ -587,6 +633,12 @@ type pluginCycleReport struct {
 	ItemsCleaned             int                  `json:"items_cleaned"`
 	CooldownRemainingSeconds int64                `json:"cooldown_remaining_seconds,omitempty"`
 	Error                    string               `json:"error,omitempty"`
+	Outcome                  string               `json:"outcome,omitempty"`
+	ReceiptDigest            string               `json:"receipt_digest,omitempty"`
+	RetryAfterSeconds        int64                `json:"retry_after_seconds,omitempty"`
+	ZeroYieldCount           int                  `json:"zero_yield_count,omitempty"`
+	BackoffRemainingSeconds  int64                `json:"backoff_remaining_seconds,omitempty"`
+	BackoffReason            string               `json:"backoff_reason,omitempty"`
 }
 
 type pluginListReport struct {
@@ -835,6 +887,36 @@ func (d *daemon) writeReport(report cycleReport) error {
 	return nil
 }
 
+func (d *daemon) finishCycle(report cycleReport) error {
+	report.CompletedAt = d.currentTime().UTC().Format(time.RFC3339)
+	report.ReceiptDigest = cycleReportDigest(report)
+	var receiptErr error
+	if report.LatestCycleReceipt != "" {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err == nil {
+			data = append(data, '\n')
+			err = writeAtomicFile(report.LatestCycleReceipt, data, 0644)
+		}
+		if err != nil {
+			receiptErr = err
+			report.ReceiptError = err.Error()
+		}
+	}
+	reportErr := d.writeReport(report)
+	if receiptErr != nil {
+		return fmt.Errorf("write latest cycle receipt: %w", receiptErr)
+	}
+	return reportErr
+}
+
+func cycleReportDigest(report cycleReport) string {
+	report.ReceiptDigest = ""
+	report.ReceiptError = ""
+	data, _ := json.Marshal(report)
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", digest[:])
+}
+
 func (d *daemon) getDiskStats(path string) (*monitor.DiskStats, error) {
 	if d.diskStats != nil {
 		return d.diskStats(path)
@@ -858,6 +940,74 @@ func (d *daemon) cleanupCooldown() time.Duration {
 		return 0
 	}
 	return duration
+}
+
+func (d *daemon) zeroYieldLimit() int {
+	if d.config == nil || d.config.Policy.ZeroYieldLimit <= 0 {
+		return 3
+	}
+	return d.config.Policy.ZeroYieldLimit
+}
+
+func (d *daemon) zeroYieldBackoff() time.Duration {
+	if d.config == nil || d.config.Policy.ZeroYieldBackoff == "" {
+		return 30 * time.Minute
+	}
+	duration, err := time.ParseDuration(d.config.Policy.ZeroYieldBackoff)
+	if err != nil || duration < 0 {
+		return 30 * time.Minute
+	}
+	return duration
+}
+
+func (d *daemon) alertRepeatInterval() time.Duration {
+	if d.config == nil || d.config.Policy.AlertRepeatInterval == "" {
+		return time.Hour
+	}
+	duration, err := time.ParseDuration(d.config.Policy.AlertRepeatInterval)
+	if err != nil || duration < 0 {
+		return time.Hour
+	}
+	return duration
+}
+
+func (d *daemon) recordCycleAlert(report *cycleReport, state *cleanupState, now time.Time) bool {
+	if report == nil || state == nil {
+		return false
+	}
+	parts := make([]string, 0, len(report.Plugins)+2)
+	if report.StateError != "" {
+		parts = append(parts, "state:"+report.StateError)
+	}
+	if report.HostFreeError != "" {
+		parts = append(parts, "host-free:"+report.HostFreeError)
+	}
+	for _, plugin := range report.Plugins {
+		switch {
+		case plugin.Error != "":
+			parts = append(parts, plugin.Name+":error:"+plugin.Error)
+		case plugin.BackoffRemainingSeconds > 0:
+			parts = append(parts, plugin.Name+":"+plugin.BackoffReason)
+		case plugin.Outcome == plugins.CleanupOutcomeRefused:
+			parts = append(parts, plugin.Name+":refused")
+		}
+	}
+	if len(parts) == 0 {
+		return false
+	}
+	sort.Strings(parts)
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	signature := fmt.Sprintf("sha256:%x", digest[:])
+	emit, suppressed := state.recordAlert(signature, now, d.alertRepeatInterval())
+	report.AlertDigest = signature
+	report.SuppressedDuplicateAlerts = suppressed
+	if emit {
+		report.AlertStatus = "emitted"
+		d.logger.Warn("cleanup cycle alert", "digest", signature, "conditions", strings.Join(parts, "; "))
+	} else {
+		report.AlertStatus = "suppressed_duplicate"
+	}
+	return true
 }
 
 func (d *daemon) loadStateForCycle() (*cleanupState, error) {

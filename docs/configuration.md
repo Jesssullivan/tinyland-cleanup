@@ -46,12 +46,20 @@ policy:
   cooldown_bypass_level: aggressive
   minimum_free_gb: 25
   state_file: ~/.local/state/tinyland-cleanup/state.json
+  zero_yield_limit: 3
+  zero_yield_backoff: 30m
+  latest_cycle_receipt: ~/.local/state/tinyland-cleanup/latest-cycle.json
+  alert_repeat_interval: 1h
 ```
 
 - `cooldown` avoids repeated cleanup churn.
 - `cooldown_bypass_level` lets urgent pressure bypass cooldown.
 - `minimum_free_gb` keeps cleaning until the host reaches a free-space runway.
 - `state_file` stores cooldown and no-progress state.
+- `zero_yield_limit` counts completed attempts that report neither reclaimed
+  bytes nor cleaned items; `zero_yield_backoff` spaces later bounded probes.
+- `latest_cycle_receipt` is atomically replaced after every cycle and carries a
+  sha256 digest. `alert_repeat_interval` suppresses duplicate persisted alerts.
 
 ## Plugins
 

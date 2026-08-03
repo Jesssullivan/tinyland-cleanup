@@ -45,6 +45,8 @@ Default policy:
 
 ```yaml
 nix:
+  gc_authority: builtin
+  external_argv: []
   min_user_generations: 5
   min_home_manager_generations: 5
   min_system_generations: 3
@@ -62,6 +64,39 @@ nix:
   max_gc_duration: 20m
   root_attribution_limit: 20
 ```
+
+## External GC authority
+
+Hosts with receipt-aware generation custody can delegate the entire Nix lane:
+
+```yaml
+nix:
+  gc_authority: external
+  external_argv:
+    - /nix/store/<hash>-neo-generation-controller/bin/neo-generation-controller
+    - gc-current
+```
+
+The first argv entry must be a clean absolute path. The daemon calls it
+directly with the remaining immutable arguments: there is no shell, PATH
+lookup, interpolation, or word splitting. In external mode the plugin never
+inspects or deletes generations and never invokes `nix-collect-garbage`,
+`nix-store --gc`, or `nix-store --optimize`.
+
+The controller reads one JSON object from stdin:
+
+```json
+{"protocol_version":1,"operation":"plan","level":"critical"}
+```
+
+`operation` is `plan` for dry-run and `apply` for cleanup. Stdout is limited to
+64 KiB and must contain exactly one JSON response with matching version and
+operation, an `outcome` of `completed`, `deferred`, `refused`, or `no-op`, and
+a lowercase `sha256:<64 hex>` `receipt_digest`. A deferred response must include
+positive `retry_after_seconds`; only `completed` may report non-zero
+`bytes_freed` or `items_cleaned`. Unknown fields, trailing output, timeout,
+non-zero exit, invalid digest, or an over-limit response fail closed. Stderr is
+independently bounded and never parsed as authority.
 
 Runtime behavior:
 

@@ -1265,6 +1265,22 @@ func TestCleanupPrunesNixTemporaryRootsBeforeWorkspaceScanBudget(t *testing.T) {
 	}
 }
 
+func TestDevArtifactScanBudgetsCannotBecomeUnbounded(t *testing.T) {
+	budget := newDevArtifactScanBudget(config.DevArtifactsConfig{})
+	if budget.maxDuration != 30*time.Second {
+		t.Fatalf("default scan duration = %s, want 30s", budget.maxDuration)
+	}
+	if budget.maxEntries != devArtifactDefaultScanMaxEntries {
+		t.Fatalf("default entry budget = %d", budget.maxEntries)
+	}
+	if budget.workspaceMaxRoots != devArtifactDefaultWorkspaceMaxRoots {
+		t.Fatalf("default workspace root budget = %d", budget.workspaceMaxRoots)
+	}
+	if budget.tempMaxRoots != devArtifactDefaultTempMaxRoots {
+		t.Fatalf("default temp root budget = %d", budget.tempMaxRoots)
+	}
+}
+
 func TestPlanCleanupProtectsActiveNixTemporaryRoots(t *testing.T) {
 	p := NewDevArtifactsPlugin()
 	tmpDir := t.TempDir()

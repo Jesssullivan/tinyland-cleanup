@@ -96,3 +96,54 @@ func TestLoadCleanupStateMissingFile(t *testing.T) {
 		t.Fatalf("expected empty plugin state, got %#v", state.Plugins)
 	}
 }
+
+func TestCleanupStateZeroYieldBackoffAndProgressReset(t *testing.T) {
+	state := newCleanupState()
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	zero := plugins.CleanupResult{Plugin: "nix", Level: plugins.LevelCritical, Outcome: plugins.CleanupOutcomeNoOp}
+	for index := 0; index < 3; index++ {
+		state.recordPluginRunWithPolicy("nix", plugins.LevelCritical, now.Add(time.Duration(index)*time.Minute), zero, 3, 30*time.Minute)
+	}
+	if got := state.zeroYieldCount("nix"); got != 3 {
+		t.Fatalf("zero-yield count = %d, want 3", got)
+	}
+	if got := state.zeroYieldBackoffRemaining("nix", now.Add(3*time.Minute)); got != 29*time.Minute {
+		t.Fatalf("backoff remaining = %s, want 29m", got)
+	}
+	progress := plugins.CleanupResult{Plugin: "nix", Level: plugins.LevelCritical, Outcome: plugins.CleanupOutcomeCompleted, BytesFreed: 1}
+	state.recordPluginRunWithPolicy("nix", plugins.LevelCritical, now.Add(4*time.Minute), progress, 3, 30*time.Minute)
+	if got := state.zeroYieldCount("nix"); got != 0 {
+		t.Fatalf("progress did not reset zero-yield count: %d", got)
+	}
+	if got := state.zeroYieldBackoffRemaining("nix", now.Add(4*time.Minute)); got != 0 {
+		t.Fatalf("progress did not clear backoff: %s", got)
+	}
+}
+
+func TestCleanupStateDeferredOutcomeDoesNotAdvanceZeroYield(t *testing.T) {
+	state := newCleanupState()
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	state.recordPluginRunWithPolicy("nix", plugins.LevelCritical, now, plugins.CleanupResult{
+		Plugin: "nix", Level: plugins.LevelCritical, Outcome: plugins.CleanupOutcomeDeferred, RetryAfterSeconds: 120,
+	}, 3, 30*time.Minute)
+	if got := state.zeroYieldCount("nix"); got != 0 {
+		t.Fatalf("deferred outcome advanced zero-yield count: %d", got)
+	}
+	if remaining, reason := state.pluginBackoff("nix", now); remaining != 2*time.Minute || reason != "external_deferred" {
+		t.Fatalf("deferred backoff = %s, %q; want 2m, external_deferred", remaining, reason)
+	}
+}
+
+func TestCleanupStateRateLimitsDuplicateAlerts(t *testing.T) {
+	state := newCleanupState()
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	if emit, _ := state.recordAlert("sha256:test", now, time.Hour); !emit {
+		t.Fatal("first alert should emit")
+	}
+	if emit, suppressed := state.recordAlert("sha256:test", now.Add(time.Minute), time.Hour); emit || suppressed != 1 {
+		t.Fatalf("duplicate alert = emit %t, suppressed %d; want false, 1", emit, suppressed)
+	}
+	if emit, _ := state.recordAlert("sha256:test", now.Add(2*time.Hour), time.Hour); !emit {
+		t.Fatal("alert should emit after repeat interval")
+	}
+}

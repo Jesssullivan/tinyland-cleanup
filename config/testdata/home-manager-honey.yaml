@@ -9,6 +9,10 @@ policy:
   cooldown: 30m
   cooldown_bypass_level: aggressive
   state_file: /home/jess/.local/state/tinyland-cleanup/state.json
+  zero_yield_limit: 3
+  zero_yield_backoff: 30m
+  latest_cycle_receipt: /home/jess/.local/state/tinyland-cleanup/latest-cycle.json
+  alert_repeat_interval: 1h
 log_file: /home/jess/.local/log/disk-cleanup.log
 enable:
   cache: true
@@ -79,6 +83,8 @@ podman:
   compact_provider_allowlist:
     - qemu
 nix:
+  gc_authority: builtin
+  external_argv: []
   min_user_generations: 5
   min_system_generations: 3
   host_measure_path: /nix

@@ -28,7 +28,12 @@ import (
 	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
 
-const devArtifactRecentOutputGrace = 2 * time.Hour
+const (
+	devArtifactRecentOutputGrace        = 2 * time.Hour
+	devArtifactDefaultScanMaxEntries    = 250000
+	devArtifactDefaultWorkspaceMaxRoots = 8
+	devArtifactDefaultTempMaxRoots      = 128
+)
 
 var tempArtifactPathPattern = regexp.MustCompile(`(?:/private)?/tmp/[^\s"'<>]+|/var/tmp/[^\s"'<>]+`)
 var absoluteDevArtifactPathPattern = regexp.MustCompile(`(?:~|/)[^\s"'<>]+`)
@@ -74,11 +79,23 @@ type devArtifactWorkspaceCursorState struct {
 }
 
 func newDevArtifactScanBudget(cfg config.DevArtifactsConfig) *devArtifactScanBudget {
+	maxEntries := cfg.ScanMaxEntries
+	if maxEntries <= 0 {
+		maxEntries = devArtifactDefaultScanMaxEntries
+	}
+	workspaceMaxRoots := cfg.WorkspaceScanMaxRoots
+	if workspaceMaxRoots <= 0 {
+		workspaceMaxRoots = devArtifactDefaultWorkspaceMaxRoots
+	}
+	tempMaxRoots := cfg.TempScanMaxRoots
+	if tempMaxRoots <= 0 {
+		tempMaxRoots = devArtifactDefaultTempMaxRoots
+	}
 	return &devArtifactScanBudget{
 		maxDuration:       parseNixPolicyDuration(cfg.ScanMaxDuration, 30*time.Second),
-		maxEntries:        cfg.ScanMaxEntries,
-		workspaceMaxRoots: cfg.WorkspaceScanMaxRoots,
-		tempMaxRoots:      cfg.TempScanMaxRoots,
+		maxEntries:        maxEntries,
+		workspaceMaxRoots: workspaceMaxRoots,
+		tempMaxRoots:      tempMaxRoots,
 		tempRootSeen:      map[string]struct{}{},
 		truncatedPath:     map[string]string{},
 	}
@@ -136,11 +153,39 @@ func (b *devArtifactScanBudget) saveWorkspaceCursors() {
 	if err := os.MkdirAll(filepath.Dir(b.workspaceCursorFile), 0755); err != nil {
 		return
 	}
-	tmp := b.workspaceCursorFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(b.workspaceCursorFile), ".tinyland-cleanup-cursor-*")
+	if err != nil {
 		return
 	}
-	_ = os.Rename(tmp, b.workspaceCursorFile)
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	data = append(data, '\n')
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	if err := os.Rename(tmpPath, b.workspaceCursorFile); err != nil {
+		return
+	}
+	dir, err := os.Open(filepath.Dir(b.workspaceCursorFile))
+	if err != nil {
+		return
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
+		return
+	}
 }
 
 func (b *devArtifactScanBudget) selectWorkspaceRoots(key string, roots []string) []string {

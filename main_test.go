@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -669,6 +670,66 @@ func TestRunOnceSkipsPluginDuringCooldown(t *testing.T) {
 	}
 }
 
+func TestRunOnceSkipsCriticalPluginDuringZeroYieldBackoff(t *testing.T) {
+	var output bytes.Buffer
+	mock := &reportingPlugin{}
+	daemon := newTestDaemon(t, mock, &output)
+	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	daemon.now = func() time.Time { return now }
+	state := newCleanupState()
+	zero := plugins.CleanupResult{Plugin: "reporting", Level: plugins.LevelCritical, Outcome: plugins.CleanupOutcomeNoOp}
+	for index := 0; index < 3; index++ {
+		state.recordPluginRunWithPolicy("reporting", plugins.LevelCritical, now.Add(time.Duration(index-3)*time.Minute), zero, 3, 30*time.Minute)
+	}
+	if err := saveCleanupState(daemon.config.Policy.StateFile, state); err != nil {
+		t.Fatal(err)
+	}
+	daemon.diskStats = sequenceDiskStats(t,
+		diskStats(1000, 20, 98),
+		diskStats(1000, 20, 98),
+	)
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	if mock.called {
+		t.Fatal("critical daemon cycle must respect the zero-yield circuit breaker")
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	if got := report.Plugins[0].SkipReason; got != "zero_yield_backoff" {
+		t.Fatalf("skip reason = %q, want zero_yield_backoff", got)
+	}
+}
+
+func TestRunOnceWritesAtomicLatestCycleReceipt(t *testing.T) {
+	var output bytes.Buffer
+	daemon := newTestDaemon(t, &reportingPlugin{}, &output)
+	daemon.diskStats = sequenceDiskStats(t, diskStats(1000, 500, 50))
+	if err := daemon.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	data, err := os.ReadFile(daemon.config.Policy.LatestCycleReceipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt cycleReport
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.ReceiptDigest == "" || receipt.ReceiptDigest != report.ReceiptDigest {
+		t.Fatalf("receipt digest mismatch: file=%q output=%q", receipt.ReceiptDigest, report.ReceiptDigest)
+	}
+	entries, err := os.ReadDir(filepath.Dir(daemon.config.Policy.LatestCycleReceipt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".tinyland-cleanup-atomic-") {
+			t.Fatalf("atomic temp file was not retired: %s", entry.Name())
+		}
+	}
+}
+
 func TestRunOnceCriticalBypassesCooldown(t *testing.T) {
 	var output bytes.Buffer
 	mock := &reportingPlugin{}
@@ -837,6 +898,7 @@ func newTestDaemonWithPlugins(t *testing.T, output io.Writer, registeredPlugins 
 	stateRoot := t.TempDir()
 	cfg.LogFile = filepath.Join(stateRoot, "disk-cleanup.log")
 	cfg.Policy.StateFile = filepath.Join(stateRoot, "state.json")
+	cfg.Policy.LatestCycleReceipt = filepath.Join(stateRoot, "latest-cycle.json")
 	registry := plugins.NewRegistry()
 	for _, plugin := range registeredPlugins {
 		registry.Register(plugin)

@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Typed Nix GC authority selection. `nix.gc_authority: external` invokes an
+  absolute argv directly (never through a shell) using a bounded versioned JSON
+  plan/apply protocol and skips every builtin generation/GC mutation.
+- Atomic daemon state and latest-cycle receipts, typed external receipt digests,
+  persisted duplicate-alert rate limiting, and per-plugin byte+item zero-yield
+  circuit breaking.
+
+### Changed
+
+- Daemon polling is completion-relative, so long cleanup cycles cannot leave a
+  pending ticker event that immediately starts another scan.
+- Dev-artifact duration, entry, workspace-root, and temporary-root budgets now
+  retain finite defaults even when a caller constructs an empty config; the
+  existing rotating cursor is durably replaced with an atomic write.
+
 ## [0.3.0] - 2026-06-24
 
 ### Added

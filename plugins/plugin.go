@@ -85,6 +85,12 @@ type CleanupResult struct {
 	ItemsCleaned int
 	// Error if cleanup failed
 	Error error
+	// Outcome is the typed completion state for an attempted cleanup.
+	Outcome string
+	// ReceiptDigest binds an external authority receipt to this result.
+	ReceiptDigest string
+	// RetryAfterSeconds is the authority-provided retry delay for deferrals.
+	RetryAfterSeconds int64
 }
 
 // CleanupPlan describes what a dry-run cleanup cycle would do.
@@ -111,7 +117,20 @@ type CleanupPlan struct {
 	Warnings []string `json:"warnings,omitempty"`
 	// Metadata carries plugin-specific plan facts.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// Outcome is the typed response from an external plan authority.
+	Outcome string `json:"outcome,omitempty"`
+	// ReceiptDigest binds the external plan receipt to this response.
+	ReceiptDigest string `json:"receipt_digest,omitempty"`
+	// RetryAfterSeconds is the authority-provided retry delay for deferrals.
+	RetryAfterSeconds int64 `json:"retry_after_seconds,omitempty"`
 }
+
+const (
+	CleanupOutcomeCompleted = "completed"
+	CleanupOutcomeDeferred  = "deferred"
+	CleanupOutcomeRefused   = "refused"
+	CleanupOutcomeNoOp      = "no-op"
+)
 
 // CleanupTarget is one concrete cleanup candidate in a dry-run plan.
 type CleanupTarget struct {

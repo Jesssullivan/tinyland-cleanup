@@ -67,6 +67,20 @@ func (p *NixPlugin) Enabled(cfg *config.Config) bool {
 
 // PlanCleanup returns a non-mutating Nix cleanup preflight plan.
 func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupPlan {
+	authority := strings.TrimSpace(cfg.Nix.GCAuthority)
+	if authority == "" {
+		authority = config.NixGCAuthorityBuiltin
+	}
+	if authority == config.NixGCAuthorityExternal {
+		return p.planExternalGC(ctx, level, cfg.Nix, logger)
+	}
+	if authority != config.NixGCAuthorityBuiltin || len(cfg.Nix.ExternalArgv) != 0 {
+		return CleanupPlan{
+			Plugin: p.Name(), Level: level.String(), Summary: "Nix GC authority configuration is invalid",
+			WouldRun: false, SkipReason: "invalid_gc_authority", Outcome: CleanupOutcomeRefused,
+			Warnings: []string{"Nix cleanup refused because gc_authority/external_argv did not pass the typed authority contract"},
+		}
+	}
 	plan := CleanupPlan{
 		Plugin:   p.Name(),
 		Level:    level.String(),
@@ -74,6 +88,7 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		WouldRun: true,
 		Steps:    nixPlanSteps(level, cfg.Nix),
 		Metadata: map[string]string{
+			"gc_authority":                                           config.NixGCAuthorityBuiltin,
 			"cleanup_level":                                          level.String(),
 			"min_user_generations":                                   strconv.Itoa(cfg.Nix.MinUserGenerations),
 			"min_home_manager_generations":                           strconv.Itoa(nixMinHomeManagerGenerations(cfg.Nix)),
@@ -190,6 +205,19 @@ func nixDeferPlan(plan *CleanupPlan, skipReason string, summary string, cfg conf
 
 // Cleanup performs Nix garbage collection at the specified level.
 func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
+	authority := strings.TrimSpace(cfg.Nix.GCAuthority)
+	if authority == "" {
+		authority = config.NixGCAuthorityBuiltin
+	}
+	if authority == config.NixGCAuthorityExternal {
+		return p.cleanupExternalGC(ctx, level, cfg.Nix, logger)
+	}
+	if authority != config.NixGCAuthorityBuiltin || len(cfg.Nix.ExternalArgv) != 0 {
+		return CleanupResult{
+			Plugin: p.Name(), Level: level, Outcome: CleanupOutcomeRefused,
+			Error: fmt.Errorf("nix cleanup refused: invalid gc_authority/external_argv configuration"),
+		}
+	}
 	result := CleanupResult{
 		Plugin: p.Name(),
 		Level:  level,
@@ -197,6 +225,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 
 	if !p.isNixAvailable() {
 		logger.Debug("nix not available, skipping")
+		result.Outcome = CleanupOutcomeNoOp
 		return result
 	}
 
@@ -204,11 +233,13 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		busy, err := p.activeNixProcesses(ctx)
 		if err != nil {
 			logger.Warn("could not inspect active Nix processes", "error", err)
+			markNixDeferred(&result, cfg.Nix)
 			return result
 		} else if len(busy) > 0 {
 			logger.Warn("skipping Nix cleanup because active Nix work was detected",
 				"processes", strings.Join(busy, ", "),
 				"backoff", cfg.Nix.DaemonBusyBackoff)
+			markNixDeferred(&result, cfg.Nix)
 			return result
 		}
 	}
@@ -236,6 +267,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 	if dryRunErr != nil {
 		if reason, ok := nixContentionReason(dryRunOutput); ok && cfg.Nix.SkipWhenDaemonBusy {
 			logger.Warn("skipping Nix garbage collection because dry-run preflight reported store contention", "reason", reason)
+			markNixDeferred(&result, cfg.Nix)
 			return result
 		}
 		logger.Warn("skipping Nix garbage collection because dry-run preflight failed",
@@ -245,6 +277,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		return result
 	} else if p.nixDryRunHasNoGCWork(dryRunOutput) && generationsDeleted == 0 && !(level == LevelCritical && cfg.Nix.AllowStoreOptimize) {
 		logger.Info("skipping Nix garbage collection because dry-run reported no reclaimable store paths")
+		result.Outcome = CleanupOutcomeNoOp
 		return result
 	}
 
@@ -256,6 +289,8 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		result.HostBytesFreed += gcResult.HostBytesFreed
 		result.ItemsCleaned += gcResult.ItemsCleaned
 		result.Error = gcResult.Error
+		result.Outcome = gcResult.Outcome
+		result.RetryAfterSeconds = gcResult.RetryAfterSeconds
 	case LevelCritical:
 		gcResult := p.collectGarbageCritical(ctx, cfg.Nix, logger)
 		result.BytesFreed += gcResult.BytesFreed
@@ -263,9 +298,19 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		result.HostBytesFreed += gcResult.HostBytesFreed
 		result.ItemsCleaned += gcResult.ItemsCleaned
 		result.Error = gcResult.Error
+		result.Outcome = gcResult.Outcome
+		result.RetryAfterSeconds = gcResult.RetryAfterSeconds
 	}
 
 	return result
+}
+
+func markNixDeferred(result *CleanupResult, cfg config.NixConfig) {
+	if result == nil {
+		return
+	}
+	result.Outcome = CleanupOutcomeDeferred
+	result.RetryAfterSeconds = int64(parseNixPolicyDuration(cfg.DaemonBusyBackoff, 30*time.Minute) / time.Second)
 }
 
 func (p *NixPlugin) isNixAvailable() bool {
@@ -345,6 +390,7 @@ func (p *NixPlugin) collectGarbage(ctx context.Context, level CleanupLevel, args
 	if err != nil {
 		if reason, ok := nixContentionReason(string(output)); ok && cfg.SkipWhenDaemonBusy {
 			logger.Warn("skipping Nix garbage collection because store contention was reported", "reason", reason)
+			markNixDeferred(&result, cfg)
 			return result
 		}
 		// com.apple.macl / App Management TCC semantics are Darwin-only; a chmod
@@ -425,8 +471,13 @@ func (p *NixPlugin) collectGarbageCritical(ctx context.Context, cfg config.NixCo
 	result.CommandBytesFreed = gcResult.CommandBytesFreed
 	result.HostBytesFreed = gcResult.HostBytesFreed
 	result.ItemsCleaned = gcResult.ItemsCleaned
+	result.Outcome = gcResult.Outcome
+	result.RetryAfterSeconds = gcResult.RetryAfterSeconds
 	if gcResult.Error != nil {
 		result.Error = gcResult.Error
+		return result
+	}
+	if gcResult.Outcome == CleanupOutcomeDeferred {
 		return result
 	}
 
