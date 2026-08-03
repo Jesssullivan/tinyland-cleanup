@@ -5,42 +5,77 @@ on:
     paths:
       - 'docs/**'
       - 'README.md'
+      - 'BUILD.bazel'
       - 'MODULE.bazel'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'Justfile'
+      - 'justfile.flywheel'
+      - '.bazelrc'
+      - '.bazelrc.flywheel'
+      - 'scripts/gloriousflywheel-bazel.sh'
       - '.github/workflows/docs-deploy.yml'
+  merge_group:
   push:
     branches: [main]
     paths:
       - 'docs/**'
       - 'README.md'
+      - 'BUILD.bazel'
       - 'MODULE.bazel'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'Justfile'
+      - 'justfile.flywheel'
+      - '.bazelrc'
+      - '.bazelrc.flywheel'
+      - 'scripts/gloriousflywheel-bazel.sh'
       - '.github/workflows/docs-deploy.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-# Allow one concurrent deployment; cancel in-progress runs for the same ref.
+# Cancel superseded builds only within the same ref. A PR or merge-group run
+# must never cancel an in-progress protected-main deployment.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     name: Build site
     runs-on: tinyland-nix
+    permissions:
+      contents: read
+    env:
+      ATTIC_TOKEN: ""
+      BAZEL_CREDENTIAL_HELPER: ""
+      BAZEL_REMOTE_CACHE_HEADER: ""
+      BAZEL_REMOTE_EXEC_HEADER: ""
+      BAZEL_REMOTE_EXECUTOR: ""
+      BAZEL_REMOTE_HEADER: ""
+      CACHIX_AUTH_TOKEN: ""
+      GH_TOKEN: ""
+      GITHUB_TOKEN: ""
+      NIX_CONFIG: experimental-features = nix-command flakes
     steps:
       - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
       - name: Build //docs:site
         env:
           BAZEL_OUTPUT_USER_ROOT: /tmp/tinyland-cleanup-bazel
+          BAZEL_REMOTE_UPLOAD: "false"
+          GF_BAZEL_SUBSTRATE_MODE: shared-cache-backed
           GF_BAZEL_REMOTE_UPLOAD: "false"
         run: |
           nix develop --command just flywheel-build //docs:site
       - name: Stage site output
         env:
           BAZEL_OUTPUT_USER_ROOT: /tmp/tinyland-cleanup-bazel
+          BAZEL_REMOTE_UPLOAD: "false"
+          GF_BAZEL_SUBSTRATE_MODE: shared-cache-backed
           GF_BAZEL_REMOTE_UPLOAD: "false"
         run: |
           bazel_bin="$(nix develop --command just flywheel-info bazel-bin | tail -n 1)"
@@ -56,8 +91,12 @@ jobs:
   deploy:
     name: Deploy to Pages
     needs: build
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: tinyland-nix
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
