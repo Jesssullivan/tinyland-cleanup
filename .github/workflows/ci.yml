@@ -2,10 +2,30 @@ name: CI
 
 on:
   pull_request:
+  merge_group:
   push:
     branches:
       - main
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+# PR-controlled checks receive public source inputs and a read-only cache
+# endpoint only. Clear common auth/publication channels inherited by a
+# long-lived runner; the checkout action receives its read token as an input
+# and never persists it.
+env:
+  ATTIC_TOKEN: ""
+  BAZEL_CREDENTIAL_HELPER: ""
+  BAZEL_REMOTE_CACHE_HEADER: ""
+  BAZEL_REMOTE_EXEC_HEADER: ""
+  BAZEL_REMOTE_EXECUTOR: ""
+  BAZEL_REMOTE_HEADER: ""
+  CACHIX_AUTH_TOKEN: ""
+  GH_TOKEN: ""
+  GITHUB_TOKEN: ""
+  NIX_CONFIG: experimental-features = nix-command flakes
 
 jobs:
   go:
@@ -13,6 +33,8 @@ jobs:
     runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
       - name: Version consistency
         run: |
           v="$(cat VERSION)"
@@ -35,9 +57,14 @@ jobs:
     runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
       - name: Test
         env:
           BAZEL_OUTPUT_USER_ROOT: /tmp/tinyland-cleanup-bazel
+          BAZEL_REMOTE_UPLOAD: "false"
+          GF_BAZEL_SUBSTRATE_MODE: shared-cache-backed
+          GF_BAZEL_REMOTE_UPLOAD: "false"
         run: nix develop --command just flywheel-test //...
 
   nix:
@@ -45,6 +72,8 @@ jobs:
     runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
       - name: Flake metadata
         run: nix flake check --no-build
       - name: Build package

@@ -27,15 +27,18 @@ nix develop --command just flywheel-test //...
 
 ## Shared-cache and remote-execution proof
 
-The repo imports the GloriousFlywheel front-door kit through `Justfile` and
-`.bazelrc`. The default devshell includes the lightweight
-`gloriousflywheel-frontdoor-tools` package, so the advertised consumer commands
-resolve from repo-managed Nix tooling without pulling REAPI token-exchange or
-credential-helper binaries into this first-adoption cache path:
+The repo owns an unprivileged GloriousFlywheel consumer kit through `Justfile`,
+`justfile.flywheel`, `.bazelrc.flywheel`, and
+`scripts/gloriousflywheel-bazel.sh`. The default devshell is composed only from
+public, lock-pinned Nix inputs; it does not fetch the private infrastructure
+repository or contain enrollment, token-exchange, credential-helper, or cache
+publication credentials. Runtime cache coordinates come from the runner or an
+explicitly prepared operator environment and are never sourced from a
+repo-local `.env` file. The wrapper can request upload only for the separately
+protected manual proof lane:
 
 ```sh
 just flywheel-doctor
-just flywheel-enroll shared-cache-backed --cache-endpoint "$BAZEL_REMOTE_CACHE"
 just flywheel-verify
 just flywheel-test //...
 ```
@@ -43,14 +46,24 @@ just flywheel-test //...
 Cache-backed validation on GloriousFlywheel runners:
 
 ```sh
+GF_BAZEL_SUBSTRATE_MODE=shared-cache-backed \
+GF_BAZEL_REMOTE_UPLOAD=false \
 BAZEL_REMOTE_CACHE=grpc://example.internal:9092 \
-  bash scripts/bazel-cache-backed.sh test //...
+  just flywheel-test //...
 ```
 
-Pull-request CI dogfoods the shared `tinyland-nix` runner lane and enters the
-same Nix devshell before Go, Bazel, and Nix package checks. Bazel CI uses the
-front-door kit (`just flywheel-test`), not a raw `bazelisk` command. Do not move
-normal CI back to `ubuntu-latest` as a cache or runner fallback.
+Pull-request and merge-group CI dogfood the shared `tinyland-nix` runner lane and enter the
+same public-input Nix devshell before Go, Bazel, and Nix package checks. Bazel
+and docs CI use the checked-in front-door kit (`just flywheel-test` and
+`just flywheel-build`), force remote upload off, and fail if the qualified
+shared cache is absent; they do not silently fall back to a local green build.
+PR and merge-group jobs have read-only repository permissions and do not persist the checkout
+token. They clear credential-helper, header, executor, Attic, CACHIX, and GitHub
+token environment channels. The runner-side PR cache capability must itself be
+server-enforced read-only: client-side upload flags are defense in depth, not
+publication authority. Pages write/OIDC authority exists only on the
+protected-main deploy job. Do not move normal CI back to `ubuntu-latest` as a
+cache or runner fallback.
 
 The shared runner currently executes jobs as root, so `MODULE.bazel` explicitly
 opts the docs Python toolchain into rules_python's root-user escape hatch. Remove

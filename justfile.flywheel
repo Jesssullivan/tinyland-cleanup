@@ -4,45 +4,35 @@
 #
 #   import? "justfile.flywheel"
 #
-# The commands assume `gloriousflywheel-frontdoor-tools` is on PATH through
-# `nix develop`, a fleet-managed NixOS/Home Manager profile, or an equivalent
-# operator-managed tool profile. This fragment must not set global Just
-# settings; consumer Justfiles commonly own settings such as `dotenv-load`.
+# The cache contract and Bazel wrapper are checked into this consumer repo.
+# Runtime endpoints arrive through the invoking environment; this fragment
+# never fetches private source, materializes credentials, or sources a
+# repo-local environment file. It must not set global Just settings.
 
-_flywheel_env := 'set -a; if [ -f .env.flywheel.local ]; then . ./.env.flywheel.local; fi; set +a'
-
-# Explain the current GloriousFlywheel enrollment/profile state.
+# Explain the current endpoint/profile classification without exposing values.
 flywheel-doctor *args:
-    @{{_flywheel_env}}; exec flywheel-doctor {{args}}
+    @exec ./scripts/validation/bazel-cache-contract.sh {{args}}
 
-# Fail unless the current shell is attached or explicitly in local-proof mode.
+# Fail unless the current shell is attached to a shared cache or executor.
 flywheel-verify *args:
-    @{{_flywheel_env}}; exec flywheel-verify {{args}}
-
-# Materialize a fallback .env.flywheel.local profile for a consumer repo.
-flywheel-enroll profile *args:
-    @{{_flywheel_env}}; exec flywheel-enroll "{{profile}}" {{args}}
-
-# Materialize a sourceable non-secret GloriousFlywheel Bazel profile.
-flywheel-consumer-env profile *args:
-    @{{_flywheel_env}}; exec flywheel-consumer-env "{{profile}}" {{args}}
+    @exec ./scripts/validation/bazel-cache-contract.sh --strict {{args}}
 
 # Run the GloriousFlywheel Bazel wrapper directly.
 flywheel-bazel command *args:
-    @{{_flywheel_env}}; exec gloriousflywheel-bazel "{{command}}" {{args}}
+    @exec ./scripts/gloriousflywheel-bazel.sh "{{command}}" {{args}}
 
 # Cache-backed Bazel build through the wrapper.
 flywheel-build *targets:
-    @{{_flywheel_env}}; exec gloriousflywheel-bazel build {{targets}}
+    @exec ./scripts/gloriousflywheel-bazel.sh build {{targets}}
 
 # Cache-backed Bazel test through the wrapper.
 flywheel-test *targets:
-    @{{_flywheel_env}}; exec gloriousflywheel-bazel test {{targets}}
+    @exec ./scripts/gloriousflywheel-bazel.sh test {{targets}}
 
 # Cache-backed Bazel fetch through the wrapper.
 flywheel-fetch *targets:
-    @{{_flywheel_env}}; exec gloriousflywheel-bazel fetch {{targets}}
+    @exec ./scripts/gloriousflywheel-bazel.sh fetch {{targets}}
 
 # Print Bazel info through the wrapper after profile validation.
 flywheel-info *args:
-    @{{_flywheel_env}}; exec gloriousflywheel-bazel info {{args}}
+    @exec ./scripts/gloriousflywheel-bazel.sh info {{args}}

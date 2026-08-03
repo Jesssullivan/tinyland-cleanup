@@ -4,27 +4,12 @@
 # Copy this file into a consumer repo, for example:
 #   scripts/gloriousflywheel-bazel.sh
 #
-# Endpoint values come from the environment and are passed as explicit Bazel
-# flags. Do not put deployment-specific remote_cache or remote_executor values
-# in .bazelrc files; Bazel rc files are not the cache authority.
+# Endpoint values come only from the invoking environment and are passed as
+# explicit Bazel flags. The wrapper never sources repo-local files or
+# materializes credentials. Do not put deployment-specific remote_cache or
+# remote_executor values in .bazelrc files; Bazel rc files are not authority.
 
 set -euo pipefail
-
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-candidate_envs=("${script_dir}/../.env.flywheel.local" "${PWD}/.env.flywheel.local")
-loaded_env=""
-for flywheel_env in "${candidate_envs[@]}"; do
-  if [[ -n ${loaded_env} && ${flywheel_env} == "${loaded_env}" ]]; then
-    continue
-  fi
-  if [[ -f ${flywheel_env} ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "${flywheel_env}"
-    set +a
-    loaded_env="${flywheel_env}"
-  fi
-done
 
 usage() {
   cat >&2 <<'EOF'
@@ -293,6 +278,10 @@ esac
 
 case "${upload}" in
 true | 1 | yes)
+  if [[ ${GITHUB_EVENT_NAME:-} == "pull_request" || ${GITHUB_EVENT_NAME:-} == "merge_group" ]]; then
+    echo "ERROR: pull-request and merge-group jobs cannot upload Bazel results." >&2
+    exit 1
+  fi
   upload_arg=(--remote_upload_local_results=true)
   ;;
 false | 0 | no | "")

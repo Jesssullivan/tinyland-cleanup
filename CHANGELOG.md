@@ -17,6 +17,12 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- PR/merge-group Go, Bazel, and docs checks now use only public lock-pinned Nix tools plus
+  the checked-in unprivileged GloriousFlywheel consumer wrapper. The private
+  infrastructure flake and auth-capable front-door package are no longer in
+  the devshell closure; PR jobs receive no cache publication credential,
+  request read-only cache operation, and do not persist checkout credentials.
+  Pages publication permissions are protected-main deploy-job-only.
 - Daemon polling is completion-relative, so long cleanup cycles cannot leave a
   pending ticker event that immediately starts another scan.
 - Dev-artifact duration, entry, workspace-root, and temporary-root budgets now
