@@ -471,6 +471,9 @@ func TestAPFSConfigDefaults(t *testing.T) {
 	if !cfg.APFS.DeleteOSUpdates {
 		t.Error("APFS.DeleteOSUpdates should be true by default")
 	}
+	if cfg.DevArtifacts.AgentTranscriptCodec != "zstd" {
+		t.Errorf("DevArtifacts.AgentTranscriptCodec should default to zstd (operator ruling R14, 2026-08-13), got %q", cfg.DevArtifacts.AgentTranscriptCodec)
+	}
 	if !cfg.Enable.ArchiveLifecycle {
 		t.Error("Enable.ArchiveLifecycle should be true by default")
 	}

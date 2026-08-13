@@ -266,6 +266,11 @@ dev_artifacts:
   agent_transcript_roots:
     - ~/.codex/sessions
   agent_transcript_compress_after: 14d
+  # Codec for new transcript writes: zstd (default) or gzip. The existing
+  # .jsonl.gz corpus stays readable and recognized either way, and a transcript
+  # that already has a compressed counterpart in either codec is never
+  # re-encoded into the other one.
+  agent_transcript_codec: zstd
   pnpm_store: false
   go_build_cache: true
   haskell_cache: true
