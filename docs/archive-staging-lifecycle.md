@@ -22,7 +22,7 @@ enable:
   archive_lifecycle: true
 
 archive_lifecycle:
-  dry_run: true            # default; plan only, never delete
+  dry_run: false           # default; set true for a planning-only pass
   retire_after: 14d        # default group age threshold
   max_groups_per_cycle: 32 # default verification budget per cycle
   sources:
@@ -33,9 +33,21 @@ archive_lifecycle:
       retire_after: 14d    # optional per-source override
 ```
 
-`dry_run` defaults to **true** and is independent of the global `--dry-run`
-flag. Retiring a pre-image is irreversible, so the first thing an operator sees
-is a plan.
+`dry_run` is independent of the global `--dry-run` flag and defaults to
+**false** (operator ruling R14, 2026-08-13).
+
+The per-file verification below *is* the gate. Nothing is retired that has not
+been proved byte-for-byte redundant against the archive target, the proof is
+re-run against live filesystem state immediately before deletion, and every
+ambiguity fails the whole group rather than the offending file. A second
+planning-only default would delay reclamation without adding safety.
+
+Set `dry_run: true` on a host that wants a planning-only pass, or use the global
+`--dry-run` flag for a one-off review:
+
+```sh
+tinyland-cleanup --once --dry-run --level moderate --plugins archive-lifecycle --output json
+```
 
 Relative paths under `staging_dir` must line up with relative paths under
 `target_dir`. A staging tree that carries a host prefix is configured *including*
