@@ -620,6 +620,24 @@ func TestBazelPolicyDefaults(t *testing.T) {
 	if cfg.Bazel.AllowDeleteActiveOutputBases {
 		t.Error("Bazel.AllowDeleteActiveOutputBases should be false by default")
 	}
+	if !cfg.Bazel.ReapOrphanedOutputBases {
+		t.Error("Bazel.ReapOrphanedOutputBases should be true by default")
+	}
+	if cfg.Bazel.OrphanStaleAfter != "7d" {
+		t.Errorf("Bazel.OrphanStaleAfter should be 7d, got %q", cfg.Bazel.OrphanStaleAfter)
+	}
+	if len(cfg.Bazel.OrphanWorkspaceMountRoots) == 0 {
+		t.Fatal("Bazel.OrphanWorkspaceMountRoots should have defaults")
+	}
+	var sawFilesystemRoot bool
+	for _, root := range cfg.Bazel.OrphanWorkspaceMountRoots {
+		if root == "/" {
+			sawFilesystemRoot = true
+		}
+	}
+	if !sawFilesystemRoot {
+		t.Errorf("Bazel.OrphanWorkspaceMountRoots must always include the filesystem root, got %#v", cfg.Bazel.OrphanWorkspaceMountRoots)
+	}
 }
 
 func TestDevArtifactPolicyDefaults(t *testing.T) {
