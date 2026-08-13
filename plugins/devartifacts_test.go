@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
+	"github.com/klauspost/compress/zstd"
 )
 
 func requireGit(t *testing.T) string {
@@ -1771,13 +1772,151 @@ func TestAgentTranscriptCompressionPreservesHistory(t *testing.T) {
 	if pathExists(transcript) {
 		t.Fatal("uncompressed transcript should be replaced")
 	}
-	gzPath := transcript + ".gz"
-	if !pathExists(gzPath) {
-		t.Fatal("compressed transcript should exist")
+	zstPath := transcript + ".zst"
+	if !pathExists(zstPath) {
+		t.Fatal("compressed transcript should exist as .zst under the default codec")
 	}
-	got := readGzipFile(t, gzPath)
-	if got != content {
+	if pathExists(transcript + ".gz") {
+		t.Fatal("the default codec must not also emit a .gz counterpart")
+	}
+	if got := readZstdFile(t, zstPath); got != content {
 		t.Fatal("compressed transcript did not preserve content")
+	}
+}
+
+func TestAgentTranscriptCompressionHonorsGzipCodec(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	transcript := filepath.Join(home, ".codex", "sessions", "2026", "05", "01", "rollout.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat(`{"event":"large transcript"}`+"\n", 2048)
+	if err := os.WriteFile(transcript, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(transcript, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := agentStateRetentionConfig(home)
+	cfg.DevArtifacts.AgentTranscriptCodec = "gzip"
+	result := newDevArtifactsPluginWithActive(nil).Cleanup(context.Background(), LevelModerate, cfg, devArtifactTestLogger())
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("expected one compressed transcript, got %#v", result)
+	}
+	if !pathExists(transcript + ".gz") {
+		t.Fatal("gzip codec should emit a .gz counterpart")
+	}
+	if pathExists(transcript + ".zst") {
+		t.Fatal("gzip codec must not emit a .zst counterpart")
+	}
+	if got := readGzipFile(t, transcript+".gz"); got != content {
+		t.Fatal("compressed transcript did not preserve content")
+	}
+}
+
+func TestAgentTranscriptCompressionSkipsAlreadyArchivedCorpus(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// A .jsonl.gz written by an earlier release must never be re-encoded as
+	// .jsonl.zst, and its .jsonl sibling must be left alone.
+	dir := filepath.Join(home, ".codex", "sessions", "2026", "05", "01")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(dir, "rollout.jsonl")
+	content := strings.Repeat(`{"event":"already archived"}`+"\n", 512)
+	if err := os.WriteFile(transcript, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeGzipFixture(t, transcript+".gz", content)
+	oldTime := time.Now().Add(-30 * 24 * time.Hour)
+	for _, path := range []string{transcript, transcript + ".gz"} {
+		if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := agentStateRetentionConfig(home)
+	result := newDevArtifactsPluginWithActive(nil).Cleanup(context.Background(), LevelModerate, cfg, devArtifactTestLogger())
+	if result.ItemsCleaned != 0 {
+		t.Fatalf("an already-archived transcript must not be recompressed, got %#v", result)
+	}
+	if pathExists(transcript + ".zst") {
+		t.Fatal("existing .gz corpus must not be re-encoded into .zst")
+	}
+	if !pathExists(transcript) {
+		t.Fatal("the original must not be removed when no new counterpart was written")
+	}
+	if got := readGzipFile(t, transcript+".gz"); got != content {
+		t.Fatal("existing .gz counterpart was modified")
+	}
+}
+
+func TestNormalizeAgentTranscriptCodec(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"", agentTranscriptCodecZstd},
+		{"zstd", agentTranscriptCodecZstd},
+		{"ZSTD", agentTranscriptCodecZstd},
+		{" gzip ", agentTranscriptCodecGzip},
+	} {
+		got, err := normalizeAgentTranscriptCodec(tc.in)
+		if err != nil {
+			t.Fatalf("normalize(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("normalize(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if _, err := normalizeAgentTranscriptCodec("brotli"); err == nil {
+		t.Fatal("an unrecognized codec must be rejected, never silently defaulted")
+	}
+}
+
+func TestCompressAgentTranscriptRejectsUnknownCodec(t *testing.T) {
+	dir := t.TempDir()
+	transcript := filepath.Join(dir, "rollout.jsonl")
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compressAgentTranscript(transcript, nil, "brotli"); err == nil {
+		t.Fatal("expected an unknown codec to fail")
+	}
+	if !pathExists(transcript) {
+		t.Fatal("a rejected codec must leave the original untouched")
+	}
+}
+
+// TestZstdTranscriptDeclaresFrameContentSize is the seam between this lane and
+// archive-lifecycle: a transcript compressed here must be verifiable from its
+// frame header alone, with no decompression pass.
+func TestZstdTranscriptDeclaresFrameContentSize(t *testing.T) {
+	dir := t.TempDir()
+	transcript := filepath.Join(dir, "rollout.jsonl")
+	content := strings.Repeat(`{"event":"frame size"}`+"\n", 4096)
+	if err := os.WriteFile(transcript, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := compressAgentTranscript(transcript, nil, "zstd"); err != nil {
+		t.Fatal(err)
+	}
+	declared, err := zstdDeclaredUncompressedSize(transcript + ".zst")
+	if err != nil {
+		t.Fatalf("zstd transcript must declare Frame_Content_Size: %v", err)
+	}
+	if declared != int64(len(content)) {
+		t.Fatalf("declared size = %d, want %d", declared, len(content))
+	}
+	if err := archiveCounterpartProvesSize(transcript, int64(len(content))); err != nil {
+		t.Fatalf("archive-lifecycle must accept a transcript this lane wrote: %v", err)
 	}
 }
 
@@ -1986,6 +2125,43 @@ func agentStateRetentionConfig(home string) *config.Config {
 	cfg.DevArtifacts.LargeLocalArtifacts = false
 	cfg.DevArtifacts.LMStudioModels = false
 	return cfg
+}
+
+func writeGzipFixture(t *testing.T, path string, content string) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := gzip.NewWriter(file)
+	if _, err := writer.Write([]byte(content)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readZstdFile(t *testing.T, path string) string {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	reader, err := zstd.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func readGzipFile(t *testing.T, path string) string {
