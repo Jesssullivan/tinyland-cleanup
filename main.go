@@ -1172,6 +1172,9 @@ func registerPlugins(registry *plugins.Registry) {
 	// Development artifact cleanup (all platforms)
 	registry.Register(plugins.NewDevArtifactsPlugin())
 
+	// Archive staging pre-image lifecycle (all platforms)
+	registry.Register(plugins.NewArchiveLifecyclePlugin())
+
 	// Kubernetes plugins (disabled by default, for future use)
 	registry.Register(plugins.NewEtcdPlugin())
 	registry.Register(plugins.NewRKE2Plugin())

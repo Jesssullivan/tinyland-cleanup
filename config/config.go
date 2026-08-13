@@ -66,6 +66,9 @@ type Config struct {
 	// APFS snapshot settings (Darwin)
 	APFS APFSConfig `yaml:"apfs"`
 
+	// Archive staging pre-image lifecycle settings
+	ArchiveLifecycle ArchiveLifecycleConfig `yaml:"archive_lifecycle"`
+
 	// Notification settings
 	Notify NotifyConfig `yaml:"notify"`
 }
@@ -158,6 +161,50 @@ type EnableFlags struct {
 	Bazel bool `yaml:"bazel"`
 	// APFSSnapshots for APFS snapshot thinning (Darwin)
 	APFSSnapshots bool `yaml:"apfs_snapshots"`
+	// ArchiveLifecycle for retiring verified archive staging pre-images
+	ArchiveLifecycle bool `yaml:"archive_lifecycle"`
+}
+
+// ArchiveLifecycleConfig holds settings for retiring archive staging pre-images
+// whose contents are provably present in a durable archive target.
+type ArchiveLifecycleConfig struct {
+	// DryRun keeps the plugin planning-only even outside global --dry-run.
+	//
+	// It defaults to false (operator ruling R14, 2026-08-13). The per-file
+	// verification is itself the gate: nothing is retired that has not been
+	// proved byte-for-byte redundant against the archive target, the proof is
+	// re-run immediately before deletion, and every ambiguity fails the whole
+	// group. A second planning-only default would delay reclamation without
+	// adding safety. The knob stays for hosts that want a planning-only pass.
+	DryRun bool `yaml:"dry_run"`
+	// RetireAfter is the default age a staging group must reach before it is
+	// eligible for retirement. Per-source values override it.
+	RetireAfter string `yaml:"retire_after"`
+	// MaxGroupsPerCycle bounds how many staging groups are verified per cycle so
+	// one very large staging tree cannot monopolize a cleanup pass.
+	MaxGroupsPerCycle int `yaml:"max_groups_per_cycle"`
+	// Sources are the staging/target pairs to reconcile.
+	Sources []ArchiveSourceConfig `yaml:"sources"`
+}
+
+// ArchiveSourceConfig describes one staging pre-image tree and the durable
+// archive target that is supposed to already contain it.
+type ArchiveSourceConfig struct {
+	// Name is a human-readable source name used in plans and logs.
+	Name string `yaml:"name"`
+	// StagingDir is the pre-image root. Relative paths under it must line up
+	// with relative paths under TargetDir, so a staging tree that carries a
+	// host prefix should be configured including that prefix.
+	StagingDir string `yaml:"staging_dir"`
+	// TargetDir is the durable archive root that must already hold every
+	// staging file, optionally in compressed form.
+	TargetDir string `yaml:"target_dir"`
+	// GroupDepth is the directory depth below StagingDir at which retirement is
+	// decided. The codex session archive is day-partitioned, so depth 3
+	// (YYYY/MM/DD) retires one verified day at a time.
+	GroupDepth int `yaml:"group_depth"`
+	// RetireAfter overrides the global age threshold for this source.
+	RetireAfter string `yaml:"retire_after"`
 }
 
 // PolicyConfig holds daemon-level cleanup policy settings.
@@ -491,19 +538,20 @@ func DefaultConfig() *Config {
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{
-			Cache:         true,
-			NixGC:         true,
-			Docker:        true,
-			Podman:        true,
-			Lima:          runtime.GOOS == "darwin",
-			Homebrew:      runtime.GOOS == "darwin",
-			IOSSimulator:  runtime.GOOS == "darwin",
-			GitLabRunner:  true,
-			ICloud:        runtime.GOOS == "darwin",
-			Photos:        runtime.GOOS == "darwin",
-			DevArtifacts:  true,
-			Bazel:         true,
-			APFSSnapshots: runtime.GOOS == "darwin",
+			Cache:            true,
+			NixGC:            true,
+			Docker:           true,
+			Podman:           true,
+			Lima:             runtime.GOOS == "darwin",
+			Homebrew:         runtime.GOOS == "darwin",
+			IOSSimulator:     runtime.GOOS == "darwin",
+			GitLabRunner:     true,
+			ICloud:           runtime.GOOS == "darwin",
+			Photos:           runtime.GOOS == "darwin",
+			DevArtifacts:     true,
+			Bazel:            true,
+			APFSSnapshots:    runtime.GOOS == "darwin",
+			ArchiveLifecycle: true,
 		},
 		Docker: DockerConfig{
 			PruneImagesAge:           "24h",
@@ -661,6 +709,11 @@ func DefaultConfig() *Config {
 			MaxThinGB:       50,
 			KeepRecentDays:  1,
 			DeleteOSUpdates: true,
+		},
+		ArchiveLifecycle: ArchiveLifecycleConfig{
+			DryRun:            false,
+			RetireAfter:       "14d",
+			MaxGroupsPerCycle: 32,
 		},
 		Notify: NotifyConfig{
 			Enabled: false,
