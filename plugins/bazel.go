@@ -41,7 +41,25 @@ type bazelCandidate struct {
 	Protected     bool
 	Action        string
 	Reason        string
+	// Workspace is the DO_NOT_BUILD_HERE workspace path claimed by an output base.
+	Workspace string
+	// WorkspaceState classifies the claimed workspace; see the bazelWorkspace* constants.
+	WorkspaceState string
 }
+
+const (
+	// bazelWorkspaceUnknown means no readable DO_NOT_BUILD_HERE claim was found.
+	bazelWorkspaceUnknown = ""
+	// bazelWorkspacePresent means the claimed workspace path still exists.
+	bazelWorkspacePresent = "present"
+	// bazelWorkspaceRemoved means the claimed workspace path is provably gone
+	// while its surrounding tree is still reachable.
+	bazelWorkspaceRemoved = "removed"
+	// bazelWorkspaceUnreachable means the claim could not be resolved safely:
+	// an unreadable marker, a relative path, an ambiguous stat error, or a
+	// workspace whose nearest surviving ancestor is only a mount container.
+	bazelWorkspaceUnreachable = "unreachable"
+)
 
 type bazelProcessInfo struct {
 	Reasons           []string
@@ -91,8 +109,10 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 			"Discover Bazel output bases, repository caches, disk caches, and Bazelisk downloads",
 			"Discover Bazel server logs that may contain captured client environments",
 			"Measure logical and physical bytes without following repo-local bazel-* symlinks",
+			"Resolve each output base's DO_NOT_BUILD_HERE workspace claim and classify it as present, removed, or unreachable",
 			"Protect active output bases, protected workspace output bases, and newest output bases",
 			"Delete only stale inactive output bases, stale inactive server logs, and budget-excess cache tiers in real cleanup mode at moderate or higher levels",
+			"Delete output bases whose workspace was provably removed once they pass the orphan age threshold, re-proving the claim immediately before deletion",
 			"Remove repo-local bazel-* symlinks only after their target output base was deleted",
 		},
 		Metadata: map[string]string{
@@ -104,6 +124,8 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 			"critical_stale_after":             cfg.Bazel.CriticalStaleAfter,
 			"allow_stop_idle_servers":          strconv.FormatBool(cfg.Bazel.AllowStopIdleServers),
 			"allow_delete_active_output_bases": strconv.FormatBool(cfg.Bazel.AllowDeleteActiveOutputBases),
+			"reap_orphaned_output_bases":       strconv.FormatBool(cfg.Bazel.ReapOrphanedOutputBases),
+			"orphan_stale_after":               cfg.Bazel.OrphanStaleAfter,
 		},
 	}
 
@@ -138,6 +160,13 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 	}
 	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
 
+	orphanCount, unreachableCount := bazelWorkspaceClaimCounts(candidates)
+	plan.Metadata["orphaned_workspace_output_base_count"] = strconv.Itoa(orphanCount)
+	plan.Metadata["unreachable_workspace_output_base_count"] = strconv.Itoa(unreachableCount)
+	if unreachableCount > 0 {
+		plan.Warnings = append(plan.Warnings, "some output bases carry a DO_NOT_BUILD_HERE workspace claim that could not be resolved safely; they are reported, never reaped as orphans")
+	}
+
 	plan.Targets = targets
 	plan.EstimatedBytesFreed = bazelEstimatedCandidateBytes(targets)
 	plan.Metadata["target_count"] = strconv.Itoa(len(targets))
@@ -167,7 +196,7 @@ func (p *BazelPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	}
 
 	home, _ := os.UserHomeDir()
-	result = applyBazelCleanupTargets(ctx, p.Name(), level, plan.Targets, cfg.Bazel.WorkspaceRoots, home, logger)
+	result = applyBazelCleanupTargetsWithConfig(ctx, p.Name(), level, plan.Targets, cfg.Bazel.WorkspaceRoots, home, cfg.Bazel, logger)
 	if result.ItemsCleaned == 0 {
 		logger.Info("Bazel cleanup found no eligible stale inactive output bases", "level", level.String())
 	}
@@ -234,6 +263,9 @@ func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, ac
 			candidates[i].Reason = "reachable from configured protected workspace"
 		}
 		if bazelCandidateIsOutputBaseLike(candidates[i].Type) {
+			workspace, state := bazelOutputBaseWorkspaceClaim(candidates[i].Path, cfg.OrphanWorkspaceMountRoots)
+			candidates[i].Workspace = workspace
+			candidates[i].WorkspaceState = state
 			activity := bazelOutputBaseActivity(candidates[i].Path)
 			if activity.Active {
 				mergeBazelCandidate(&candidates[i], bazelCandidate{
@@ -630,6 +662,92 @@ func bazelOutputBaseActivity(path string) bazelOutputBaseActivityInfo {
 	return bazelOutputBaseActivityInfo{}
 }
 
+// bazelOutputBaseWorkspaceClaim reads the DO_NOT_BUILD_HERE marker Bazel writes
+// into an output base and classifies the workspace it claims. It is
+// deliberately fail-closed: every ambiguous reading resolves to
+// bazelWorkspaceUnreachable (or bazelWorkspaceUnknown) so the orphan reaper
+// only ever acts on a workspace that is provably gone.
+func bazelOutputBaseWorkspaceClaim(outputBase string, mountRoots []string) (string, string) {
+	marker := filepath.Join(outputBase, "DO_NOT_BUILD_HERE")
+	info, err := os.Lstat(marker)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Older or partially initialized output bases have no marker.
+			return "", bazelWorkspaceUnknown
+		}
+		return "", bazelWorkspaceUnreachable
+	}
+	if !info.Mode().IsRegular() {
+		return "", bazelWorkspaceUnreachable
+	}
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		return "", bazelWorkspaceUnreachable
+	}
+	workspace := strings.TrimSpace(string(data))
+	if workspace == "" {
+		return "", bazelWorkspaceUnknown
+	}
+	if !filepath.IsAbs(workspace) {
+		// A relative claim cannot be resolved against a known working directory.
+		return workspace, bazelWorkspaceUnreachable
+	}
+	workspace = filepath.Clean(workspace)
+
+	if _, err := os.Lstat(workspace); err == nil {
+		return workspace, bazelWorkspacePresent
+	} else if !os.IsNotExist(err) {
+		// Permission denied, EIO, a stale network handle: not proof of removal.
+		return workspace, bazelWorkspaceUnreachable
+	}
+
+	ancestor, ok := nearestExistingAncestor(workspace)
+	if !ok {
+		return workspace, bazelWorkspaceUnreachable
+	}
+	if isBazelWorkspaceMountRoot(ancestor, mountRoots) {
+		// Everything below the mount container is missing, which is what an
+		// unmounted volume looks like. Refuse to call that an orphan.
+		return workspace, bazelWorkspaceUnreachable
+	}
+	return workspace, bazelWorkspaceRemoved
+}
+
+// nearestExistingAncestor walks up from path and returns the first ancestor
+// that exists. It reports false when an ancestor cannot be probed at all.
+func nearestExistingAncestor(path string) (string, bool) {
+	current := filepath.Dir(filepath.Clean(path))
+	for {
+		if _, err := os.Lstat(current); err == nil {
+			return current, true
+		} else if !os.IsNotExist(err) {
+			return "", false
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false
+		}
+		current = parent
+	}
+}
+
+func isBazelWorkspaceMountRoot(path string, mountRoots []string) bool {
+	clean := filepath.Clean(path)
+	if clean == string(os.PathSeparator) {
+		return true
+	}
+	for _, root := range mountRoots {
+		if root == "" {
+			continue
+		}
+		if filepath.Clean(root) == clean {
+			return true
+		}
+	}
+	return false
+}
+
 func bazelServerPIDIsAlive(path string) bool {
 	pid, err := bazelServerPID(path)
 	if err != nil {
@@ -699,6 +817,23 @@ func bazelPlanTargets(candidates []bazelCandidate, cfg config.BazelConfig, level
 	return targets, totalPhysical
 }
 
+func bazelWorkspaceClaimCounts(candidates []bazelCandidate) (int, int) {
+	var removed int
+	var unreachable int
+	for _, candidate := range candidates {
+		if !bazelCandidateIsOutputBaseLike(candidate.Type) {
+			continue
+		}
+		switch candidate.WorkspaceState {
+		case bazelWorkspaceRemoved:
+			removed++
+		case bazelWorkspaceUnreachable:
+			unreachable++
+		}
+	}
+	return removed, unreachable
+}
+
 func bazelBudgetExceeded(totalPhysical int64, cfg config.BazelConfig) bool {
 	return cfg.MaxTotalGB > 0 && totalPhysical > int64(cfg.MaxTotalGB)*bazelGiB
 }
@@ -739,6 +874,19 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 		cfg.AllowStopIdleServers &&
 		level >= LevelAggressive &&
 		stale
+	orphanStaleAfter := parseNixPolicyDuration(cfg.OrphanStaleAfter, 7*24*time.Hour)
+	orphanStale := !candidate.ModTime.After(now.Add(-orphanStaleAfter))
+	// Orphan candidates bypass keep_recent_output_bases because a removed
+	// workspace can never come back to reuse its output base. They never bypass
+	// active-use evidence or configured workspace protection.
+	orphanEligible := outputBaseLike &&
+		cfg.ReapOrphanedOutputBases &&
+		candidate.WorkspaceState == bazelWorkspaceRemoved &&
+		!candidate.Protected &&
+		level >= LevelModerate &&
+		orphanStale &&
+		(!active || cfg.AllowDeleteActiveOutputBases)
+
 	protected := candidate.Protected || protectedByRecent || (active && !cfg.AllowDeleteActiveOutputBases)
 	action := "review"
 	reason := "Bazel cache candidate requires operator review"
@@ -747,6 +895,10 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 	case candidate.Protected:
 		action = "keep"
 		reason = candidate.Reason
+	case orphanEligible:
+		action = "delete_orphaned_output_base"
+		protected = false
+		reason = fmt.Sprintf("DO_NOT_BUILD_HERE workspace %s no longer exists and the output base is older than %s", candidate.Workspace, orphanStaleAfter)
 	case protectedByRecent:
 		action = "keep"
 		reason = "within configured newest output-base retention"
@@ -810,6 +962,14 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 	if candidate.Logical > 0 && candidate.Logical != candidate.Physical {
 		target.LogicalBytes = candidate.Logical
 	}
+	if action != "delete_orphaned_output_base" {
+		switch candidate.WorkspaceState {
+		case bazelWorkspaceRemoved:
+			target.Reason = fmt.Sprintf("%s; DO_NOT_BUILD_HERE workspace %s no longer exists", target.Reason, candidate.Workspace)
+		case bazelWorkspaceUnreachable:
+			target.Reason = fmt.Sprintf("%s; DO_NOT_BUILD_HERE workspace claim could not be resolved safely", target.Reason)
+		}
+	}
 	annotateCleanupTargetPolicy(&target, bazelCandidateTier(candidate.Type), hostReclaimForAction(action))
 	return target
 }
@@ -852,6 +1012,10 @@ func bazelTargetReclaimsHost(target CleanupTarget) bool {
 }
 
 func applyBazelCleanupTargets(ctx context.Context, plugin string, level CleanupLevel, targets []CleanupTarget, workspaceRoots []string, home string, logger *slog.Logger) CleanupResult {
+	return applyBazelCleanupTargetsWithConfig(ctx, plugin, level, targets, workspaceRoots, home, config.BazelConfig{}, logger)
+}
+
+func applyBazelCleanupTargetsWithConfig(ctx context.Context, plugin string, level CleanupLevel, targets []CleanupTarget, workspaceRoots []string, home string, cfg config.BazelConfig, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: plugin, Level: level}
 	for _, target := range targets {
 		if !bazelTargetEligibleForDeletion(target) {
@@ -860,6 +1024,21 @@ func applyBazelCleanupTargets(ctx context.Context, plugin string, level CleanupL
 		if err := ctx.Err(); err != nil {
 			result.Error = err
 			return result
+		}
+		if target.Action == "delete_orphaned_output_base" {
+			// The plan can be minutes old by the time the largest candidates are
+			// reached. Re-prove the orphan claim and re-prove inactivity so a
+			// restored worktree or a resumed server survives.
+			if workspace, state := bazelOutputBaseWorkspaceClaim(target.Path, cfg.OrphanWorkspaceMountRoots); state != bazelWorkspaceRemoved {
+				logger.Info("skipping orphaned Bazel output base whose workspace claim no longer proves removal",
+					"path", target.Path, "workspace", workspace, "workspace_state", state)
+				continue
+			}
+			if activity := bazelOutputBaseActivity(target.Path); activity.Active && !cfg.AllowDeleteActiveOutputBases {
+				logger.Info("skipping orphaned Bazel output base that became active",
+					"path", target.Path, "reason", activity.Reason)
+				continue
+			}
 		}
 		if err := deleteBazelTarget(ctx, target, logger); err != nil {
 			logger.Warn("failed to delete Bazel target", "type", target.Type, "path", target.Path, "error", err)
@@ -874,7 +1053,12 @@ func applyBazelCleanupTargets(ctx context.Context, plugin string, level CleanupL
 		result.BytesFreed += target.Bytes
 		result.EstimatedBytesFreed += target.Bytes
 		result.ItemsCleaned++
-		logger.Info("deleted Bazel cleanup target", "type", target.Type, "path", target.Path, "estimated_bytes", target.Bytes)
+		logger.Info("deleted Bazel cleanup target",
+			"type", target.Type,
+			"action", target.Action,
+			"path", target.Path,
+			"estimated_bytes", target.Bytes,
+			"reason", target.Reason)
 	}
 	return result
 }
@@ -893,6 +1077,8 @@ func bazelTargetEligibleForDeletion(target CleanupTarget) bool {
 		return target.Type == "partial_output_base"
 	case "stop_idle_server_then_delete_output_base":
 		return target.Type == "output_base"
+	case "delete_orphaned_output_base":
+		return target.Type == "output_base" || target.Type == "partial_output_base"
 	case "delete_server_log":
 		return target.Type == "server_log"
 	case "delete_cache_tier":

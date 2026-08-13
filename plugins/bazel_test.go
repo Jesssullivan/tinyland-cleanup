@@ -1108,3 +1108,292 @@ func bytesOfSize(size int) []byte {
 	}
 	return data
 }
+
+func writeBazelWorkspaceMarker(t *testing.T, outputBase, workspace string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(outputBase, "DO_NOT_BUILD_HERE"), []byte(workspace+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func ageBazelPath(t *testing.T, path string, age time.Duration) {
+	t.Helper()
+	when := time.Now().Add(-age)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBazelOutputBaseWorkspaceClaimClassifies(t *testing.T) {
+	root := t.TempDir()
+	liveWorkspace := filepath.Join(root, "workspaces", "live")
+	mustMkdir(t, liveWorkspace)
+
+	present := filepath.Join(root, "present-ob")
+	makeBazelOutputBase(t, present)
+	writeBazelWorkspaceMarker(t, present, liveWorkspace)
+
+	removed := filepath.Join(root, "removed-ob")
+	makeBazelOutputBase(t, removed)
+	writeBazelWorkspaceMarker(t, removed, filepath.Join(root, "workspaces", "gone"))
+
+	noMarker := filepath.Join(root, "no-marker-ob")
+	makeBazelOutputBase(t, noMarker)
+
+	blank := filepath.Join(root, "blank-ob")
+	makeBazelOutputBase(t, blank)
+	writeBazelWorkspaceMarker(t, blank, "   ")
+
+	relative := filepath.Join(root, "relative-ob")
+	makeBazelOutputBase(t, relative)
+	writeBazelWorkspaceMarker(t, relative, "some/relative/path")
+
+	// A workspace whose entire ancestry is missing looks exactly like an
+	// unmounted volume, so it must never be classified as removed.
+	unmounted := filepath.Join(root, "unmounted-ob")
+	makeBazelOutputBase(t, unmounted)
+	writeBazelWorkspaceMarker(t, unmounted, filepath.Join(root, "mnt", "external", "git", "repo"))
+
+	mountRoots := []string{"/", filepath.Join(root, "mnt")}
+	mustMkdir(t, filepath.Join(root, "mnt"))
+
+	for _, tc := range []struct {
+		name       string
+		outputBase string
+		wantState  string
+	}{
+		{"present", present, bazelWorkspacePresent},
+		{"removed", removed, bazelWorkspaceRemoved},
+		{"missing marker", noMarker, bazelWorkspaceUnknown},
+		{"blank marker", blank, bazelWorkspaceUnknown},
+		{"relative claim", relative, bazelWorkspaceUnreachable},
+		{"mount container ancestor", unmounted, bazelWorkspaceUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, state := bazelOutputBaseWorkspaceClaim(tc.outputBase, mountRoots)
+			if state != tc.wantState {
+				t.Fatalf("state = %q, want %q", state, tc.wantState)
+			}
+		})
+	}
+}
+
+func TestBazelOutputBaseWorkspaceClaimRejectsNonRegularMarker(t *testing.T) {
+	root := t.TempDir()
+	outputBase := filepath.Join(root, "dir-marker-ob")
+	makeBazelOutputBase(t, outputBase)
+	mustMkdir(t, filepath.Join(outputBase, "DO_NOT_BUILD_HERE"))
+
+	if _, state := bazelOutputBaseWorkspaceClaim(outputBase, nil); state != bazelWorkspaceUnreachable {
+		t.Fatalf("state = %q, want %q", state, bazelWorkspaceUnreachable)
+	}
+}
+
+func TestBazelTargetForCandidateReapsOrphanedOutputBase(t *testing.T) {
+	cfg := config.BazelConfig{
+		ReapOrphanedOutputBases: true,
+		OrphanStaleAfter:        "7d",
+		KeepRecentOutputBases:   5,
+	}
+	now := time.Now()
+	candidate := bazelCandidate{
+		Type:           "output_base",
+		Name:           "workspace-deadbeef",
+		Path:           "/output/workspace-deadbeef",
+		ModTime:        now.Add(-30 * 24 * time.Hour),
+		Physical:       4096,
+		Workspace:      "/Users/jess/git/lab.worktrees/gone",
+		WorkspaceState: bazelWorkspaceRemoved,
+	}
+
+	// protectedByRecent is true: keep_recent must not shelter a dead workspace.
+	target := bazelTargetForCandidate(candidate, 14*24*time.Hour, now, true, false, false, LevelModerate, cfg)
+	if target.Action != "delete_orphaned_output_base" {
+		t.Fatalf("action = %q, want delete_orphaned_output_base", target.Action)
+	}
+	if target.Protected {
+		t.Fatal("orphaned output base must not stay protected")
+	}
+	if !strings.Contains(target.Reason, "/Users/jess/git/lab.worktrees/gone") {
+		t.Fatalf("reason %q should name the removed workspace", target.Reason)
+	}
+	if !bazelTargetEligibleForDeletion(target) {
+		t.Fatal("orphaned output base target should be deletion-eligible")
+	}
+}
+
+func TestBazelTargetForCandidateOrphanSafetyRails(t *testing.T) {
+	now := time.Now()
+	base := bazelCandidate{
+		Type:           "output_base",
+		Name:           "workspace-deadbeef",
+		Path:           "/output/workspace-deadbeef",
+		ModTime:        now.Add(-30 * 24 * time.Hour),
+		Physical:       4096,
+		Workspace:      "/gone",
+		WorkspaceState: bazelWorkspaceRemoved,
+	}
+	enabled := config.BazelConfig{ReapOrphanedOutputBases: true, OrphanStaleAfter: "7d"}
+
+	for _, tc := range []struct {
+		name      string
+		candidate bazelCandidate
+		cfg       config.BazelConfig
+		level     CleanupLevel
+	}{
+		{
+			name:      "disabled by config",
+			candidate: base,
+			cfg:       config.BazelConfig{ReapOrphanedOutputBases: false, OrphanStaleAfter: "7d"},
+			level:     LevelModerate,
+		},
+		{
+			name: "live server pid",
+			candidate: func() bazelCandidate {
+				c := base
+				c.Active = true
+				c.IdleServer = true
+				c.Reason = "idle Bazel server pid is alive"
+				return c
+			}(),
+			cfg:   enabled,
+			level: LevelModerate,
+		},
+		{
+			name: "protected workspace",
+			candidate: func() bazelCandidate {
+				c := base
+				c.Protected = true
+				c.Reason = "reachable from configured protected workspace"
+				return c
+			}(),
+			cfg:   enabled,
+			level: LevelModerate,
+		},
+		{
+			name: "younger than orphan threshold",
+			candidate: func() bazelCandidate {
+				c := base
+				c.ModTime = now.Add(-2 * 24 * time.Hour)
+				return c
+			}(),
+			cfg:   enabled,
+			level: LevelModerate,
+		},
+		{
+			name: "unreachable workspace claim",
+			candidate: func() bazelCandidate {
+				c := base
+				c.WorkspaceState = bazelWorkspaceUnreachable
+				return c
+			}(),
+			cfg:   enabled,
+			level: LevelModerate,
+		},
+		{
+			name:      "warning level is report-only",
+			candidate: base,
+			cfg:       enabled,
+			level:     LevelWarning,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := bazelTargetForCandidate(tc.candidate, 14*24*time.Hour, now, false, false, false, tc.level, tc.cfg)
+			if target.Action == "delete_orphaned_output_base" {
+				t.Fatalf("orphan reap must not trigger: %#v", target)
+			}
+		})
+	}
+}
+
+func TestApplyBazelCleanupTargetsReapsOrphanAndRevalidates(t *testing.T) {
+	root := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	orphan := filepath.Join(root, "orphan-ob")
+	makeBazelOutputBase(t, orphan)
+	writeBazelWorkspaceMarker(t, orphan, filepath.Join(root, "workspaces", "gone"))
+
+	restored := filepath.Join(root, "restored-ob")
+	makeBazelOutputBase(t, restored)
+	restoredWorkspace := filepath.Join(root, "workspaces", "restored")
+	mustMkdir(t, restoredWorkspace)
+	writeBazelWorkspaceMarker(t, restored, restoredWorkspace)
+
+	mustMkdir(t, filepath.Join(root, "workspaces"))
+
+	targets := []CleanupTarget{
+		{Type: "output_base", Name: "orphan-ob", Path: orphan, Bytes: 1024, Action: "delete_orphaned_output_base"},
+		// Planned as an orphan, but the workspace came back before apply.
+		{Type: "output_base", Name: "restored-ob", Path: restored, Bytes: 1024, Action: "delete_orphaned_output_base"},
+	}
+
+	result := applyBazelCleanupTargetsWithConfig(context.Background(), "bazel", LevelModerate, targets, nil, root, config.BazelConfig{}, logger)
+	if result.ItemsCleaned != 1 {
+		t.Fatalf("ItemsCleaned = %d, want 1", result.ItemsCleaned)
+	}
+	if pathExists(orphan) {
+		t.Fatalf("orphaned output base %s should be deleted", orphan)
+	}
+	if !pathExists(restored) {
+		t.Fatalf("restored output base %s must survive re-validation", restored)
+	}
+}
+
+func TestDiscoverCandidatesClassifiesWorkspaceClaims(t *testing.T) {
+	root := t.TempDir()
+
+	orphan := filepath.Join(root, "orphan-ob")
+	makeBazelOutputBase(t, orphan)
+	writeBazelWorkspaceMarker(t, orphan, filepath.Join(root, "workspaces", "gone"))
+	ageBazelPath(t, orphan, 30*24*time.Hour)
+	mustMkdir(t, filepath.Join(root, "workspaces"))
+
+	unreachable := filepath.Join(root, "unreachable-ob")
+	makeBazelOutputBase(t, unreachable)
+	writeBazelWorkspaceMarker(t, unreachable, "relative/claim")
+	ageBazelPath(t, unreachable, 30*24*time.Hour)
+
+	cfg := config.BazelConfig{
+		Roots:                   []string{root},
+		ReapOrphanedOutputBases: true,
+		OrphanStaleAfter:        "7d",
+	}
+
+	candidates := (&BazelPlugin{}).discoverCandidates(root, cfg, bazelProcessInfo{})
+	removed, unresolved := bazelWorkspaceClaimCounts(candidates)
+	if removed != 1 {
+		t.Fatalf("removed workspace claims = %d, want 1: %#v", removed, candidates)
+	}
+	if unresolved != 1 {
+		t.Fatalf("unreachable workspace claims = %d, want 1: %#v", unresolved, candidates)
+	}
+
+	targets, _ := bazelPlanTargets(candidates, cfg, LevelModerate, time.Now(), false)
+	resolvedOrphan, err := filepath.EvalSymlinks(orphan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedUnreachable, err := filepath.EvalSymlinks(unreachable)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sawOrphanAction bool
+	for _, target := range targets {
+		if target.Action != "delete_orphaned_output_base" {
+			continue
+		}
+		switch target.Path {
+		case resolvedOrphan:
+			sawOrphanAction = true
+		case resolvedUnreachable:
+			t.Fatal("unreachable workspace claim must never be reaped as an orphan")
+		default:
+			t.Fatalf("orphan action on unexpected path %s", target.Path)
+		}
+	}
+	if !sawOrphanAction {
+		t.Fatalf("expected an orphan reap target, got %#v", targets)
+	}
+}
