@@ -249,7 +249,10 @@ go_library(
     }),
     importpath = "github.com/Jesssullivan/tinyland-cleanup/plugins",
     visibility = ["//visibility:public"],
-    deps = [":config"] + select({
+    deps = [
+        ":config",
+        "@com_github_klauspost_compress//zstd",
+    ] + select({
         "@platforms//os:macos": ["@org_golang_x_sys//unix"],
         "//conditions:default": [],
     }),

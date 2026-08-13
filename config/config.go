@@ -411,6 +411,11 @@ type DevArtifactsConfig struct {
 	AgentTranscriptRoots []string `yaml:"agent_transcript_roots"`
 	// AgentTranscriptCompressAfter is the age after which JSONL transcripts are compressed.
 	AgentTranscriptCompressAfter string `yaml:"agent_transcript_compress_after"`
+	// AgentTranscriptCodec is the compression codec used for new transcript
+	// writes: "zstd" (default) or "gzip". The existing .jsonl.gz corpus stays
+	// readable and recognized either way, and an already-archived transcript is
+	// never re-encoded into the other codec.
+	AgentTranscriptCodec string `yaml:"agent_transcript_codec"`
 	// PnpmStore enables pnpm store prune for the rebuildable global package store.
 	PnpmStore bool `yaml:"pnpm_store"`
 	// GoBuildCache enables Go build cache cleanup
@@ -645,6 +650,7 @@ func DefaultConfig() *Config {
 			AgentTranscriptCompression:   false,
 			AgentTranscriptRoots:         []string{filepath.Join(home, ".codex", "sessions")},
 			AgentTranscriptCompressAfter: "14d",
+			AgentTranscriptCodec:         "zstd",
 			PnpmStore:                    false,
 			GoBuildCache:                 true,
 			HaskellCache:                 true,

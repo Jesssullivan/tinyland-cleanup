@@ -74,6 +74,11 @@ Both compressed forms are **O(1) reads of declared metadata**. Nothing is
 decompressed, so verification of a 145G staging tree costs a few thousand short
 reads rather than a full decompression pass.
 
+The `dev-artifacts` agent-transcript lane writes `.zst` counterparts that always
+carry `Frame_Content_Size`, so transcripts compressed by this daemon are
+verifiable here from the frame header alone. A transcript compressed with the
+`gzip` codec is verifiable through its `ISIZE` trailer on the same terms.
+
 A group is verified only when it holds at least one regular file, every file
 matched a counterpart, and no entry was skipped. Any of the following fails the
 **whole group**, not just the offending file:

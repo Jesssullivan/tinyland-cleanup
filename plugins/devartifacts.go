@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
+	"github.com/klauspost/compress/zstd"
 )
 
 const devArtifactRecentOutputGrace = 2 * time.Hour
@@ -1105,19 +1106,25 @@ func (p *DevArtifactsPlugin) cleanAgentWorktreeArtifacts(ctx context.Context, ho
 
 func (p *DevArtifactsPlugin) compressAgentTranscripts(ctx context.Context, home string, staleAfter time.Duration, daCfg config.DevArtifactsConfig, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
 	var totalFreed int64
+	codec, err := normalizeAgentTranscriptCodec(daCfg.AgentTranscriptCodec)
+	if err != nil {
+		// An unrecognized codec is a config error, not a reason to guess.
+		logger.Warn("skipping agent transcript compression", "error", err)
+		return 0
+	}
 	p.forEachAgentTranscript(ctx, home, staleAfter, daCfg, func(path string, info os.FileInfo, activeReason string) {
 		if activeReason != "" {
 			logger.Debug("preserving active agent transcript", "path", path, "reason", activeReason)
 			return
 		}
-		freed, err := gzipAgentTranscript(path, info)
+		freed, err := compressAgentTranscript(path, info, codec)
 		if err != nil {
 			logger.Warn("failed to compress agent transcript", "path", path, "error", err)
 			return
 		}
 		totalFreed += freed
 		if freed > 0 {
-			logger.Info("compressed agent transcript", "path", path, "freed_mb", freed/(1024*1024))
+			logger.Info("compressed agent transcript", "path", path, "codec", codec, "freed_mb", freed/(1024*1024))
 		}
 	}, budgets...)
 	return totalFreed
@@ -2803,9 +2810,77 @@ func agentCommandNameFromProcessLine(line string) string {
 	return command
 }
 
-func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
+// Agent transcript compression codecs. gzip is the historical codec and the
+// existing .jsonl.gz corpus stays readable and recognized forever; zstd is the
+// default for new writes (operator ruling R14, 2026-08-13) because it roughly
+// halves the archived footprint of JSONL transcripts at comparable CPU cost.
+const (
+	agentTranscriptCodecGzip = "gzip"
+	agentTranscriptCodecZstd = "zstd"
+)
+
+// agentTranscriptCompressedSuffixes are the suffixes that mean a transcript has
+// already been archived. A .jsonl.gz written by an earlier release is never
+// rewritten as .jsonl.zst: re-encoding an archived transcript buys a little
+// space and spends provenance.
+var agentTranscriptCompressedSuffixes = []string{".gz", ".zst"}
+
+// normalizeAgentTranscriptCodec resolves the configured codec, falling back to
+// zstd for an empty value and rejecting anything unrecognized rather than
+// silently picking a codec the operator did not ask for.
+func normalizeAgentTranscriptCodec(codec string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "":
+		return agentTranscriptCodecZstd, nil
+	case agentTranscriptCodecGzip:
+		return agentTranscriptCodecGzip, nil
+	case agentTranscriptCodecZstd:
+		return agentTranscriptCodecZstd, nil
+	default:
+		return "", fmt.Errorf("unsupported agent transcript codec %q; want %q or %q", codec, agentTranscriptCodecGzip, agentTranscriptCodecZstd)
+	}
+}
+
+func agentTranscriptCodecSuffix(codec string) string {
+	if codec == agentTranscriptCodecGzip {
+		return ".gz"
+	}
+	return ".zst"
+}
+
+// agentTranscriptAlreadyArchived reports whether a transcript already has a
+// compressed counterpart in any supported codec.
+func agentTranscriptAlreadyArchived(path string) bool {
+	for _, suffix := range agentTranscriptCompressedSuffixes {
+		if pathExists(path + suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// newAgentTranscriptCompressor returns a WriteCloser that encodes into w.
+func newAgentTranscriptCompressor(w io.Writer, codec string) (io.WriteCloser, error) {
+	if codec == agentTranscriptCodecGzip {
+		return gzip.NewWriterLevel(w, gzip.BestCompression)
+	}
+	return zstd.NewWriter(w,
+		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
+		// Frame_Content_Size lets archive-lifecycle prove redundancy from the
+		// frame header alone, with no decompression pass.
+		zstd.WithEncoderCRC(true),
+	)
+}
+
+// compressAgentTranscript replaces a transcript JSONL with a compressed
+// counterpart, preserving mode and mtime. It is atomic at the rename: a failure
+// anywhere before it leaves the original untouched and removes the temp file.
+func compressAgentTranscript(path string, info os.FileInfo, codec string) (int64, error) {
+	codec, err := normalizeAgentTranscriptCodec(codec)
+	if err != nil {
+		return 0, err
+	}
 	if info == nil {
-		var err error
 		info, err = os.Stat(path)
 		if err != nil {
 			return 0, err
@@ -2814,10 +2889,12 @@ func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
 	if !info.Mode().IsRegular() {
 		return 0, nil
 	}
-	dest := path + ".gz"
-	if pathExists(dest) {
+	if agentTranscriptAlreadyArchived(path) {
 		return 0, nil
 	}
+
+	suffix := agentTranscriptCodecSuffix(codec)
+	dest := path + suffix
 
 	input, err := os.Open(path)
 	if err != nil {
@@ -2825,7 +2902,7 @@ func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
 	}
 	defer input.Close()
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.gz")
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*"+suffix)
 	if err != nil {
 		return 0, err
 	}
@@ -2837,7 +2914,7 @@ func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
 		}
 	}()
 
-	writer, err := gzip.NewWriterLevel(tmp, gzip.BestCompression)
+	writer, err := newAgentTranscriptCompressor(tmp, codec)
 	if err != nil {
 		_ = tmp.Close()
 		return 0, err
