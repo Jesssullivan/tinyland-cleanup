@@ -344,9 +344,11 @@ notify:
 # target_dir, so a staging tree carrying a host prefix is configured including
 # that prefix (".../codex-session-archive/neo", not ".../codex-session-archive").
 archive_lifecycle:
-  # Planning-only by default. Retiring a pre-image is irreversible, so the first
-  # thing an operator should see is a plan.
-  dry_run: true
+  # Live by default (operator ruling R14, 2026-08-13). The per-file verification
+  # is the gate: nothing is retired that has not been proved redundant against
+  # the archive target, the proof is re-run immediately before deletion, and any
+  # ambiguity fails the whole group. Set true for a planning-only pass.
+  dry_run: false
   retire_after: 14d
   max_groups_per_cycle: 32
   sources: []

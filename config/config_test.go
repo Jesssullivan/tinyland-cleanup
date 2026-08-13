@@ -474,8 +474,8 @@ func TestAPFSConfigDefaults(t *testing.T) {
 	if !cfg.Enable.ArchiveLifecycle {
 		t.Error("Enable.ArchiveLifecycle should be true by default")
 	}
-	if !cfg.ArchiveLifecycle.DryRun {
-		t.Error("ArchiveLifecycle.DryRun must default to true: retiring a pre-image is irreversible")
+	if cfg.ArchiveLifecycle.DryRun {
+		t.Error("ArchiveLifecycle.DryRun must default to false (operator ruling R14, 2026-08-13): per-file verification is the gate")
 	}
 	if cfg.ArchiveLifecycle.RetireAfter != "14d" {
 		t.Errorf("ArchiveLifecycle.RetireAfter should be 14d, got %q", cfg.ArchiveLifecycle.RetireAfter)

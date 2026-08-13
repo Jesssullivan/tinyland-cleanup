@@ -168,9 +168,14 @@ type EnableFlags struct {
 // ArchiveLifecycleConfig holds settings for retiring archive staging pre-images
 // whose contents are provably present in a durable archive target.
 type ArchiveLifecycleConfig struct {
-	// DryRun keeps the plugin planning-only even outside global --dry-run. It
-	// defaults to true: retiring a staging pre-image is irreversible, so the
-	// first thing an operator should see is a plan, not a deletion.
+	// DryRun keeps the plugin planning-only even outside global --dry-run.
+	//
+	// It defaults to false (operator ruling R14, 2026-08-13). The per-file
+	// verification is itself the gate: nothing is retired that has not been
+	// proved byte-for-byte redundant against the archive target, the proof is
+	// re-run immediately before deletion, and every ambiguity fails the whole
+	// group. A second planning-only default would delay reclamation without
+	// adding safety. The knob stays for hosts that want a planning-only pass.
 	DryRun bool `yaml:"dry_run"`
 	// RetireAfter is the default age a staging group must reach before it is
 	// eligible for retirement. Per-source values override it.
@@ -706,7 +711,7 @@ func DefaultConfig() *Config {
 			DeleteOSUpdates: true,
 		},
 		ArchiveLifecycle: ArchiveLifecycleConfig{
-			DryRun:            true,
+			DryRun:            false,
 			RetireAfter:       "14d",
 			MaxGroupsPerCycle: 32,
 		},
