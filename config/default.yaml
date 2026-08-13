@@ -56,6 +56,7 @@ enable:
   yum: true             # DNF/YUM package cache cleanup (Linux only)
   dev_artifacts: true   # Rebuildable workspace artifacts
   bazel: true           # Bazel output base and cache cleanup planning
+  archive_lifecycle: true  # Retire verified archive staging pre-images
 
 # GitHub Actions runner settings (Linux only)
 github_runner:
@@ -327,3 +328,31 @@ lima:
 notify:
   enabled: false
   # webhook_url: "https://hooks.slack.com/services/..."
+
+# Archive staging pre-image lifecycle.
+#
+# An archival workflow that compresses a tree into durable storage often leaves
+# the uncompressed pre-image behind, and nothing comes back to remove it. This
+# plugin retires a staging group only after proving that every file in it is
+# already present in the archive target at the same uncompressed size.
+#
+# Verification is O(1) per file: an exact-name counterpart must match byte for
+# byte, a .gz counterpart must declare the size in its ISIZE trailer, and a .zst
+# counterpart must declare it in Frame_Content_Size. Nothing is decompressed.
+#
+# Relative paths under staging_dir must line up with relative paths under
+# target_dir, so a staging tree carrying a host prefix is configured including
+# that prefix (".../codex-session-archive/neo", not ".../codex-session-archive").
+archive_lifecycle:
+  # Planning-only by default. Retiring a pre-image is irreversible, so the first
+  # thing an operator should see is a plan.
+  dry_run: true
+  retire_after: 14d
+  max_groups_per_cycle: 32
+  sources: []
+  # sources:
+  #   - name: codex-session-archive
+  #     staging_dir: /Volumes/TinylandSSD/tinyland/codex-session-archive/neo
+  #     target_dir: /Volumes/TinylandState/tinyland-state/codex/archived_sessions
+  #     group_depth: 3   # YYYY/MM/DD: retire one verified day at a time
+  #     retire_after: 14d

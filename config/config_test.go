@@ -471,6 +471,21 @@ func TestAPFSConfigDefaults(t *testing.T) {
 	if !cfg.APFS.DeleteOSUpdates {
 		t.Error("APFS.DeleteOSUpdates should be true by default")
 	}
+	if !cfg.Enable.ArchiveLifecycle {
+		t.Error("Enable.ArchiveLifecycle should be true by default")
+	}
+	if !cfg.ArchiveLifecycle.DryRun {
+		t.Error("ArchiveLifecycle.DryRun must default to true: retiring a pre-image is irreversible")
+	}
+	if cfg.ArchiveLifecycle.RetireAfter != "14d" {
+		t.Errorf("ArchiveLifecycle.RetireAfter should be 14d, got %q", cfg.ArchiveLifecycle.RetireAfter)
+	}
+	if cfg.ArchiveLifecycle.MaxGroupsPerCycle != 32 {
+		t.Errorf("ArchiveLifecycle.MaxGroupsPerCycle should be 32, got %d", cfg.ArchiveLifecycle.MaxGroupsPerCycle)
+	}
+	if len(cfg.ArchiveLifecycle.Sources) != 0 {
+		t.Errorf("ArchiveLifecycle.Sources must default to empty, got %#v", cfg.ArchiveLifecycle.Sources)
+	}
 }
 
 func TestEnableFlagsNewPlugins(t *testing.T) {

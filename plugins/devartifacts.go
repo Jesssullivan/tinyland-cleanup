@@ -886,6 +886,9 @@ func (p *DevArtifactsPlugin) forEachAgentTranscript(ctx context.Context, home st
 				return nil
 			}
 			if info.IsDir() {
+				if path != root && agentTranscriptDirExcluded(info.Name()) {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			if !info.Mode().IsRegular() || !strings.HasSuffix(path, ".jsonl") {
@@ -897,6 +900,27 @@ func (p *DevArtifactsPlugin) forEachAgentTranscript(ctx context.Context, home st
 			callback(path, info, activeRefs[filepath.Clean(path)])
 			return nil
 		})
+	}
+}
+
+// agentTranscriptDirExcluded reports directories inside a transcript root that
+// must never be rewritten in place.
+//
+// Dotfile directories under ~/.codex/sessions are not session partitions: they
+// are incident pre-images and recovery snapshots (.incident-backup-*), which
+// exist precisely so a forensic copy survives untouched. Compressing a file
+// inside one replaces the evidence with a re-encoded copy, which is a mutation
+// even though gzip is lossless. Archive directories are excluded for the same
+// reason: they are the durable side of an archival, not a compression target.
+func agentTranscriptDirExcluded(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	switch name {
+	case "archived_sessions", "archive", "backups", "receipts":
+		return true
+	default:
+		return false
 	}
 }
 

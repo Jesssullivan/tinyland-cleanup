@@ -23,6 +23,7 @@ your config. The list below is the full registry.
 | `cache` | Application caches (pip, npm, go, and similar); on Darwin this also owns typed IDE/tool caches such as JetBrains, VS Code, Cursor, pip, npm, uv, and bun |
 | `gitlab-runner` | GitLab runner caches, build directories, stale artifacts |
 | `dev-artifacts` | Stale `node_modules`, `.venv`, `target/`, Zig, Go, Haskell, LM Studio; reports large local artifacts |
+| `archive-lifecycle` | Retires archive staging pre-images after proving every file already exists in the durable archive target — see [Archive staging lifecycle](archive-staging-lifecycle.md) |
 
 ## Linux
 
