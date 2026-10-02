@@ -13,6 +13,7 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 gazelle(name = "gazelle")
 
 exports_files([
+    ".gitignore",
     ".bazelrc",
     ".github/actionlint.yaml",
     ".github/workflows/ci.yml",
@@ -21,6 +22,7 @@ exports_files([
     ".bazelrc.flywheel",
     "config/bazel-rbe-target-eligibility.json",
     "flake.nix",
+    "flake.lock",
     "Justfile",
     "justfile.flywheel",
     "scripts/bazel-cache-backed.sh",
@@ -44,9 +46,11 @@ filegroup(
         ".github/workflows/ci.yml",
         ".github/workflows/docs-deploy.yml",
         ".github/workflows/gloriousflywheel-proof.yml",
+        ".gitignore",
         "Justfile",
         "config/bazel-rbe-target-eligibility.json",
         "flake.nix",
+        "flake.lock",
         "justfile.flywheel",
         "scripts/bazel-cache-backed.sh",
         "scripts/bazel-rbe-proof.sh",
