@@ -70,9 +70,13 @@ type devArtifactScanBudget struct {
 	tempRootSeen          map[string]struct{}
 	truncatedPath         map[string]string
 	// tempTruncatedPath records truncations inside a single temp scan path's
-	// own budget. They are reported as partial evidence but do not gate the
-	// remaining temp scan paths or later lanes: one huge temp path must not
-	// starve the others (OI-1001-Q4).
+	// own budget. They are reported as partial evidence, and a path cut by its
+	// own temp root budget does not gate the remaining temp scan paths or
+	// later lanes: one huge temp path must not starve the others
+	// (OI-1001-Q4). Entry and duration shares are different: each path's
+	// entries fold back into the shared budget and the shared scan deadline
+	// still applies, so when temp paths use up their entry or time shares the
+	// later lanes truncate exactly as they did before per-path budgets.
 	tempTruncatedPath  map[string]string
 	tempPathsTruncated int
 }
@@ -253,7 +257,9 @@ func (b *devArtifactScanBudget) tempPathBudget(pathCount int) *devArtifactScanBu
 }
 
 // mergeTempPathBudget folds a finished temp scan path's accounting back into
-// the shared budget. Truncations are kept for reporting only.
+// the shared budget. Truncations are kept for reporting only, but the child's
+// entries count against the shared entry budget, so exhausted entry shares
+// still truncate the later lanes.
 func (b *devArtifactScanBudget) mergeTempPathBudget(child *devArtifactScanBudget) {
 	if b == nil || child == nil || child == b {
 		return
@@ -403,8 +409,9 @@ type DevArtifactsPlugin struct {
 	// undeletable remembers paths whose removal failed with EACCES, EPERM
 	// or EBUSY so the daemon does not size and retry them every cycle
 	// (OI-1001-Q4). It lives for the plugin's (daemon's) lifetime.
-	undeletableMu sync.Mutex
-	undeletable   map[string]struct{}
+	undeletableMu       sync.Mutex
+	undeletable         map[string]struct{}
+	undeletableFullWarn sync.Once
 }
 
 // maxRememberedUndeletablePaths bounds the undeletable-path memory.
@@ -425,7 +432,10 @@ func (p *DevArtifactsPlugin) knownUndeletable(path string) bool {
 	return ok
 }
 
-func (p *DevArtifactsPlugin) rememberUndeletable(path string) bool {
+// rememberUndeletable records path and reports whether it was newly
+// remembered. full is true when the cache is at capacity and path could not
+// be recorded.
+func (p *DevArtifactsPlugin) rememberUndeletable(path string) (added, full bool) {
 	p.undeletableMu.Lock()
 	defer p.undeletableMu.Unlock()
 	if p.undeletable == nil {
@@ -433,13 +443,13 @@ func (p *DevArtifactsPlugin) rememberUndeletable(path string) bool {
 	}
 	clean := filepath.Clean(path)
 	if _, ok := p.undeletable[clean]; ok {
-		return false
+		return false, false
 	}
 	if len(p.undeletable) >= maxRememberedUndeletablePaths {
-		return false
+		return false, true
 	}
 	p.undeletable[clean] = struct{}{}
-	return true
+	return true, false
 }
 
 // removeDevArtifactPath removes path unless it is already known to be
@@ -458,8 +468,18 @@ func (p *DevArtifactsPlugin) removeDevArtifactPath(path string, logger *slog.Log
 	if err == nil || !isUndeletableRemoveError(err) {
 		return err
 	}
-	if p.rememberUndeletable(path) && logger != nil {
-		logger.Warn("dev artifact path is not deletable; skipping it for the rest of this daemon's lifetime", "path", path, "error", err)
+	added, full := p.rememberUndeletable(path)
+	if logger != nil {
+		switch {
+		case added:
+			logger.Warn("dev artifact path is not deletable; skipping it for the rest of this daemon's lifetime", "path", path, "error", err)
+		case full:
+			// Once the cache is full, new undeletable paths are retried
+			// every cycle again; say so once rather than per path.
+			p.undeletableFullWarn.Do(func() {
+				logger.Warn("undeletable cache full; further undeletable paths will be retried every cycle", "limit", maxRememberedUndeletablePaths, "path", path, "error", err)
+			})
+		}
 	}
 	return fmt.Errorf("%w: %v", errUndeletableDevArtifactPath, err)
 }

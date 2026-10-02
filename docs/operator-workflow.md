@@ -241,14 +241,20 @@ Temporary-root discovery is separately bounded by
 `dev_artifacts.temp_scan_max_roots`, applied **per temp scan path**: each entry
 in `temp_scan_paths` gets its own root budget (and an even share of the entry
 and duration budgets), so a `/tmp` full of `nix-shell.*` roots cannot starve a
-later path such as `/srv/fast-local/<user>/tmp`. A truncated temp path is
-reported (`temp_scan_paths_truncated`, `scan_truncated_paths`) but does not stop
-the remaining temp paths or later lanes. When a budget is hit, dry-run metadata sets
+later path such as `/srv/fast-local/<user>/tmp`. A temp path cut by its own
+root budget is reported (`temp_scan_paths_truncated`, `scan_truncated_paths`)
+and the remaining temp paths and later lanes still run. The entry and duration
+shares are not independent of the rest of the cycle: each path's entries count
+against the shared entry budget and the shared scan deadline still applies, so
+if the temp paths exhaust their entry or time shares the later lanes truncate
+as they did before. When a budget is hit, dry-run metadata sets
 `scan_budget_exhausted: true`, reports `scan_truncated_paths`, and treats the
 omitted evidence as non-actionable. Paths whose removal fails with `EACCES`,
 `EPERM` or `EBUSY` (for example another user's or another session's scratch)
 are logged once and skipped for the rest of the daemon's lifetime instead of
-being re-sized and retried every cycle. Symlink-heavy temporary roots, including Nix
+being re-sized and retried every cycle. The memory holds at most 4096 paths;
+when it is full a one-time "undeletable cache full" warning is logged and
+further such paths are retried each cycle. Symlink-heavy temporary roots, including Nix
 shell symlink forests, are measured as symlink entries rather than as the
 `/nix/store` paths they point at, so dry-run byte counts do not attribute store
 closures to temporary proof directories.

@@ -2599,3 +2599,25 @@ func TestRemoveDevArtifactPathOnlyRemembersPermissionAndBusyErrors(t *testing.T)
 		}
 	}
 }
+
+func TestRemoveDevArtifactPathWarnsOnceWhenUndeletableCacheIsFull(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	p := NewDevArtifactsPlugin()
+	p.undeletable = make(map[string]struct{}, maxRememberedUndeletablePaths)
+	for i := 0; i < maxRememberedUndeletablePaths; i++ {
+		p.undeletable["/remembered/"+strconv.Itoa(i)] = struct{}{}
+	}
+	p.removeAll = func(path string) error { return &fs.PathError{Op: "unlinkat", Path: path, Err: syscall.EACCES} }
+
+	for i := 0; i < 3; i++ {
+		_ = p.removeDevArtifactPath("/overflow/"+strconv.Itoa(i), logger)
+	}
+
+	if got := strings.Count(logs.String(), "undeletable cache full"); got != 1 {
+		t.Fatalf("expected one cache-full warning, got %d:\n%s", got, logs.String())
+	}
+	if p.knownUndeletable("/overflow/0") {
+		t.Fatal("a path past the cache limit must not be remembered")
+	}
+}
