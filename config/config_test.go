@@ -61,6 +61,18 @@ func TestDefaultConfig(t *testing.T) {
 	if !cfg.Enable.Docker {
 		t.Error("expected Docker enabled")
 	}
+	if cfg.Enable.DebrisReport {
+		t.Error("expected DebrisReport disabled by default")
+	}
+	if cfg.InodeFreeFloor != 0 {
+		t.Errorf("expected no inode free floor by default, got %d", cfg.InodeFreeFloor)
+	}
+	if cfg.DebrisReport.OlderThan != "24h" || cfg.DebrisReport.MaxDepth != 2 {
+		t.Errorf("unexpected debris report defaults: %+v", cfg.DebrisReport)
+	}
+	if len(cfg.DebrisReport.Patterns) == 0 || len(cfg.DebrisReport.ScanPaths) == 0 {
+		t.Errorf("expected debris report default patterns and scan paths: %+v", cfg.DebrisReport)
+	}
 
 	// Platform-specific defaults
 	if runtime.GOOS == "darwin" {

@@ -85,7 +85,7 @@ func deleteOldFilesSameDevice(dir string, maxAge time.Duration) int64 {
 			}
 			return nil
 		}
-		if !info.IsDir() && info.ModTime().Before(cutoff) {
+		if !info.IsDir() && staleModTime(info).Before(cutoff) {
 			size := info.Size()
 			if os.Remove(path) == nil {
 				freed += size
@@ -124,7 +124,7 @@ func deleteOldFilesOwnedByUserSameDevice(dir string, maxAge time.Duration) int64
 			}
 			return nil
 		}
-		if !info.IsDir() && info.ModTime().Before(cutoff) && info.Mode().IsRegular() {
+		if !info.IsDir() && staleModTime(info).Before(cutoff) && info.Mode().IsRegular() {
 			// Check file ownership via syscall
 			var stat syscall.Stat_t
 			if syscall.Stat(path, &stat) == nil && stat.Uid == uid {
@@ -137,6 +137,37 @@ func deleteOldFilesOwnedByUserSameDevice(dir string, maxAge time.Duration) int64
 		return nil
 	})
 	return freed
+}
+
+// futureMtimeTolerance absorbs ordinary clock skew between hosts sharing a
+// filesystem before a modification time is considered to be in the future.
+const futureMtimeTolerance = 5 * time.Minute
+
+// effectiveModTime returns the timestamp age-based staleness is measured from.
+//
+// A modification time in the future (a tool that stamps outputs with a
+// far-future mtime, such as a 2036-dated Bazel output base, or a host whose
+// clock was wrong when the entry was written) would otherwise never age past
+// any cutoff, making the entry immortal under age-based reclaim. When the
+// mtime is ahead of now, the inode change time (ctime) is used instead: the
+// kernel sets ctime when the bogus mtime was applied, so the entry ages from
+// that real moment. When ctime is unavailable or also in the future, the entry
+// is treated as modified now.
+func effectiveModTime(info os.FileInfo, now time.Time) time.Time {
+	modTime := info.ModTime()
+	if !modTime.After(now.Add(futureMtimeTolerance)) {
+		return modTime
+	}
+	if ctime, ok := changeTime(info); ok && !ctime.After(now.Add(futureMtimeTolerance)) {
+		return ctime
+	}
+	return now
+}
+
+// staleModTime is effectiveModTime evaluated against the wall clock. Plugins
+// use it wherever a modification time feeds an age or staleness decision.
+func staleModTime(info os.FileInfo) time.Time {
+	return effectiveModTime(info, time.Now())
 }
 
 // getFreeDiskSpace returns the available disk space in bytes for the

@@ -243,7 +243,7 @@ func deleteOldFiles(dir string, maxAge time.Duration) {
 		if err != nil {
 			return nil
 		}
-		if !info.IsDir() && info.ModTime().Before(cutoff) {
+		if !info.IsDir() && staleModTime(info).Before(cutoff) {
 			os.Remove(path)
 		}
 		return nil
@@ -257,7 +257,7 @@ func deleteOldFilesOwnedByUser(dir string, maxAge time.Duration) {
 		if err != nil {
 			return nil
 		}
-		if !info.IsDir() && info.ModTime().Before(cutoff) {
+		if !info.IsDir() && staleModTime(info).Before(cutoff) {
 			// Only delete files owned by current user
 			if stat, err := os.Stat(path); err == nil {
 				// Best effort - if we can delete it, we own it or have permission

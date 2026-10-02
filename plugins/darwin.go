@@ -567,7 +567,7 @@ func (p *XcodePlugin) cleanDeviceSupport(dir string, keepCount int, logger *slog
 		if e.IsDir() {
 			info, err := e.Info()
 			if err == nil {
-				dirs = append(dirs, dirEntry{name: e.Name(), modTime: info.ModTime()})
+				dirs = append(dirs, dirEntry{name: e.Name(), modTime: staleModTime(info)})
 			}
 		}
 	}
@@ -793,7 +793,7 @@ func xcodeDeviceSupportPlanTargets(dir string, keepCount int, active bool, level
 		dirs = append(dirs, dirEntry{
 			name:    entry.Name(),
 			path:    path,
-			modTime: info.ModTime(),
+			modTime: staleModTime(info),
 			bytes:   getDirSize(path),
 		})
 	}
@@ -835,7 +835,7 @@ func oldFilesSize(dir string, maxAge time.Duration, now time.Time) int64 {
 		if err != nil || info.IsDir() {
 			return nil
 		}
-		if info.ModTime().Before(cutoff) {
+		if staleModTime(info).Before(cutoff) {
 			size += info.Size()
 		}
 		return nil
@@ -1482,7 +1482,7 @@ func listDarwinCacheEntries(root string) []darwinCacheEntry {
 			path:    path,
 			name:    entry.Name(),
 			version: darwinCacheVersion(entry.Name()),
-			modTime: info.ModTime(),
+			modTime: staleModTime(info),
 			bytes:   getDirAllocatedBytes(path),
 		})
 	}
@@ -1566,7 +1566,7 @@ func dirModTimeStale(path string, staleAfterDays int) bool {
 	if err != nil {
 		return false
 	}
-	return info.ModTime().Before(time.Now().Add(-time.Duration(staleAfterDays) * 24 * time.Hour))
+	return staleModTime(info).Before(time.Now().Add(-time.Duration(staleAfterDays) * 24 * time.Hour))
 }
 
 func darwinActiveProcessNames(ctx context.Context) map[string]bool {
@@ -1628,7 +1628,7 @@ func deleteOldFiles(dir string, maxAge time.Duration) {
 		if err != nil {
 			return nil
 		}
-		if !info.IsDir() && info.ModTime().Before(cutoff) {
+		if !info.IsDir() && staleModTime(info).Before(cutoff) {
 			os.Remove(path)
 		}
 		return nil
@@ -1835,7 +1835,7 @@ func (p *ICloudPlugin) evictFiles(ctx context.Context, iCloudPath string, maxAge
 		}
 
 		// Skip recently accessed files
-		if info.ModTime().After(cutoff) {
+		if staleModTime(info).After(cutoff) {
 			return nil
 		}
 

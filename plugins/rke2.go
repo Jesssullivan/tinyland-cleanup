@@ -132,7 +132,7 @@ func (p *RKE2Plugin) cleanOldPodLogs(ctx context.Context, logger *slog.Logger) C
 			return nil
 		}
 		// Only clean .log files that are old
-		if strings.HasSuffix(info.Name(), ".log") && info.ModTime().Before(cutoff) {
+		if strings.HasSuffix(info.Name(), ".log") && staleModTime(info).Before(cutoff) {
 			size := info.Size()
 			if err := os.Remove(path); err == nil {
 				result.BytesFreed += size
@@ -153,7 +153,7 @@ func (p *RKE2Plugin) cleanOldPodLogs(ctx context.Context, logger *slog.Logger) C
 			if err != nil || info.IsDir() {
 				return nil
 			}
-			if strings.HasSuffix(info.Name(), ".log") && info.ModTime().Before(cutoff) {
+			if strings.HasSuffix(info.Name(), ".log") && staleModTime(info).Before(cutoff) {
 				size := info.Size()
 				if err := os.Remove(path); err == nil {
 					result.BytesFreed += size
@@ -293,7 +293,7 @@ func (p *RKE2Plugin) cleanKubeletGarbage(ctx context.Context, logger *slog.Logge
 			}
 
 			// If pod directory is older than 24 hours and has no recent activity, consider cleaning
-			if time.Since(info.ModTime()) > 24*time.Hour {
+			if time.Since(staleModTime(info)) > 24*time.Hour {
 				// Check if pod is actually orphaned (no containers running)
 				if p.isPodOrphaned(podDir) {
 					size := p.getDirSize(podDir)

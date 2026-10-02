@@ -21,6 +21,14 @@ type Config struct {
 	// InodeThresholds for inode usage (percentage)
 	InodeThresholds Thresholds `yaml:"inode_thresholds"`
 
+	// InodeFreeFloor is an absolute minimum free-inode count. When set (> 0)
+	// it replaces the percentage inode ladder: fewer free inodes than the
+	// floor is critical inode pressure, otherwise none. Use it on filesystems
+	// that allocate inodes dynamically (XFS, APFS, ZFS, Btrfs), where the
+	// used percentage never reaches the ladder; without a floor those
+	// filesystems skip inode escalation entirely.
+	InodeFreeFloor uint64 `yaml:"inode_free_floor"`
+
 	// TargetFree is the legacy config key for target maximum used percentage after cleanup.
 	TargetFree int `yaml:"target_free"`
 
@@ -59,6 +67,9 @@ type Config struct {
 
 	// Dev artifact cleanup settings
 	DevArtifacts DevArtifactsConfig `yaml:"dev_artifacts"`
+
+	// Debris report settings (report-only, off by default)
+	DebrisReport DebrisReportConfig `yaml:"debris_report"`
 
 	// Darwin developer cache cleanup settings
 	DarwinDevCaches DarwinDevCachesConfig `yaml:"darwin_dev_caches"`
@@ -115,6 +126,23 @@ type MountConfig struct {
 	ThresholdInodeWarning int `yaml:"threshold_inode_warning,omitempty"`
 	// ThresholdInodeCritical overrides the global inode critical threshold
 	ThresholdInodeCritical int `yaml:"threshold_inode_critical,omitempty"`
+	// InodeFreeFloor overrides the global absolute free-inode floor for this mount
+	InodeFreeFloor uint64 `yaml:"inode_free_floor,omitempty"`
+}
+
+// DebrisReportConfig holds settings for the report-only debris plugin, which
+// logs stale incident/agent debris (dated bench dirs, bulkload scratch,
+// rollback and carry trees, reclaim markers) without ever deleting anything.
+type DebrisReportConfig struct {
+	// ScanPaths are the roots scanned for debris (default: home, ~/git, temp roots).
+	ScanPaths []string `yaml:"scan_paths"`
+	// Patterns are filepath.Match globs applied to entry base names. A
+	// trailing "/" restricts a pattern to directories.
+	Patterns []string `yaml:"patterns"`
+	// OlderThan is the minimum age before an entry is reported (default 24h).
+	OlderThan string `yaml:"older_than"`
+	// MaxDepth bounds how deep below each scan path the plugin looks (default 2).
+	MaxDepth int `yaml:"max_depth"`
 }
 
 // Thresholds defines disk usage thresholds for graduated cleanup.
@@ -163,6 +191,8 @@ type EnableFlags struct {
 	APFSSnapshots bool `yaml:"apfs_snapshots"`
 	// ArchiveLifecycle for retiring verified archive staging pre-images
 	ArchiveLifecycle bool `yaml:"archive_lifecycle"`
+	// DebrisReport for the report-only stale debris inventory (off by default)
+	DebrisReport bool `yaml:"debris_report"`
 }
 
 // ArchiveLifecycleConfig holds settings for retiring archive staging pre-images
@@ -571,6 +601,13 @@ func DefaultConfig() *Config {
 			Bazel:            true,
 			APFSSnapshots:    runtime.GOOS == "darwin",
 			ArchiveLifecycle: true,
+			DebrisReport:     false,
+		},
+		DebrisReport: DebrisReportConfig{
+			ScanPaths: append([]string{home, filepath.Join(home, "git")}, defaultTempScanPaths...),
+			Patterns:  DefaultDebrisPatterns(),
+			OlderThan: "24h",
+			MaxDepth:  2,
 		},
 		Docker: DockerConfig{
 			PruneImagesAge:           "24h",
@@ -751,6 +788,20 @@ func DefaultConfig() *Config {
 	}
 
 	return config
+}
+
+// DefaultDebrisPatterns returns the base-name globs the debris report plugin
+// inventories by default. A trailing "/" restricts a pattern to directories.
+func DefaultDebrisPatterns() []string {
+	return []string{
+		"*-20[0-9][0-9][01][0-9][0-3][0-9]*",
+		".bulkload-*",
+		"pre-boundary-*",
+		"continuity-*",
+		"rollback/",
+		"*-carry/",
+		".RECLAIM-PENDING-*",
+	}
 }
 
 func defaultBazelRoots(home string) []string {

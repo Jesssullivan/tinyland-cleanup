@@ -794,7 +794,7 @@ func (p *DevArtifactsPlugin) planAgentWorktreeArtifacts(ctx context.Context, hom
 
 func (p *DevArtifactsPlugin) planTCFSRustTargetCaches(ctx context.Context, home string, maxAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active devArtifactActivity, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	p.forEachTCFSRustTargetCache(ctx, home, daCfg, active, func(path string, info os.FileInfo, bytes int64, protected bool, activeReason string) {
-		*targets = append(*targets, p.tcfsRustTargetCacheTarget(path, bytes, info.ModTime(), maxAge, mutates, protected, activeReason))
+		*targets = append(*targets, p.tcfsRustTargetCacheTarget(path, bytes, staleModTime(info), maxAge, mutates, protected, activeReason))
 	}, budgets...)
 }
 
@@ -813,7 +813,7 @@ func (p *DevArtifactsPlugin) planAgentWorktreeRoots(ctx context.Context, home st
 		} else if reason := gitWorktreeProtectReason(ctx, path); reason != "" {
 			protectReason = reason
 		}
-		*targets = append(*targets, p.agentWorktreeRootTarget(path, bytes, info.ModTime(), staleAfter, time.Now(), level >= LevelCritical, protectReason, activeReason))
+		*targets = append(*targets, p.agentWorktreeRootTarget(path, bytes, staleModTime(info), staleAfter, time.Now(), level >= LevelCritical, protectReason, activeReason))
 	}, budgets...)
 }
 
@@ -895,7 +895,7 @@ func (p *DevArtifactsPlugin) forEachAgentTranscript(ctx context.Context, home st
 			if !info.Mode().IsRegular() || !strings.HasSuffix(path, ".jsonl") {
 				return nil
 			}
-			if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+			if staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter)) {
 				return nil
 			}
 			callback(path, info, activeRefs[filepath.Clean(path)])
@@ -953,7 +953,7 @@ func (p *DevArtifactsPlugin) forEachAgentWorktreeRoot(ctx context.Context, home 
 			if err != nil {
 				continue
 			}
-			if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+			if staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter)) {
 				continue
 			}
 			bytes, err := getDirAllocatedBytesContext(ctx, path)
@@ -1190,13 +1190,13 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
 		protected := p.isProtected(path, daCfg.ProtectPaths)
 		if activeReason != "" {
-			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, info.ModTime(), staleAfter, now, protected, activeReason))
+			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, staleModTime(info), staleAfter, now, protected, activeReason))
 			continue
 		}
 		// Staleness gates the recursive size walk: fresh or protected roots
 		// are not actionable (the lane is review-only), so walking them only
 		// burns the shared scan budget before it reaches deletable families.
-		if protected || (staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter))) {
+		if protected || (staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter))) {
 			continue
 		}
 		size, err := getDirAllocatedBytesContext(ctx, path)
@@ -1207,7 +1207,7 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 		if size < minBytes {
 			continue
 		}
-		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, protected, ""))
+		*targets = append(*targets, p.temporaryArtifactTarget(path, size, staleModTime(info), staleAfter, now, protected, ""))
 	}
 }
 
@@ -1238,7 +1238,7 @@ func newestShallowMtime(ctx context.Context, dir string, levels int, budget *dev
 		// rather than aborting the whole lane for the cycle.
 		return time.Time{}, nil
 	}
-	newest := info.ModTime()
+	newest := staleModTime(info)
 	if levels <= 0 {
 		return newest, nil
 	}
@@ -1261,8 +1261,8 @@ func newestShallowMtime(ctx context.Context, dir string, levels int, budget *dev
 			}
 			continue
 		}
-		if info, err := entry.Info(); err == nil && info.ModTime().After(newest) {
-			newest = info.ModTime()
+		if info, err := entry.Info(); err == nil && staleModTime(info).After(newest) {
+			newest = staleModTime(info)
 		}
 	}
 	return newest, nil
@@ -1280,7 +1280,7 @@ func harnessSessionTranscriptMtime(home, project, session string) time.Time {
 	}
 	transcript := filepath.Join(home, ".claude", "projects", project, session+".jsonl")
 	if info, err := os.Lstat(transcript); err == nil {
-		return info.ModTime()
+		return staleModTime(info)
 	}
 	return time.Time{}
 }
@@ -1456,7 +1456,7 @@ func harnessSessionRevived(session, home string, staleAfter time.Duration) bool 
 		return false
 	}
 	threshold := time.Now().Add(-staleAfter)
-	if info, err := os.Lstat(session); err == nil && info.ModTime().After(threshold) {
+	if info, err := os.Lstat(session); err == nil && staleModTime(info).After(threshold) {
 		return true
 	}
 	projectPath := filepath.Dir(session)
@@ -1598,7 +1598,7 @@ func (p *DevArtifactsPlugin) planNixTemporaryRoots(ctx context.Context, scanPath
 		}
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
 		protected := p.isProtected(path, daCfg.ProtectPaths)
-		target := p.nixTemporaryRootTarget(path, 0, info.ModTime(), staleAfter, now, protected, activeReason, canDelete)
+		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, protected, activeReason, canDelete)
 		if target.Action != "delete" {
 			if err := budget.checkTempRoot(ctx, path); err != nil {
 				return
@@ -1646,7 +1646,7 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 			continue
 		}
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
-		target := p.nixTemporaryRootTarget(path, 0, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), activeReason, true)
+		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, p.isProtected(path, protectPaths), activeReason, true)
 		if target.Action != "delete" {
 			if err := budget.checkTempRoot(ctx, path); err != nil {
 				return totalFreed
@@ -1744,7 +1744,7 @@ func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(ctx context.Context, scan
 		if activeRoots[canonicalTempArtifactPath(root)] != "" {
 			continue
 		}
-		if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+		if staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter)) {
 			continue
 		}
 		if minBytes > 0 {
@@ -3294,7 +3294,7 @@ func devArtifactHasRecentContent(ctx context.Context, path string, grace time.Du
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		if info.ModTime().After(cutoff) {
+		if staleModTime(info).After(cutoff) {
 			return errRecentDevArtifactContent
 		}
 		return nil
@@ -3495,7 +3495,7 @@ func (p *DevArtifactsPlugin) cleanTCFSRustTargetCaches(ctx context.Context, home
 		if protected || activeReason != "" {
 			return
 		}
-		if maxAge > 0 && info.ModTime().After(time.Now().Add(-maxAge)) {
+		if maxAge > 0 && staleModTime(info).After(time.Now().Add(-maxAge)) {
 			return
 		}
 		logger.Debug("removing stale TCFS Rust target cache", "path", path, "size_mb", bytes/(1024*1024))
@@ -3948,7 +3948,7 @@ func (p *DevArtifactsPlugin) isFileStale(path string, maxAge time.Duration) bool
 		return true // File doesn't exist = project abandoned
 	}
 	cutoff := time.Now().Add(-maxAge)
-	return info.ModTime().Before(cutoff)
+	return staleModTime(info).Before(cutoff)
 }
 
 // isProtected checks if a path is in the protect list.

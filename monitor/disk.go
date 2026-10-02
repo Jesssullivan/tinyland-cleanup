@@ -2,6 +2,8 @@
 package monitor
 
 import (
+	"strings"
+
 	"github.com/shirou/gopsutil/v3/disk"
 )
 
@@ -31,6 +33,29 @@ type DiskStats struct {
 	InodesUsedPercent float64
 	// InodesFreePercent is the percentage of inodes free
 	InodesFreePercent float64
+	// Fstype is the filesystem type reported by statfs (e.g. "xfs", "apfs").
+	Fstype string
+	// InodesDynamic reports that the filesystem allocates inodes on demand, so
+	// InodesTotal is a moving ceiling and a used-percentage ladder is
+	// meaningless (XFS, APFS, ZFS, Btrfs). Only an absolute free floor is a
+	// usable inode-pressure signal on such filesystems.
+	InodesDynamic bool
+}
+
+// dynamicInodeFilesystems allocate inodes on demand; statfs reports a ceiling
+// derived from free space rather than a fixed table, so the used percentage
+// never approaches the thresholds even as the filesystem fills.
+var dynamicInodeFilesystems = map[string]bool{
+	"xfs":   true,
+	"apfs":  true,
+	"zfs":   true,
+	"btrfs": true,
+}
+
+// DynamicInodeFilesystem reports whether a filesystem type allocates inodes
+// dynamically, making percentage-based inode thresholds meaningless.
+func DynamicInodeFilesystem(fstype string) bool {
+	return dynamicInodeFilesystems[strings.ToLower(strings.TrimSpace(fstype))]
 }
 
 // GetDiskStats returns disk statistics for the specified path.
@@ -59,6 +84,8 @@ func GetDiskStats(path string) (*DiskStats, error) {
 		InodesFree:        usage.InodesFree,
 		InodesUsedPercent: inodesUsedPercent,
 		InodesFreePercent: inodeFreePercent(usage.InodesTotal, inodesUsedPercent),
+		Fstype:            usage.Fstype,
+		InodesDynamic:     DynamicInodeFilesystem(usage.Fstype),
 	}, nil
 }
 
@@ -85,6 +112,12 @@ type DiskMonitor struct {
 	ThresholdInodeAggressive float64
 	// ThresholdInodeCritical percentage for inode critical level
 	ThresholdInodeCritical float64
+	// InodeFreeFloor is an absolute minimum free-inode count. When set (> 0)
+	// the percentage inode ladder is skipped entirely: free inodes below the
+	// floor escalate to critical, otherwise inode pressure is none. Zero
+	// disables the floor and keeps the percentage ladder for filesystems
+	// with a fixed inode table.
+	InodeFreeFloor uint64
 }
 
 // NewDiskMonitor creates a new disk monitor with the specified thresholds.
@@ -168,11 +201,33 @@ func (m *DiskMonitor) CheckByteLevel(stats *DiskStats) CleanupLevel {
 }
 
 // CheckInodeLevel determines the cleanup level needed based on inode usage.
+//
+// Filesystems that report no inode totals never escalate. When an absolute
+// InodeFreeFloor is configured it replaces the percentage ladder: below the
+// floor is critical, otherwise none. Without a floor, filesystems that
+// allocate inodes dynamically (see DynamicInodeFilesystem) also never
+// escalate, because their used percentage is not a pressure signal.
 func (m *DiskMonitor) CheckInodeLevel(stats *DiskStats) CleanupLevel {
 	if stats.InodesTotal == 0 {
 		return LevelNone
 	}
+	if m.InodeFreeFloor > 0 {
+		if stats.InodesFree < m.InodeFreeFloor {
+			return LevelCritical
+		}
+		return LevelNone
+	}
+	if stats.InodesDynamic {
+		return LevelNone
+	}
 	return levelForPercent(stats.InodesUsedPercent, m.ThresholdInodeWarning, m.ThresholdInodeModerate, m.ThresholdInodeAggressive, m.ThresholdInodeCritical)
+}
+
+// InodeLadderSkipped reports whether the percentage inode ladder is not
+// consulted for these stats, either because an absolute floor replaces it or
+// because the filesystem allocates inodes dynamically.
+func (m *DiskMonitor) InodeLadderSkipped(stats *DiskStats) bool {
+	return stats.InodesTotal > 0 && (m.InodeFreeFloor > 0 || stats.InodesDynamic)
 }
 
 func levelForPercent(usedPercent, warning, moderate, aggressive, critical float64) CleanupLevel {

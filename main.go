@@ -186,6 +186,7 @@ func main() {
 		cfg.InodeThresholds.Aggressive,
 		cfg.InodeThresholds.Critical,
 	)
+	diskMon.InodeFreeFloor = cfg.InodeFreeFloor
 
 	// Create cleanup daemon
 	d := &daemon{
@@ -412,6 +413,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		}
 
 		result := p.Cleanup(ctx, pluginLevel, d.config, d.logger)
+		pluginReport.Ran = true
 		pluginReport.BytesFreed = result.BytesFreed
 		pluginReport.EstimatedBytesFreed = result.EstimatedBytesFreed
 		pluginReport.CommandBytesFreed = result.CommandBytesFreed
@@ -568,16 +570,32 @@ type mountReport struct {
 	InodesFree        uint64  `json:"inodes_free,omitempty"`
 	InodesUsedPercent float64 `json:"inodes_used_percent,omitempty"`
 	InodeLevel        string  `json:"inode_level,omitempty"`
-	Level             string  `json:"level"`
-	Error             string  `json:"error,omitempty"`
+	// Fstype is the filesystem type reported by statfs.
+	Fstype string `json:"fstype,omitempty"`
+	// InodesDynamic reports a dynamic-inode filesystem (XFS, APFS, ZFS, Btrfs)
+	// whose used percentage is not a pressure signal.
+	InodesDynamic bool `json:"inodes_dynamic,omitempty"`
+	// InodeFreeFloor is the absolute free-inode floor in effect for the mount.
+	InodeFreeFloor uint64 `json:"inode_free_floor,omitempty"`
+	// InodeLadderSkipped reports that the percentage inode ladder was not
+	// consulted (a floor is set, or the filesystem allocates inodes dynamically).
+	InodeLadderSkipped bool   `json:"inode_ladder_skipped,omitempty"`
+	Level              string `json:"level"`
+	Error              string `json:"error,omitempty"`
 }
 
 type pluginCycleReport struct {
-	Name                     string               `json:"name"`
-	Description              string               `json:"description"`
-	Level                    string               `json:"level"`
-	DryRun                   bool                 `json:"dry_run"`
-	WouldRun                 bool                 `json:"would_run"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Level       string `json:"level"`
+	DryRun      bool   `json:"dry_run"`
+	// WouldRun reports eligibility: the plugin was not skipped by target,
+	// cooldown, or filter. In a real cleanup cycle it is a precondition, not
+	// an outcome; Ran is the outcome.
+	WouldRun bool `json:"would_run"`
+	// Ran reports that Cleanup was actually invoked this cycle (never true
+	// in dry-run). A plugin with Ran and a non-empty Error ran and failed.
+	Ran                      bool                 `json:"ran"`
 	SkipReason               string               `json:"skip_reason,omitempty"`
 	Plan                     *plugins.CleanupPlan `json:"plan,omitempty"`
 	BytesFreed               int64                `json:"bytes_freed"`
@@ -641,17 +659,21 @@ func (d *daemon) assessMounts() mountAssessment {
 			inodeLevel := mountMonitor.CheckInodeLevel(stats)
 			mountLevel := mountMonitor.CheckLevel(stats)
 			assessment.Mounts = append(assessment.Mounts, mountReport{
-				Label:             label,
-				Path:              mount.Path,
-				UsedPercent:       stats.UsedPercent,
-				FreeGB:            stats.FreeGB,
-				FreeBytes:         stats.Free,
-				ByteLevel:         byteLevel.String(),
-				InodesTotal:       stats.InodesTotal,
-				InodesFree:        stats.InodesFree,
-				InodesUsedPercent: stats.InodesUsedPercent,
-				InodeLevel:        inodeLevelDisplay(inodeLevel, stats.InodesTotal),
-				Level:             mountLevel.String(),
+				Label:              label,
+				Path:               mount.Path,
+				UsedPercent:        stats.UsedPercent,
+				FreeGB:             stats.FreeGB,
+				FreeBytes:          stats.Free,
+				ByteLevel:          byteLevel.String(),
+				InodesTotal:        stats.InodesTotal,
+				InodesFree:         stats.InodesFree,
+				InodesUsedPercent:  stats.InodesUsedPercent,
+				InodeLevel:         inodeLevelDisplay(inodeLevel, stats.InodesTotal),
+				Fstype:             stats.Fstype,
+				InodesDynamic:      stats.InodesDynamic,
+				InodeFreeFloor:     mountMonitor.InodeFreeFloor,
+				InodeLadderSkipped: mountMonitor.InodeLadderSkipped(stats),
+				Level:              mountLevel.String(),
 			})
 
 			d.logger.Info("disk status",
@@ -746,7 +768,8 @@ func (d *daemon) monitorForMount(mount config.MountConfig) *monitor.DiskMonitor 
 	if mount.ThresholdWarning <= 0 &&
 		mount.ThresholdCritical <= 0 &&
 		mount.ThresholdInodeWarning <= 0 &&
-		mount.ThresholdInodeCritical <= 0 {
+		mount.ThresholdInodeCritical <= 0 &&
+		mount.InodeFreeFloor == 0 {
 		return d.monitor
 	}
 
@@ -772,7 +795,7 @@ func (d *daemon) monitorForMount(mount config.MountConfig) *monitor.DiskMonitor 
 		inodeCritical = mount.ThresholdInodeCritical
 	}
 
-	return monitor.NewDiskMonitorWithInodeThresholds(
+	mountMonitor := monitor.NewDiskMonitorWithInodeThresholds(
 		warning,
 		moderate,
 		aggressive,
@@ -782,6 +805,11 @@ func (d *daemon) monitorForMount(mount config.MountConfig) *monitor.DiskMonitor 
 		inodeAggressive,
 		inodeCritical,
 	)
+	mountMonitor.InodeFreeFloor = d.monitor.InodeFreeFloor
+	if mount.InodeFreeFloor > 0 {
+		mountMonitor.InodeFreeFloor = mount.InodeFreeFloor
+	}
+	return mountMonitor
 }
 
 func (d *daemon) inodeLevelForPath(path string, stats *monitor.DiskStats) monitor.CleanupLevel {
@@ -1174,6 +1202,9 @@ func registerPlugins(registry *plugins.Registry) {
 
 	// Archive staging pre-image lifecycle (all platforms)
 	registry.Register(plugins.NewArchiveLifecyclePlugin())
+
+	// Report-only debris inventory (all platforms, off by default)
+	registry.Register(plugins.NewDebrisReportPlugin())
 
 	// Kubernetes plugins (disabled by default, for future use)
 	registry.Register(plugins.NewEtcdPlugin())

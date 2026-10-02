@@ -216,3 +216,61 @@ func TestNewDiskMonitor(t *testing.T) {
 		t.Errorf("ThresholdInodeCritical = %v, want 95", mon.ThresholdInodeCritical)
 	}
 }
+
+func TestDiskMonitorInodeFreeFloorReplacesPercentLadder(t *testing.T) {
+	mon := NewDiskMonitor(80, 85, 90, 95)
+	mon.InodeFreeFloor = 1_000_000
+
+	tests := []struct {
+		name     string
+		stats    *DiskStats
+		expected CleanupLevel
+	}{
+		{"above floor on fixed-table fs ignores percent ladder", &DiskStats{InodesTotal: 10_000_000, InodesFree: 1_000_000, InodesUsedPercent: 99.0}, LevelNone},
+		{"below floor on fixed-table fs", &DiskStats{InodesTotal: 10_000_000, InodesFree: 999_999, InodesUsedPercent: 10.0}, LevelCritical},
+		{"below floor on dynamic fs", &DiskStats{InodesTotal: 10_000_000, InodesFree: 500, InodesUsedPercent: 0.1, Fstype: "xfs", InodesDynamic: true}, LevelCritical},
+		{"above floor on dynamic fs", &DiskStats{InodesTotal: 10_000_000, InodesFree: 5_000_000, InodesUsedPercent: 50.0, Fstype: "xfs", InodesDynamic: true}, LevelNone},
+		{"no inode totals never escalates", &DiskStats{InodesTotal: 0, InodesFree: 0}, LevelNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mon.CheckInodeLevel(tt.stats); got != tt.expected {
+				t.Fatalf("CheckInodeLevel = %v, want %v", got, tt.expected)
+			}
+			if tt.stats.InodesTotal > 0 && !mon.InodeLadderSkipped(tt.stats) {
+				t.Fatal("expected the percentage ladder to be skipped when a floor is set")
+			}
+		})
+	}
+}
+
+func TestDiskMonitorDynamicInodesSkipLadderWithoutFloor(t *testing.T) {
+	mon := NewDiskMonitor(80, 85, 90, 95)
+
+	dynamic := &DiskStats{InodesTotal: 1000, InodesFree: 10, InodesUsedPercent: 99.0, Fstype: "xfs", InodesDynamic: true}
+	if got := mon.CheckInodeLevel(dynamic); got != LevelNone {
+		t.Fatalf("dynamic-inode filesystem without a floor should never escalate, got %v", got)
+	}
+	if !mon.InodeLadderSkipped(dynamic) {
+		t.Fatal("expected ladder skipped for dynamic-inode filesystem")
+	}
+
+	fixed := &DiskStats{InodesTotal: 1000, InodesFree: 10, InodesUsedPercent: 99.0, Fstype: "ext4"}
+	if got := mon.CheckInodeLevel(fixed); got != LevelCritical {
+		t.Fatalf("fixed-table filesystem should still use the ladder, got %v", got)
+	}
+	if mon.InodeLadderSkipped(fixed) {
+		t.Fatal("did not expect ladder skipped for ext4")
+	}
+}
+
+func TestDynamicInodeFilesystem(t *testing.T) {
+	for fstype, want := range map[string]bool{
+		"xfs": true, "XFS": true, "apfs": true, "zfs": true, "btrfs": true,
+		"ext4": false, "ext3": false, "tmpfs": false, "": false,
+	} {
+		if got := DynamicInodeFilesystem(fstype); got != want {
+			t.Errorf("DynamicInodeFilesystem(%q) = %v, want %v", fstype, got, want)
+		}
+	}
+}
