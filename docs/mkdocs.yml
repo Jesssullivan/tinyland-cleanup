@@ -61,6 +61,7 @@ nav:
       - Bazel cache: bazel-cache-policy.md
       - Darwin dev caches: darwin-dev-caches.md
       - Podman compaction: podman-darwin-compaction.md
+      - Archive staging lifecycle: archive-staging-lifecycle.md
   - Packaging: rpm-packaging.md
   - Development: development.md
   - Validation status: validation-status.md
