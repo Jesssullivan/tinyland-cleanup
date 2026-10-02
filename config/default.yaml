@@ -51,7 +51,6 @@ enable:
   lima: true            # Lima VM cleanup (Darwin only)
   homebrew: true        # Homebrew cleanup (Darwin only)
   ios_simulator: true   # iOS Simulator cleanup (Darwin only)
-  gitlab_runner: true   # GitLab runner cache cleanup
   github_runner: true   # GitHub Actions runner cleanup (Linux only)
   yum: true             # DNF/YUM package cache cleanup (Linux only)
   dev_artifacts: true   # Rebuildable workspace artifacts

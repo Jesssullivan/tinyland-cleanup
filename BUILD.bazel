@@ -228,7 +228,6 @@ go_library(
         "plugins/docker.go",
         "plugins/etcd.go",
         "plugins/fs.go",
-        "plugins/gitlab_runner.go",
         "plugins/nix.go",
         "plugins/plugin.go",
         "plugins/podman.go",

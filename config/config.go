@@ -173,8 +173,6 @@ type EnableFlags struct {
 	Homebrew bool `yaml:"homebrew"`
 	// IOSSimulator for iOS Simulator cleanup (Darwin)
 	IOSSimulator bool `yaml:"ios_simulator"`
-	// GitLabRunner for GitLab CI cache cleanup
-	GitLabRunner bool `yaml:"gitlab_runner"`
 	// GitHubRunner for GitHub Actions runner cleanup (Linux)
 	GitHubRunner bool `yaml:"github_runner"`
 	// Yum for DNF/YUM package cache cleanup (Linux)
@@ -594,7 +592,6 @@ func DefaultConfig() *Config {
 			Lima:             runtime.GOOS == "darwin",
 			Homebrew:         runtime.GOOS == "darwin",
 			IOSSimulator:     runtime.GOOS == "darwin",
-			GitLabRunner:     true,
 			ICloud:           runtime.GOOS == "darwin",
 			Photos:           runtime.GOOS == "darwin",
 			DevArtifacts:     true,

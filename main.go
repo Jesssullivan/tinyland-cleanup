@@ -1195,7 +1195,6 @@ func registerPlugins(registry *plugins.Registry) {
 	registry.Register(plugins.NewNixPlugin())
 	registry.Register(plugins.NewBazelPlugin())
 	registry.Register(plugins.NewCachePlugin())
-	registry.Register(plugins.NewGitLabRunnerPlugin())
 
 	// Development artifact cleanup (all platforms)
 	registry.Register(plugins.NewDevArtifactsPlugin())
