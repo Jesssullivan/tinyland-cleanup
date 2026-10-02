@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-02
+
 ### Removed
 
 - The `gitlab-runner` plugin and its `enable.gitlab_runner` key. No GitLab
@@ -15,6 +17,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Bazel orphan reaper: output bases whose `DO_NOT_BUILD_HERE` workspace no
+  longer exists are reaped after `orphan_stale_after` (default 7d), bypassing
+  `keep_recent_output_bases` but never active-use evidence or
+  `protect_workspaces`. Ambiguous readings (unreadable marker, unmounted
+  volume) fail closed (#124).
+- `archive-lifecycle` plugin: retires archive staging pre-images only after
+  proving every file is already in the archive target at the same
+  uncompressed size (exact copy, gzip ISIZE, or zstd Frame_Content_Size),
+  re-verified immediately before deletion. Inert until `sources` are
+  configured (#125).
+- `agent_transcript_codec`: transcript compression writes zstd by default
+  (`.jsonl.zst`, vendored klauspost/compress); gzip stays selectable and an
+  unknown codec is refused. Existing `.jsonl.gz` files are never re-encoded
+  (#126).
 - `inode_free_floor`, global and per mount: an absolute free-inode floor that
   replaces the percentage inode ladder. Dynamic-inode filesystems (XFS, APFS,
   ZFS, Btrfs) no longer escalate on inode percentage at all.
