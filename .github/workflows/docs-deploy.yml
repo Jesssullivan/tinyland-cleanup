@@ -1,20 +1,11 @@
 name: Docs Deploy
 
 on:
+  # No path filter on pull_request: `Build site` is a required check, and a
+  # path-filtered workflow never reports on a PR that touches no docs, which
+  # would block that PR forever (R-C121, TIN-3342). The push trigger below keeps
+  # its filter because it only gates the Pages deploy.
   pull_request:
-    paths:
-      - 'docs/**'
-      - 'README.md'
-      - 'BUILD.bazel'
-      - 'MODULE.bazel'
-      - 'flake.nix'
-      - 'flake.lock'
-      - 'Justfile'
-      - 'justfile.flywheel'
-      - '.bazelrc'
-      - '.bazelrc.flywheel'
-      - 'scripts/gloriousflywheel-bazel.sh'
-      - '.github/workflows/docs-deploy.yml'
   merge_group:
   push:
     branches: [main]
