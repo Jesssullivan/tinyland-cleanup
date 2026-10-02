@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- dev-artifacts: `temp_scan_max_roots` is now enforced per temp scan path, as
+  documented, instead of as one budget shared across all `temp_scan_paths`; a
+  crowded `/tmp` no longer starves later temp paths. Entry and duration budgets
+  are split evenly across temp paths so total work stays bounded.
+- dev-artifacts: paths that fail removal with `EACCES`/`EPERM`/`EBUSY` are
+  remembered for the daemon's lifetime and logged once, instead of being sized
+  and retried every cycle.
+
 ## [0.3.0] - 2026-06-24
 
 ### Added

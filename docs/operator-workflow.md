@@ -238,9 +238,17 @@ Dev-artifact filesystem walking is bounded by
 the daemon state file, so one giant worktree cannot starve later
 `node_modules`, `.venv`, `target`, or Zig artifact cleanup indefinitely.
 Temporary-root discovery is separately bounded by
-`dev_artifacts.temp_scan_max_roots`. When a budget is hit, dry-run metadata sets
+`dev_artifacts.temp_scan_max_roots`, applied **per temp scan path**: each entry
+in `temp_scan_paths` gets its own root budget (and an even share of the entry
+and duration budgets), so a `/tmp` full of `nix-shell.*` roots cannot starve a
+later path such as `/srv/fast-local/<user>/tmp`. A truncated temp path is
+reported (`temp_scan_paths_truncated`, `scan_truncated_paths`) but does not stop
+the remaining temp paths or later lanes. When a budget is hit, dry-run metadata sets
 `scan_budget_exhausted: true`, reports `scan_truncated_paths`, and treats the
-omitted evidence as non-actionable. Symlink-heavy temporary roots, including Nix
+omitted evidence as non-actionable. Paths whose removal fails with `EACCES`,
+`EPERM` or `EBUSY` (for example another user's or another session's scratch)
+are logged once and skipped for the rest of the daemon's lifetime instead of
+being re-sized and retried every cycle. Symlink-heavy temporary roots, including Nix
 shell symlink forests, are measured as symlink entries rather than as the
 `/nix/store` paths they point at, so dry-run byte counts do not attribute store
 closures to temporary proof directories.
