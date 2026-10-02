@@ -1,6 +1,21 @@
 # Validation status
 
-Updated: 2026-06-24
+Updated: 2026-10-02
+
+## v0.4.0 (TIN-3342 / TIN-3181)
+
+- **CI restored.** The private GloriousFlywheel dev-shell input is gone (#130),
+  and `main` now requires Go, Bazel and Nix package checks.
+- **Merged:** the Bazel orphan reaper (#124), `archive-lifecycle` (#125), the
+  zstd transcript codec (#126), the inode free floor / ctime age fallback /
+  report fixes (#132), and the removal of `gitlab-runner` and the Darwin
+  release legs (#133).
+- **Validated** on sting (Linux x86_64): `go build`/`vet`/`test`, gofmt, a
+  Darwin `CGO_ENABLED=0` cross-build, plus CI Go/Bazel/Nix on every PR.
+- **Deferred to v0.5.0:** the in-use-path Nix GC safety fix (#128), the
+  receipt-aware GC controller (#123), byte no-progress backoff, and the
+  per-mount/per-root budget knobs in #129. The mount-boundary walker branch
+  (`fix/tin-2690-heavy-roots-first`) conflicts and is not in this release.
 
 ## v0.3.0 — inode-aware disk-pressure handling (TIN-2170 / TIN-2165)
 
