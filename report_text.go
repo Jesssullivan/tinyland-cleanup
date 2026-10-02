@@ -131,6 +131,12 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 				inodeStatus = fmt.Sprintf("%.1f%% inodes used, %s inodes free",
 					mount.InodesUsedPercent,
 					formatCount(mount.InodesFree))
+				switch {
+				case mount.InodeFreeFloor > 0:
+					inodeStatus += fmt.Sprintf(", floor %s free (percent ladder skipped)", formatCount(mount.InodeFreeFloor))
+				case mount.InodesDynamic:
+					inodeStatus += fmt.Sprintf(", dynamic inodes on %s (percent ladder skipped; set inode_free_floor)", mount.Fstype)
+				}
 			}
 			if _, err := fmt.Fprintf(w, "- %s (%s): %.1f%% bytes used, %s free, %s, level %s",
 				label,
@@ -167,10 +173,7 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 		}
 	}
 	if !report.DryRun && (report.TotalBytesFreed > 0 || report.TotalItemsCleaned > 0) {
-		if _, err := fmt.Fprintf(w, "cleaned: %s across %d items\n",
-			formatByteCount(report.TotalBytesFreed),
-			report.TotalItemsCleaned,
-		); err != nil {
+		if _, err := fmt.Fprintf(w, "cleaned: %s\n", formatCleaned(report.TotalBytesFreed, report.TotalItemsCleaned)); err != nil {
 			return err
 		}
 	}
@@ -190,14 +193,40 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 	return nil
 }
 
-func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
-	status := "would run"
-	if !plugin.WouldRun {
-		status = "skipped"
+// pluginStatus renders the per-plugin outcome for the cycle summary. "would
+// run" is a dry-run statement only; a real cycle reports ran, failed, or
+// skipped so operators never mistake a completed plugin for a planned one.
+func pluginStatus(plugin pluginCycleReport) string {
+	status := "skipped"
+	switch {
+	case plugin.Ran && plugin.Error != "":
+		status = "failed"
+	case plugin.Ran:
+		status = "ran"
+	case plugin.DryRun && plugin.WouldRun:
+		status = "would run"
 	}
 	if plugin.SkipReason != "" {
 		status += " (" + plugin.SkipReason + ")"
 	}
+	return status
+}
+
+// formatCleaned renders freed bytes with an item count only when the plugin
+// actually counted items, so a byte-only reclaim never reads "across 0 items".
+func formatCleaned(bytes int64, items int) string {
+	if items <= 0 {
+		return formatByteCount(bytes)
+	}
+	noun := "items"
+	if items == 1 {
+		noun = "item"
+	}
+	return fmt.Sprintf("%s across %d %s", formatByteCount(bytes), items, noun)
+}
+
+func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
+	status := pluginStatus(plugin)
 
 	if _, err := fmt.Fprintf(w, "- %s: %s\n", plugin.Name, status); err != nil {
 		return err
@@ -262,10 +291,7 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 		}
 	}
 	if plugin.BytesFreed > 0 || plugin.ItemsCleaned > 0 {
-		if _, err := fmt.Fprintf(w, "  cleaned: %s across %d items\n",
-			formatByteCount(plugin.BytesFreed),
-			plugin.ItemsCleaned,
-		); err != nil {
+		if _, err := fmt.Fprintf(w, "  cleaned: %s\n", formatCleaned(plugin.BytesFreed, plugin.ItemsCleaned)); err != nil {
 			return err
 		}
 	}

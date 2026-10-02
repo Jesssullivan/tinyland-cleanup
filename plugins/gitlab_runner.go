@@ -168,7 +168,7 @@ func (p *GitLabRunnerPlugin) cleanBuildDirectories(ctx context.Context, runnerPa
 			}
 
 			// Skip if too new (unless maxAge is 0 for critical cleanup)
-			if maxAge > 0 && info.ModTime().After(cutoff) {
+			if maxAge > 0 && staleModTime(info).After(cutoff) {
 				continue
 			}
 
@@ -181,7 +181,7 @@ func (p *GitLabRunnerPlugin) cleanBuildDirectories(ctx context.Context, runnerPa
 			if sizeBefore > 0 {
 				result.BytesFreed += sizeBefore
 				result.ItemsCleaned++
-				logger.Debug("removed build directory", "path", buildPath, "age", time.Since(info.ModTime()))
+				logger.Debug("removed build directory", "path", buildPath, "age", time.Since(staleModTime(info)))
 			}
 		}
 	}

@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `inode_free_floor`, global and per mount: an absolute free-inode floor that
+  replaces the percentage inode ladder. Dynamic-inode filesystems (XFS, APFS,
+  ZFS, Btrfs) no longer escalate on inode percentage at all.
+- `debris-report`, a report-only plugin (off by default) that logs stale
+  incident and agent debris (YYYYMMDD-stamped names, bulkload scratch,
+  rollback and carry trees, reclaim markers) with sizes. It never deletes.
+- Cycle reports carry `ran` per plugin and `fstype`, `inodes_dynamic`,
+  `inode_free_floor` and `inode_ladder_skipped` per mount.
+
+### Fixed
+
+- Age checks fall back to ctime when a file's mtime is more than five minutes
+  in the future, so output bases stamped decades ahead (2036) age out.
+- `github-runner` and `yum` report honest item and byte counts.
+
 ### Changed
 
 - PR/merge-group Go, Bazel, and docs checks now use only public lock-pinned Nix tools plus

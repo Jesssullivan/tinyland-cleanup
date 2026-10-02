@@ -126,12 +126,12 @@ func (p *EtcdPlugin) cleanOldWAL(ctx context.Context, cfg *config.Config, logger
 			return nil
 		}
 		// Only clean .wal files that are old
-		if strings.HasSuffix(info.Name(), ".wal") && info.ModTime().Before(cutoff) {
+		if strings.HasSuffix(info.Name(), ".wal") && staleModTime(info).Before(cutoff) {
 			size := info.Size()
 			if err := os.Remove(path); err == nil {
 				result.BytesFreed += size
 				result.ItemsCleaned++
-				logger.Debug("removed old WAL file", "path", path, "age_days", int(time.Since(info.ModTime()).Hours()/24))
+				logger.Debug("removed old WAL file", "path", path, "age_days", int(time.Since(staleModTime(info)).Hours()/24))
 			}
 		}
 		return nil

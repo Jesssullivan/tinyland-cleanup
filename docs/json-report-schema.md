@@ -54,10 +54,13 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `label`, `path` (string); `used_percent`, `free_gb` (float64); `free_bytes` (uint64)
 - `byte_level` (string), `inode_level` (string, optional — absent means inodes unmeasured)
 - `inodes_total`, `inodes_free` (uint64, optional); `inodes_used_percent` (float64, optional)
+- `fstype` (string, optional); `inodes_dynamic` (bool, optional) — dynamic-inode filesystem whose used percentage is not a pressure signal
+- `inode_free_floor` (uint64, optional); `inode_ladder_skipped` (bool, optional) — the percentage inode ladder was not consulted
 - `level` (string) — combined level; `error` (string, optional)
 
 ## pluginCycleReport
 - `name`, `description` (string); `level` (string); `dry_run`, `would_run` (bool)
+- `ran` (bool) — `Cleanup` was actually invoked this cycle (never true in dry-run); `would_run` is eligibility, `ran` is the outcome
 - `skip_reason` (string, optional) — e.g. `dry_run`, `cooldown`, `target_free_met`
 - `bytes_freed`, `estimated_bytes_freed`, `command_bytes_freed`, `host_bytes_freed` (int64); `items_cleaned` (int)
 - `cooldown_remaining_seconds` (int64, optional); `error` (string, optional)

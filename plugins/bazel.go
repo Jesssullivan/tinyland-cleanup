@@ -317,7 +317,7 @@ func discoverBazelProcessOutputBase(path string, kind string) []bazelCandidate {
 	if err != nil || !info.IsDir() || !isBazelOutputBase(path) {
 		return nil
 	}
-	candidate := newBazelCandidate("output_base", filepath.Base(path), path, info.ModTime())
+	candidate := newBazelCandidate("output_base", filepath.Base(path), path, staleModTime(info))
 	candidate.Active = true
 	switch kind {
 	case "client":
@@ -342,15 +342,15 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 	var candidates []bazelCandidate
 	if isBazelOutputBase(root) {
 		return append(
-			[]bazelCandidate{newBazelCandidate("output_base", filepath.Base(root), root, info.ModTime())},
+			[]bazelCandidate{newBazelCandidate("output_base", filepath.Base(root), root, staleModTime(info))},
 			discoverBazelServerLogCandidates(root)...,
 		)
 	}
 	if isBazelPartialOutputBase(root) {
-		return []bazelCandidate{newBazelCandidate("partial_output_base", filepath.Base(root), root, info.ModTime())}
+		return []bazelCandidate{newBazelCandidate("partial_output_base", filepath.Base(root), root, staleModTime(info))}
 	}
 	if isBazelRemoteCacheRoot(root) {
-		return []bazelCandidate{newBazelCandidate("remote_cache", filepath.Base(root), root, info.ModTime())}
+		return []bazelCandidate{newBazelCandidate("remote_cache", filepath.Base(root), root, staleModTime(info))}
 	}
 
 	base := filepath.Base(root)
@@ -371,26 +371,26 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 		switch {
 		case isBazelOutputBase(path):
 			if info, err := entry.Info(); err == nil {
-				candidates = append(candidates, newBazelCandidate("output_base", entry.Name(), path, info.ModTime()))
+				candidates = append(candidates, newBazelCandidate("output_base", entry.Name(), path, staleModTime(info)))
 				candidates = append(candidates, discoverBazelServerLogCandidates(path)...)
 			}
 		case isBazelPartialOutputBase(path):
 			if info, err := entry.Info(); err == nil {
-				candidates = append(candidates, newBazelCandidate("partial_output_base", entry.Name(), path, info.ModTime()))
+				candidates = append(candidates, newBazelCandidate("partial_output_base", entry.Name(), path, staleModTime(info)))
 			}
 		case strings.HasPrefix(entry.Name(), "_bazel_"):
 			candidates = append(candidates, discoverBazelOutputUserRootCandidates(path)...)
 		case entry.Name() == "repository_cache":
 			if info, err := entry.Info(); err == nil {
-				candidates = append(candidates, newBazelCandidate("repository_cache", entry.Name(), path, info.ModTime()))
+				candidates = append(candidates, newBazelCandidate("repository_cache", entry.Name(), path, staleModTime(info)))
 			}
 		case entry.Name() == "disk_cache":
 			if info, err := entry.Info(); err == nil {
-				candidates = append(candidates, newBazelCandidate("disk_cache", entry.Name(), path, info.ModTime()))
+				candidates = append(candidates, newBazelCandidate("disk_cache", entry.Name(), path, staleModTime(info)))
 			}
 		case isBazelRemoteCacheRoot(path):
 			if info, err := entry.Info(); err == nil {
-				candidates = append(candidates, newBazelCandidate("remote_cache", entry.Name(), path, info.ModTime()))
+				candidates = append(candidates, newBazelCandidate("remote_cache", entry.Name(), path, staleModTime(info)))
 			}
 		}
 	}
@@ -404,7 +404,7 @@ func discoverBazelOutputUserRootCandidates(outputUserRoot string) []bazelCandida
 
 	repoCache := filepath.Join(outputUserRoot, "cache", "repos", "v1")
 	if info, err := os.Stat(repoCache); err == nil && info.IsDir() {
-		candidates = append(candidates, newBazelCandidate("repository_cache", filepath.Join("cache", "repos", "v1"), repoCache, info.ModTime()))
+		candidates = append(candidates, newBazelCandidate("repository_cache", filepath.Join("cache", "repos", "v1"), repoCache, staleModTime(info)))
 	}
 
 	return candidates
@@ -428,10 +428,10 @@ func discoverBazelOutputBases(outputUserRoot string) []bazelCandidate {
 		}
 		switch {
 		case isBazelOutputBase(path):
-			candidates = append(candidates, newBazelCandidate("output_base", entry.Name(), path, info.ModTime()))
+			candidates = append(candidates, newBazelCandidate("output_base", entry.Name(), path, staleModTime(info)))
 			candidates = append(candidates, discoverBazelServerLogCandidates(path)...)
 		case isBazelPartialOutputBase(path):
-			candidates = append(candidates, newBazelCandidate("partial_output_base", entry.Name(), path, info.ModTime()))
+			candidates = append(candidates, newBazelCandidate("partial_output_base", entry.Name(), path, staleModTime(info)))
 		}
 	}
 	return candidates
@@ -453,7 +453,7 @@ func discoverBazelServerLogCandidates(outputBase string) []bazelCandidate {
 			continue
 		}
 		path := filepath.Join(outputBase, entry.Name())
-		candidates = append(candidates, newBazelCandidate("server_log", entry.Name(), path, info.ModTime()))
+		candidates = append(candidates, newBazelCandidate("server_log", entry.Name(), path, staleModTime(info)))
 	}
 	return candidates
 }
@@ -480,7 +480,7 @@ func discoverBazeliskCandidates(root string) []bazelCandidate {
 			if err != nil {
 				continue
 			}
-			candidates = append(candidates, newBazelCandidate("bazelisk", filepath.Join("sha256", entry.Name()), path, info.ModTime()))
+			candidates = append(candidates, newBazelCandidate("bazelisk", filepath.Join("sha256", entry.Name()), path, staleModTime(info)))
 		}
 	}
 
@@ -499,7 +499,7 @@ func discoverBazeliskCandidates(root string) []bazelCandidate {
 		if err != nil {
 			continue
 		}
-		candidates = append(candidates, newBazelCandidate("bazelisk", entry.Name(), path, info.ModTime()))
+		candidates = append(candidates, newBazelCandidate("bazelisk", entry.Name(), path, staleModTime(info)))
 	}
 	return candidates
 }
@@ -652,7 +652,7 @@ func bazelOutputBaseActivity(path string) bazelOutputBaseActivityInfo {
 		}
 	}
 	if info, err := os.Stat(filepath.Join(path, "lock")); err == nil {
-		if time.Since(info.ModTime()) < 15*time.Minute {
+		if time.Since(staleModTime(info)) < 15*time.Minute {
 			return bazelOutputBaseActivityInfo{
 				Active: true,
 				Reason: "recent Bazel output-base lock detected",

@@ -111,19 +111,25 @@ func (p *GitHubRunnerPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	}
 
 	for _, target := range p.githubRunnerTargets(cfg) {
-		result.BytesFreed += p.cleanupTarget(ctx, level, target, logger)
+		freed, items := p.cleanupTarget(ctx, level, target, logger)
+		result.BytesFreed += freed
+		result.ItemsCleaned += items
 	}
 
 	return result
 }
 
-func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLevel, target githubRunnerTarget, logger *slog.Logger) int64 {
+// cleanupTarget cleans one runner instance and returns bytes freed and the
+// number of cleaned items (directories or artifact trees), so the cycle
+// summary can attribute freed bytes to a non-zero item count.
+func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLevel, target githubRunnerTarget, logger *slog.Logger) (int64, int) {
 	var bytesFreed int64
+	var itemsCleaned int
 
 	// Validate that the runner home actually exists before cleaning
 	if !pathExistsAndIsDir(target.home) {
 		logger.Debug("github runner home not found, skipping", "instance", target.name, "path", target.home)
-		return bytesFreed
+		return bytesFreed, itemsCleaned
 	}
 
 	// Warning level: Clean temp directory only
@@ -132,6 +138,7 @@ func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLev
 			freed := deleteOldFilesSameDevice(target.tempDir, 24*time.Hour)
 			bytesFreed += freed
 			if freed > 0 {
+				itemsCleaned++
 				logger.Debug("cleaned github runner temp", "instance", target.name, "freed_mb", freed/(1024*1024))
 			}
 		}
@@ -145,10 +152,12 @@ func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLev
 		for _, pattern := range tmpArtifacts {
 			matches, _ := filepath.Glob(pattern)
 			for _, path := range matches {
-				if info, err := os.Stat(path); err == nil && info.ModTime().Before(time.Now().Add(-24*time.Hour)) {
+				if info, err := os.Stat(path); err == nil && staleModTime(info).Before(time.Now().Add(-24*time.Hour)) {
 					size := getDirSizeSameDevice(path)
-					os.RemoveAll(path)
-					bytesFreed += size
+					if os.RemoveAll(path) == nil {
+						bytesFreed += size
+						itemsCleaned++
+					}
 				}
 			}
 		}
@@ -164,6 +173,7 @@ func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLev
 			freed := safeBytesDiff(sizeBefore, sizeAfter)
 			bytesFreed += freed
 			if freed > 0 {
+				itemsCleaned++
 				logger.Debug("cleaned github runner cache", "instance", target.name, "freed_mb", freed/(1024*1024))
 			}
 		}
@@ -175,11 +185,13 @@ func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLev
 				if entry.IsDir() {
 					dirPath := filepath.Join(target.workDir, entry.Name())
 					info, err := entry.Info()
-					if err == nil && info.ModTime().Before(time.Now().Add(-24*time.Hour)) {
+					if err == nil && staleModTime(info).Before(time.Now().Add(-24*time.Hour)) {
 						size := getDirSizeSameDevice(dirPath)
-						os.RemoveAll(dirPath)
-						bytesFreed += size
-						logger.Debug("removed old work dir", "instance", target.name, "dir", entry.Name(), "freed_mb", size/(1024*1024))
+						if os.RemoveAll(dirPath) == nil {
+							bytesFreed += size
+							itemsCleaned++
+							logger.Debug("removed old work dir", "instance", target.name, "dir", entry.Name(), "freed_mb", size/(1024*1024))
+						}
 					}
 				}
 			}
@@ -195,6 +207,7 @@ func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLev
 				os.RemoveAll(target.workDir)
 				os.MkdirAll(target.workDir, 0755)
 				bytesFreed += size
+				itemsCleaned++
 				logger.Debug("cleaned all github runner work dirs", "instance", target.name, "freed_mb", size/(1024*1024))
 			}
 		}
@@ -216,10 +229,11 @@ func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLev
 				os.RemoveAll(target.cacheDir)
 				os.MkdirAll(target.cacheDir, 0755)
 				bytesFreed += size
+				itemsCleaned++
 				logger.Debug("removed all github runner cache", "instance", target.name, "freed_mb", size/(1024*1024))
 			}
 		}
 	}
 
-	return bytesFreed
+	return bytesFreed, itemsCleaned
 }
