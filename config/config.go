@@ -255,6 +255,20 @@ type BazelConfig struct {
 	AllowStopIdleServers bool `yaml:"allow_stop_idle_servers"`
 	// AllowDeleteActiveOutputBases allows future cleanup to delete active output bases.
 	AllowDeleteActiveOutputBases bool `yaml:"allow_delete_active_output_bases"`
+	// ReapOrphanedOutputBases enables deletion of output bases whose DO_NOT_BUILD_HERE
+	// workspace path has been removed. Orphan candidates bypass
+	// keep_recent_output_bases but never bypass active-use or workspace protection.
+	ReapOrphanedOutputBases bool `yaml:"reap_orphaned_output_bases"`
+	// OrphanStaleAfter is the age threshold applied to orphaned output bases. It is
+	// independent of stale_after because a removed workspace cannot come back to
+	// reuse its output base.
+	OrphanStaleAfter string `yaml:"orphan_stale_after"`
+	// OrphanWorkspaceMountRoots are directories treated as mount containers when
+	// resolving a removed workspace path. When the nearest existing ancestor of a
+	// DO_NOT_BUILD_HERE path is one of these (or the filesystem root), the workspace
+	// is treated as unreachable rather than deleted, so an unmounted volume never
+	// makes every workspace on it look orphaned.
+	OrphanWorkspaceMountRoots []string `yaml:"orphan_workspace_mount_roots"`
 }
 
 // NixConfig holds Nix store and profile generation cleanup settings.
@@ -539,6 +553,9 @@ func DefaultConfig() *Config {
 			},
 			AllowStopIdleServers:         true,
 			AllowDeleteActiveOutputBases: false,
+			ReapOrphanedOutputBases:      true,
+			OrphanStaleAfter:             "7d",
+			OrphanWorkspaceMountRoots:    defaultOrphanWorkspaceMountRoots(),
 		},
 		Nix: NixConfig{
 			MinUserGenerations:                            5,
@@ -689,6 +706,18 @@ func defaultBazelRoots(home string) []string {
 		roots = append(roots, "/private/tmp")
 	}
 	return roots
+}
+
+// defaultOrphanWorkspaceMountRoots returns the directories that only ever hold
+// mount points. A DO_NOT_BUILD_HERE workspace whose nearest surviving ancestor
+// is one of these is unreachable rather than deleted: an unmounted external
+// volume must not make every workspace it hosted look orphaned.
+func defaultOrphanWorkspaceMountRoots() []string {
+	roots := []string{"/"}
+	if runtime.GOOS == "darwin" {
+		return append(roots, "/Volumes", "/System/Volumes", "/net", "/private/var/folders")
+	}
+	return append(roots, "/mnt", "/media", "/run/media", "/net", "/srv")
 }
 
 // LoadConfig loads configuration from a YAML file, merging with defaults.

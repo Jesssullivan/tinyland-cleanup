@@ -204,6 +204,23 @@ bazel:
     - ~/git/GloriousFlywheel
   allow_stop_idle_servers: true
   allow_delete_active_output_bases: false
+  # Reap output bases whose DO_NOT_BUILD_HERE marker names a workspace that no
+  # longer exists (deleted git worktrees are the usual source). Orphans bypass
+  # keep_recent_output_bases but never bypass active-use or workspace
+  # protection, and the claim is re-proved immediately before deletion.
+  reap_orphaned_output_bases: true
+  orphan_stale_after: 7d
+  # Directories that only ever hold mount points. When the nearest surviving
+  # ancestor of a claimed workspace is one of these, the workspace is treated
+  # as unreachable rather than removed, so an unmounted volume cannot make
+  # every workspace it hosted look orphaned. Leave unset to keep the compiled
+  # per-platform defaults; setting the key replaces them entirely.
+  # Linux compiled defaults: /, /mnt, /media, /run/media, /net, /srv
+  # Darwin compiled defaults: /, /Volumes, /System/Volumes, /net,
+  #                           /private/var/folders
+  # orphan_workspace_mount_roots:
+  #   - /
+  #   - /Volumes
 
 # Workspace development artifact settings
 dev_artifacts:
