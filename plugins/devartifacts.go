@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
+	"github.com/klauspost/compress/zstd"
 )
 
 const devArtifactRecentOutputGrace = 2 * time.Hour
@@ -934,7 +935,7 @@ func (p *DevArtifactsPlugin) planAgentWorktreeArtifacts(ctx context.Context, hom
 
 func (p *DevArtifactsPlugin) planTCFSRustTargetCaches(ctx context.Context, home string, maxAge time.Duration, mutates bool, daCfg config.DevArtifactsConfig, active devArtifactActivity, targets *[]CleanupTarget, budgets ...*devArtifactScanBudget) {
 	p.forEachTCFSRustTargetCache(ctx, home, daCfg, active, func(path string, info os.FileInfo, bytes int64, protected bool, activeReason string) {
-		*targets = append(*targets, p.tcfsRustTargetCacheTarget(path, bytes, info.ModTime(), maxAge, mutates, protected, activeReason))
+		*targets = append(*targets, p.tcfsRustTargetCacheTarget(path, bytes, staleModTime(info), maxAge, mutates, protected, activeReason))
 	}, budgets...)
 }
 
@@ -953,7 +954,7 @@ func (p *DevArtifactsPlugin) planAgentWorktreeRoots(ctx context.Context, home st
 		} else if reason := gitWorktreeProtectReason(ctx, path); reason != "" {
 			protectReason = reason
 		}
-		*targets = append(*targets, p.agentWorktreeRootTarget(path, bytes, info.ModTime(), staleAfter, time.Now(), level >= LevelCritical, protectReason, activeReason))
+		*targets = append(*targets, p.agentWorktreeRootTarget(path, bytes, staleModTime(info), staleAfter, time.Now(), level >= LevelCritical, protectReason, activeReason))
 	}, budgets...)
 }
 
@@ -1027,17 +1028,41 @@ func (p *DevArtifactsPlugin) forEachAgentTranscript(ctx context.Context, home st
 				return nil
 			}
 			if info.IsDir() {
+				if path != root && agentTranscriptDirExcluded(info.Name()) {
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			if !info.Mode().IsRegular() || !strings.HasSuffix(path, ".jsonl") {
 				return nil
 			}
-			if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+			if staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter)) {
 				return nil
 			}
 			callback(path, info, activeRefs[filepath.Clean(path)])
 			return nil
 		})
+	}
+}
+
+// agentTranscriptDirExcluded reports directories inside a transcript root that
+// must never be rewritten in place.
+//
+// Dotfile directories under ~/.codex/sessions are not session partitions: they
+// are incident pre-images and recovery snapshots (.incident-backup-*), which
+// exist precisely so a forensic copy survives untouched. Compressing a file
+// inside one replaces the evidence with a re-encoded copy, which is a mutation
+// even though gzip is lossless. Archive directories are excluded for the same
+// reason: they are the durable side of an archival, not a compression target.
+func agentTranscriptDirExcluded(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	switch name {
+	case "archived_sessions", "archive", "backups", "receipts":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1069,7 +1094,7 @@ func (p *DevArtifactsPlugin) forEachAgentWorktreeRoot(ctx context.Context, home 
 			if err != nil {
 				continue
 			}
-			if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+			if staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter)) {
 				continue
 			}
 			bytes, err := getDirAllocatedBytesContext(ctx, path)
@@ -1222,19 +1247,25 @@ func (p *DevArtifactsPlugin) cleanAgentWorktreeArtifacts(ctx context.Context, ho
 
 func (p *DevArtifactsPlugin) compressAgentTranscripts(ctx context.Context, home string, staleAfter time.Duration, daCfg config.DevArtifactsConfig, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
 	var totalFreed int64
+	codec, err := normalizeAgentTranscriptCodec(daCfg.AgentTranscriptCodec)
+	if err != nil {
+		// An unrecognized codec is a config error, not a reason to guess.
+		logger.Warn("skipping agent transcript compression", "error", err)
+		return 0
+	}
 	p.forEachAgentTranscript(ctx, home, staleAfter, daCfg, func(path string, info os.FileInfo, activeReason string) {
 		if activeReason != "" {
 			logger.Debug("preserving active agent transcript", "path", path, "reason", activeReason)
 			return
 		}
-		freed, err := gzipAgentTranscript(path, info)
+		freed, err := compressAgentTranscript(path, info, codec)
 		if err != nil {
 			logger.Warn("failed to compress agent transcript", "path", path, "error", err)
 			return
 		}
 		totalFreed += freed
 		if freed > 0 {
-			logger.Info("compressed agent transcript", "path", path, "freed_mb", freed/(1024*1024))
+			logger.Info("compressed agent transcript", "path", path, "codec", codec, "freed_mb", freed/(1024*1024))
 		}
 	}, budgets...)
 	return totalFreed
@@ -1302,13 +1333,13 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
 		protected := p.isProtected(path, daCfg.ProtectPaths)
 		if activeReason != "" {
-			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, info.ModTime(), staleAfter, now, protected, activeReason))
+			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, staleModTime(info), staleAfter, now, protected, activeReason))
 			continue
 		}
 		// Staleness gates the recursive size walk: fresh or protected roots
 		// are not actionable (the lane is review-only), so walking them only
 		// burns the shared scan budget before it reaches deletable families.
-		if protected || (staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter))) {
+		if protected || (staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter))) {
 			continue
 		}
 		size, err := getDirAllocatedBytesContext(ctx, path)
@@ -1319,7 +1350,7 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 		if size < minBytes {
 			continue
 		}
-		*targets = append(*targets, p.temporaryArtifactTarget(path, size, info.ModTime(), staleAfter, now, protected, ""))
+		*targets = append(*targets, p.temporaryArtifactTarget(path, size, staleModTime(info), staleAfter, now, protected, ""))
 	}
 }
 
@@ -1350,7 +1381,7 @@ func newestShallowMtime(ctx context.Context, dir string, levels int, budget *dev
 		// rather than aborting the whole lane for the cycle.
 		return time.Time{}, nil
 	}
-	newest := info.ModTime()
+	newest := staleModTime(info)
 	if levels <= 0 {
 		return newest, nil
 	}
@@ -1373,8 +1404,8 @@ func newestShallowMtime(ctx context.Context, dir string, levels int, budget *dev
 			}
 			continue
 		}
-		if info, err := entry.Info(); err == nil && info.ModTime().After(newest) {
-			newest = info.ModTime()
+		if info, err := entry.Info(); err == nil && staleModTime(info).After(newest) {
+			newest = staleModTime(info)
 		}
 	}
 	return newest, nil
@@ -1392,7 +1423,7 @@ func harnessSessionTranscriptMtime(home, project, session string) time.Time {
 	}
 	transcript := filepath.Join(home, ".claude", "projects", project, session+".jsonl")
 	if info, err := os.Lstat(transcript); err == nil {
-		return info.ModTime()
+		return staleModTime(info)
 	}
 	return time.Time{}
 }
@@ -1573,7 +1604,7 @@ func harnessSessionRevived(session, home string, staleAfter time.Duration) bool 
 		return false
 	}
 	threshold := time.Now().Add(-staleAfter)
-	if info, err := os.Lstat(session); err == nil && info.ModTime().After(threshold) {
+	if info, err := os.Lstat(session); err == nil && staleModTime(info).After(threshold) {
 		return true
 	}
 	projectPath := filepath.Dir(session)
@@ -1715,7 +1746,7 @@ func (p *DevArtifactsPlugin) planNixTemporaryRoots(ctx context.Context, scanPath
 		}
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
 		protected := p.isProtected(path, daCfg.ProtectPaths)
-		target := p.nixTemporaryRootTarget(path, 0, info.ModTime(), staleAfter, now, protected, activeReason, canDelete)
+		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, protected, activeReason, canDelete)
 		if target.Action != "delete" {
 			if err := budget.checkTempRoot(ctx, path); err != nil {
 				return
@@ -1766,7 +1797,7 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 			continue
 		}
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
-		target := p.nixTemporaryRootTarget(path, 0, info.ModTime(), staleAfter, now, p.isProtected(path, protectPaths), activeReason, true)
+		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, p.isProtected(path, protectPaths), activeReason, true)
 		if target.Action != "delete" {
 			if err := budget.checkTempRoot(ctx, path); err != nil {
 				return totalFreed
@@ -1866,7 +1897,7 @@ func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(ctx context.Context, scan
 		if activeRoots[canonicalTempArtifactPath(root)] != "" {
 			continue
 		}
-		if staleAfter > 0 && info.ModTime().After(now.Add(-staleAfter)) {
+		if staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter)) {
 			continue
 		}
 		if minBytes > 0 {
@@ -2932,9 +2963,77 @@ func agentCommandNameFromProcessLine(line string) string {
 	return command
 }
 
-func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
+// Agent transcript compression codecs. gzip is the historical codec and the
+// existing .jsonl.gz corpus stays readable and recognized forever; zstd is the
+// default for new writes (operator ruling R14, 2026-08-13) because it roughly
+// halves the archived footprint of JSONL transcripts at comparable CPU cost.
+const (
+	agentTranscriptCodecGzip = "gzip"
+	agentTranscriptCodecZstd = "zstd"
+)
+
+// agentTranscriptCompressedSuffixes are the suffixes that mean a transcript has
+// already been archived. A .jsonl.gz written by an earlier release is never
+// rewritten as .jsonl.zst: re-encoding an archived transcript buys a little
+// space and spends provenance.
+var agentTranscriptCompressedSuffixes = []string{".gz", ".zst"}
+
+// normalizeAgentTranscriptCodec resolves the configured codec, falling back to
+// zstd for an empty value and rejecting anything unrecognized rather than
+// silently picking a codec the operator did not ask for.
+func normalizeAgentTranscriptCodec(codec string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "":
+		return agentTranscriptCodecZstd, nil
+	case agentTranscriptCodecGzip:
+		return agentTranscriptCodecGzip, nil
+	case agentTranscriptCodecZstd:
+		return agentTranscriptCodecZstd, nil
+	default:
+		return "", fmt.Errorf("unsupported agent transcript codec %q; want %q or %q", codec, agentTranscriptCodecGzip, agentTranscriptCodecZstd)
+	}
+}
+
+func agentTranscriptCodecSuffix(codec string) string {
+	if codec == agentTranscriptCodecGzip {
+		return ".gz"
+	}
+	return ".zst"
+}
+
+// agentTranscriptAlreadyArchived reports whether a transcript already has a
+// compressed counterpart in any supported codec.
+func agentTranscriptAlreadyArchived(path string) bool {
+	for _, suffix := range agentTranscriptCompressedSuffixes {
+		if pathExists(path + suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// newAgentTranscriptCompressor returns a WriteCloser that encodes into w.
+func newAgentTranscriptCompressor(w io.Writer, codec string) (io.WriteCloser, error) {
+	if codec == agentTranscriptCodecGzip {
+		return gzip.NewWriterLevel(w, gzip.BestCompression)
+	}
+	return zstd.NewWriter(w,
+		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
+		// Frame_Content_Size lets archive-lifecycle prove redundancy from the
+		// frame header alone, with no decompression pass.
+		zstd.WithEncoderCRC(true),
+	)
+}
+
+// compressAgentTranscript replaces a transcript JSONL with a compressed
+// counterpart, preserving mode and mtime. It is atomic at the rename: a failure
+// anywhere before it leaves the original untouched and removes the temp file.
+func compressAgentTranscript(path string, info os.FileInfo, codec string) (int64, error) {
+	codec, err := normalizeAgentTranscriptCodec(codec)
+	if err != nil {
+		return 0, err
+	}
 	if info == nil {
-		var err error
 		info, err = os.Stat(path)
 		if err != nil {
 			return 0, err
@@ -2943,10 +3042,12 @@ func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
 	if !info.Mode().IsRegular() {
 		return 0, nil
 	}
-	dest := path + ".gz"
-	if pathExists(dest) {
+	if agentTranscriptAlreadyArchived(path) {
 		return 0, nil
 	}
+
+	suffix := agentTranscriptCodecSuffix(codec)
+	dest := path + suffix
 
 	input, err := os.Open(path)
 	if err != nil {
@@ -2954,7 +3055,7 @@ func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
 	}
 	defer input.Close()
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.gz")
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*"+suffix)
 	if err != nil {
 		return 0, err
 	}
@@ -2966,7 +3067,7 @@ func gzipAgentTranscript(path string, info os.FileInfo) (int64, error) {
 		}
 	}()
 
-	writer, err := gzip.NewWriterLevel(tmp, gzip.BestCompression)
+	writer, err := newAgentTranscriptCompressor(tmp, codec)
 	if err != nil {
 		_ = tmp.Close()
 		return 0, err
@@ -3346,7 +3447,7 @@ func devArtifactHasRecentContent(ctx context.Context, path string, grace time.Du
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		if info.ModTime().After(cutoff) {
+		if staleModTime(info).After(cutoff) {
 			return errRecentDevArtifactContent
 		}
 		return nil
@@ -3551,7 +3652,7 @@ func (p *DevArtifactsPlugin) cleanTCFSRustTargetCaches(ctx context.Context, home
 		if protected || activeReason != "" {
 			return
 		}
-		if maxAge > 0 && info.ModTime().After(time.Now().Add(-maxAge)) {
+		if maxAge > 0 && staleModTime(info).After(time.Now().Add(-maxAge)) {
 			return
 		}
 		logger.Debug("removing stale TCFS Rust target cache", "path", path, "size_mb", bytes/(1024*1024))
@@ -4010,7 +4111,7 @@ func (p *DevArtifactsPlugin) isFileStale(path string, maxAge time.Duration) bool
 		return true // File doesn't exist = project abandoned
 	}
 	cutoff := time.Now().Add(-maxAge)
-	return info.ModTime().Before(cutoff)
+	return staleModTime(info).Before(cutoff)
 }
 
 // isProtected checks if a path is in the protect list.

@@ -68,9 +68,11 @@ func (p *YumPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		cacheDirs = []string{"/var/cache/yum"}
 	}
 
+	sizesBefore := make(map[string]int64, len(cacheDirs))
 	var sizeBefore int64
 	for _, dir := range cacheDirs {
-		sizeBefore += getDirSize(dir)
+		sizesBefore[dir] = getDirSize(dir)
+		sizeBefore += sizesBefore[dir]
 	}
 
 	// Moderate+: Clean all cache
@@ -83,13 +85,19 @@ func (p *YumPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 			if err := cmd.Run(); err != nil {
 				logger.Debug("yum clean failed", "error", err)
 			} else {
-				// Calculate freed space
+				// Calculate freed space; each cache directory that shrank is
+				// one cleaned item so the cycle summary never reports bytes
+				// "across 0 items".
 				var sizeAfter int64
 				for _, dir := range cacheDirs {
-					sizeAfter += getDirSize(dir)
+					after := getDirSize(dir)
+					sizeAfter += after
+					if after < sizesBefore[dir] {
+						result.ItemsCleaned++
+					}
 				}
-				result.BytesFreed = sizeBefore - sizeAfter
-				logger.Debug("cleaned yum/dnf cache", "freed_mb", result.BytesFreed/(1024*1024))
+				result.BytesFreed = safeBytesDiff(sizeBefore, sizeAfter)
+				logger.Debug("cleaned yum/dnf cache", "freed_mb", result.BytesFreed/(1024*1024), "items", result.ItemsCleaned)
 			}
 		} else {
 			logger.Debug("skipping yum cleanup - sudo required")

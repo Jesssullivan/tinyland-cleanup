@@ -58,7 +58,53 @@ bazel:
     - ~/git/GloriousFlywheel
   allow_stop_idle_servers: true
   allow_delete_active_output_bases: false
+  reap_orphaned_output_bases: true
+  orphan_stale_after: 7d
+  # orphan_workspace_mount_roots defaults per platform; see below.
 ```
+
+## Orphaned output bases
+
+Bazel writes a `DO_NOT_BUILD_HERE` file into every output base containing the
+absolute path of the workspace that owns it. When that workspace is deleted —
+the usual source is a removed `git worktree` — the output base becomes garbage
+that no rebuild will ever reuse, and `keep_recent_output_bases` keeps sheltering
+it because its mtime never advances relative to its peers.
+
+`reap_orphaned_output_bases` classifies those bases as
+`delete_orphaned_output_base` once they are older than `orphan_stale_after`
+(default `7d`, independent of `stale_after` because a removed workspace cannot
+come back). Orphan candidates bypass `keep_recent_output_bases`. They never
+bypass active-use evidence or `protect_workspaces`.
+
+Workspace claims resolve to exactly one of three states, and the reaper acts on
+only one of them:
+
+| State | Meaning | Action |
+|---|---|---|
+| `present` | the claimed workspace path exists | normal stale/retention policy |
+| `removed` | the claimed path is gone and its surrounding tree is reachable | orphan reap candidate |
+| `unreachable` | the claim could not be resolved safely | reported, never reaped |
+
+Every ambiguous reading is fail-closed into `unreachable`: an unreadable or
+non-regular `DO_NOT_BUILD_HERE`, a relative path, a `stat` error that is not
+"does not exist" (permission denied, `EIO`, a stale network handle), or a
+workspace whose nearest surviving ancestor is only a mount container.
+
+That last rule is what keeps an unmounted volume from looking like a mass
+orphaning event. `orphan_workspace_mount_roots` lists the directories that only
+ever hold mount points; when the nearest surviving ancestor of a claimed
+workspace is one of them, the workspace is unreachable, not removed. Compiled
+defaults are `/`, `/mnt`, `/media`, `/run/media`, `/net`, and `/srv` on Linux,
+and `/`, `/Volumes`, `/System/Volumes`, `/net`, and `/private/var/folders` on
+Darwin. Setting the key in config replaces the compiled list entirely.
+
+Dry-run plans carry `orphaned_workspace_output_base_count` and
+`unreachable_workspace_output_base_count` in plan metadata, and every non-orphan
+output-base target whose claim is `removed` or `unreachable` says so in its
+reason string. Real cleanup re-reads the claim and re-checks activity
+immediately before deleting each orphan, so a restored worktree or a resumed
+server that appears between planning and deletion survives.
 
 Runtime boundary:
 
@@ -103,7 +149,10 @@ Runtime boundary:
 - Bazel output bases, repository caches, and disk caches are `warm` targets
   because they are rebuildable but expensive; Bazelisk downloads are `safe`
   targets;
-- `delete_output_base`, `delete_cache_tier`, and
+- moderate, aggressive, and critical classify output bases whose
+  `DO_NOT_BUILD_HERE` workspace was provably removed as
+  `delete_orphaned_output_base` once they pass `orphan_stale_after`;
+- `delete_output_base`, `delete_orphaned_output_base`, `delete_cache_tier`, and
   `stop_idle_server_then_delete_output_base` targets advertise `reclaim=host`
   and `host_reclaims_space=true`; review and protected targets advertise
   `reclaim=none`.

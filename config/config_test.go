@@ -61,6 +61,18 @@ func TestDefaultConfig(t *testing.T) {
 	if !cfg.Enable.Docker {
 		t.Error("expected Docker enabled")
 	}
+	if cfg.Enable.DebrisReport {
+		t.Error("expected DebrisReport disabled by default")
+	}
+	if cfg.InodeFreeFloor != 0 {
+		t.Errorf("expected no inode free floor by default, got %d", cfg.InodeFreeFloor)
+	}
+	if cfg.DebrisReport.OlderThan != "24h" || cfg.DebrisReport.MaxDepth != 2 {
+		t.Errorf("unexpected debris report defaults: %+v", cfg.DebrisReport)
+	}
+	if len(cfg.DebrisReport.Patterns) == 0 || len(cfg.DebrisReport.ScanPaths) == 0 {
+		t.Errorf("expected debris report default patterns and scan paths: %+v", cfg.DebrisReport)
+	}
 
 	// Platform-specific defaults
 	if runtime.GOOS == "darwin" {
@@ -471,6 +483,24 @@ func TestAPFSConfigDefaults(t *testing.T) {
 	if !cfg.APFS.DeleteOSUpdates {
 		t.Error("APFS.DeleteOSUpdates should be true by default")
 	}
+	if cfg.DevArtifacts.AgentTranscriptCodec != "zstd" {
+		t.Errorf("DevArtifacts.AgentTranscriptCodec should default to zstd (operator ruling R14, 2026-08-13), got %q", cfg.DevArtifacts.AgentTranscriptCodec)
+	}
+	if !cfg.Enable.ArchiveLifecycle {
+		t.Error("Enable.ArchiveLifecycle should be true by default")
+	}
+	if cfg.ArchiveLifecycle.DryRun {
+		t.Error("ArchiveLifecycle.DryRun must default to false (operator ruling R14, 2026-08-13): per-file verification is the gate")
+	}
+	if cfg.ArchiveLifecycle.RetireAfter != "14d" {
+		t.Errorf("ArchiveLifecycle.RetireAfter should be 14d, got %q", cfg.ArchiveLifecycle.RetireAfter)
+	}
+	if cfg.ArchiveLifecycle.MaxGroupsPerCycle != 32 {
+		t.Errorf("ArchiveLifecycle.MaxGroupsPerCycle should be 32, got %d", cfg.ArchiveLifecycle.MaxGroupsPerCycle)
+	}
+	if len(cfg.ArchiveLifecycle.Sources) != 0 {
+		t.Errorf("ArchiveLifecycle.Sources must default to empty, got %#v", cfg.ArchiveLifecycle.Sources)
+	}
 }
 
 func TestEnableFlagsNewPlugins(t *testing.T) {
@@ -619,6 +649,24 @@ func TestBazelPolicyDefaults(t *testing.T) {
 	}
 	if cfg.Bazel.AllowDeleteActiveOutputBases {
 		t.Error("Bazel.AllowDeleteActiveOutputBases should be false by default")
+	}
+	if !cfg.Bazel.ReapOrphanedOutputBases {
+		t.Error("Bazel.ReapOrphanedOutputBases should be true by default")
+	}
+	if cfg.Bazel.OrphanStaleAfter != "7d" {
+		t.Errorf("Bazel.OrphanStaleAfter should be 7d, got %q", cfg.Bazel.OrphanStaleAfter)
+	}
+	if len(cfg.Bazel.OrphanWorkspaceMountRoots) == 0 {
+		t.Fatal("Bazel.OrphanWorkspaceMountRoots should have defaults")
+	}
+	var sawFilesystemRoot bool
+	for _, root := range cfg.Bazel.OrphanWorkspaceMountRoots {
+		if root == "/" {
+			sawFilesystemRoot = true
+		}
+	}
+	if !sawFilesystemRoot {
+		t.Errorf("Bazel.OrphanWorkspaceMountRoots must always include the filesystem root, got %#v", cfg.Bazel.OrphanWorkspaceMountRoots)
 	}
 }
 

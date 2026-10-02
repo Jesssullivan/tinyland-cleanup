@@ -51,11 +51,11 @@ enable:
   lima: true            # Lima VM cleanup (Darwin only)
   homebrew: true        # Homebrew cleanup (Darwin only)
   ios_simulator: true   # iOS Simulator cleanup (Darwin only)
-  gitlab_runner: true   # GitLab runner cache cleanup
   github_runner: true   # GitHub Actions runner cleanup (Linux only)
   yum: true             # DNF/YUM package cache cleanup (Linux only)
   dev_artifacts: true   # Rebuildable workspace artifacts
   bazel: true           # Bazel output base and cache cleanup planning
+  archive_lifecycle: true  # Retire verified archive staging pre-images
 
 # GitHub Actions runner settings (Linux only)
 github_runner:
@@ -204,6 +204,23 @@ bazel:
     - ~/git/GloriousFlywheel
   allow_stop_idle_servers: true
   allow_delete_active_output_bases: false
+  # Reap output bases whose DO_NOT_BUILD_HERE marker names a workspace that no
+  # longer exists (deleted git worktrees are the usual source). Orphans bypass
+  # keep_recent_output_bases but never bypass active-use or workspace
+  # protection, and the claim is re-proved immediately before deletion.
+  reap_orphaned_output_bases: true
+  orphan_stale_after: 7d
+  # Directories that only ever hold mount points. When the nearest surviving
+  # ancestor of a claimed workspace is one of these, the workspace is treated
+  # as unreachable rather than removed, so an unmounted volume cannot make
+  # every workspace it hosted look orphaned. Leave unset to keep the compiled
+  # per-platform defaults; setting the key replaces them entirely.
+  # Linux compiled defaults: /, /mnt, /media, /run/media, /net, /srv
+  # Darwin compiled defaults: /, /Volumes, /System/Volumes, /net,
+  #                           /private/var/folders
+  # orphan_workspace_mount_roots:
+  #   - /
+  #   - /Volumes
 
 # Workspace development artifact settings
 dev_artifacts:
@@ -265,6 +282,11 @@ dev_artifacts:
   agent_transcript_roots:
     - ~/.codex/sessions
   agent_transcript_compress_after: 14d
+  # Codec for new transcript writes: zstd (default) or gzip. The existing
+  # .jsonl.gz corpus stays readable and recognized either way, and a transcript
+  # that already has a compressed counterpart in either codec is never
+  # re-encoded into the other one.
+  agent_transcript_codec: zstd
   pnpm_store: false
   go_build_cache: true
   haskell_cache: true
@@ -327,3 +349,33 @@ lima:
 notify:
   enabled: false
   # webhook_url: "https://hooks.slack.com/services/..."
+
+# Archive staging pre-image lifecycle.
+#
+# An archival workflow that compresses a tree into durable storage often leaves
+# the uncompressed pre-image behind, and nothing comes back to remove it. This
+# plugin retires a staging group only after proving that every file in it is
+# already present in the archive target at the same uncompressed size.
+#
+# Verification is O(1) per file: an exact-name counterpart must match byte for
+# byte, a .gz counterpart must declare the size in its ISIZE trailer, and a .zst
+# counterpart must declare it in Frame_Content_Size. Nothing is decompressed.
+#
+# Relative paths under staging_dir must line up with relative paths under
+# target_dir, so a staging tree carrying a host prefix is configured including
+# that prefix (".../codex-session-archive/neo", not ".../codex-session-archive").
+archive_lifecycle:
+  # Live by default (operator ruling R14, 2026-08-13). The per-file verification
+  # is the gate: nothing is retired that has not been proved redundant against
+  # the archive target, the proof is re-run immediately before deletion, and any
+  # ambiguity fails the whole group. Set true for a planning-only pass.
+  dry_run: false
+  retire_after: 14d
+  max_groups_per_cycle: 32
+  sources: []
+  # sources:
+  #   - name: codex-session-archive
+  #     staging_dir: /Volumes/TinylandSSD/tinyland/codex-session-archive/neo
+  #     target_dir: /Volumes/TinylandState/tinyland-state/codex/archived_sessions
+  #     group_depth: 3   # YYYY/MM/DD: retire one verified day at a time
+  #     retire_after: 14d

@@ -21,6 +21,14 @@ type Config struct {
 	// InodeThresholds for inode usage (percentage)
 	InodeThresholds Thresholds `yaml:"inode_thresholds"`
 
+	// InodeFreeFloor is an absolute minimum free-inode count. When set (> 0)
+	// it replaces the percentage inode ladder: fewer free inodes than the
+	// floor is critical inode pressure, otherwise none. Use it on filesystems
+	// that allocate inodes dynamically (XFS, APFS, ZFS, Btrfs), where the
+	// used percentage never reaches the ladder; without a floor those
+	// filesystems skip inode escalation entirely.
+	InodeFreeFloor uint64 `yaml:"inode_free_floor"`
+
 	// TargetFree is the legacy config key for target maximum used percentage after cleanup.
 	TargetFree int `yaml:"target_free"`
 
@@ -60,11 +68,17 @@ type Config struct {
 	// Dev artifact cleanup settings
 	DevArtifacts DevArtifactsConfig `yaml:"dev_artifacts"`
 
+	// Debris report settings (report-only, off by default)
+	DebrisReport DebrisReportConfig `yaml:"debris_report"`
+
 	// Darwin developer cache cleanup settings
 	DarwinDevCaches DarwinDevCachesConfig `yaml:"darwin_dev_caches"`
 
 	// APFS snapshot settings (Darwin)
 	APFS APFSConfig `yaml:"apfs"`
+
+	// Archive staging pre-image lifecycle settings
+	ArchiveLifecycle ArchiveLifecycleConfig `yaml:"archive_lifecycle"`
 
 	// Notification settings
 	Notify NotifyConfig `yaml:"notify"`
@@ -112,6 +126,23 @@ type MountConfig struct {
 	ThresholdInodeWarning int `yaml:"threshold_inode_warning,omitempty"`
 	// ThresholdInodeCritical overrides the global inode critical threshold
 	ThresholdInodeCritical int `yaml:"threshold_inode_critical,omitempty"`
+	// InodeFreeFloor overrides the global absolute free-inode floor for this mount
+	InodeFreeFloor uint64 `yaml:"inode_free_floor,omitempty"`
+}
+
+// DebrisReportConfig holds settings for the report-only debris plugin, which
+// logs stale incident/agent debris (dated bench dirs, bulkload scratch,
+// rollback and carry trees, reclaim markers) without ever deleting anything.
+type DebrisReportConfig struct {
+	// ScanPaths are the roots scanned for debris (default: home, ~/git, temp roots).
+	ScanPaths []string `yaml:"scan_paths"`
+	// Patterns are filepath.Match globs applied to entry base names. A
+	// trailing "/" restricts a pattern to directories.
+	Patterns []string `yaml:"patterns"`
+	// OlderThan is the minimum age before an entry is reported (default 24h).
+	OlderThan string `yaml:"older_than"`
+	// MaxDepth bounds how deep below each scan path the plugin looks (default 2).
+	MaxDepth int `yaml:"max_depth"`
 }
 
 // Thresholds defines disk usage thresholds for graduated cleanup.
@@ -142,8 +173,6 @@ type EnableFlags struct {
 	Homebrew bool `yaml:"homebrew"`
 	// IOSSimulator for iOS Simulator cleanup (Darwin)
 	IOSSimulator bool `yaml:"ios_simulator"`
-	// GitLabRunner for GitLab CI cache cleanup
-	GitLabRunner bool `yaml:"gitlab_runner"`
 	// GitHubRunner for GitHub Actions runner cleanup (Linux)
 	GitHubRunner bool `yaml:"github_runner"`
 	// Yum for DNF/YUM package cache cleanup (Linux)
@@ -158,6 +187,52 @@ type EnableFlags struct {
 	Bazel bool `yaml:"bazel"`
 	// APFSSnapshots for APFS snapshot thinning (Darwin)
 	APFSSnapshots bool `yaml:"apfs_snapshots"`
+	// ArchiveLifecycle for retiring verified archive staging pre-images
+	ArchiveLifecycle bool `yaml:"archive_lifecycle"`
+	// DebrisReport for the report-only stale debris inventory (off by default)
+	DebrisReport bool `yaml:"debris_report"`
+}
+
+// ArchiveLifecycleConfig holds settings for retiring archive staging pre-images
+// whose contents are provably present in a durable archive target.
+type ArchiveLifecycleConfig struct {
+	// DryRun keeps the plugin planning-only even outside global --dry-run.
+	//
+	// It defaults to false (operator ruling R14, 2026-08-13). The per-file
+	// verification is itself the gate: nothing is retired that has not been
+	// proved byte-for-byte redundant against the archive target, the proof is
+	// re-run immediately before deletion, and every ambiguity fails the whole
+	// group. A second planning-only default would delay reclamation without
+	// adding safety. The knob stays for hosts that want a planning-only pass.
+	DryRun bool `yaml:"dry_run"`
+	// RetireAfter is the default age a staging group must reach before it is
+	// eligible for retirement. Per-source values override it.
+	RetireAfter string `yaml:"retire_after"`
+	// MaxGroupsPerCycle bounds how many staging groups are verified per cycle so
+	// one very large staging tree cannot monopolize a cleanup pass.
+	MaxGroupsPerCycle int `yaml:"max_groups_per_cycle"`
+	// Sources are the staging/target pairs to reconcile.
+	Sources []ArchiveSourceConfig `yaml:"sources"`
+}
+
+// ArchiveSourceConfig describes one staging pre-image tree and the durable
+// archive target that is supposed to already contain it.
+type ArchiveSourceConfig struct {
+	// Name is a human-readable source name used in plans and logs.
+	Name string `yaml:"name"`
+	// StagingDir is the pre-image root. Relative paths under it must line up
+	// with relative paths under TargetDir, so a staging tree that carries a
+	// host prefix should be configured including that prefix.
+	StagingDir string `yaml:"staging_dir"`
+	// TargetDir is the durable archive root that must already hold every
+	// staging file, optionally in compressed form.
+	TargetDir string `yaml:"target_dir"`
+	// GroupDepth is the directory depth below StagingDir at which retirement is
+	// decided. The codex session archive is day-partitioned, so depth 3
+	// (YYYY/MM/DD) retires one verified day at a time.
+	GroupDepth int `yaml:"group_depth"`
+	// RetireAfter overrides the global age threshold for this source.
+	RetireAfter string `yaml:"retire_after"`
 }
 
 // PolicyConfig holds daemon-level cleanup policy settings.
@@ -255,6 +330,20 @@ type BazelConfig struct {
 	AllowStopIdleServers bool `yaml:"allow_stop_idle_servers"`
 	// AllowDeleteActiveOutputBases allows future cleanup to delete active output bases.
 	AllowDeleteActiveOutputBases bool `yaml:"allow_delete_active_output_bases"`
+	// ReapOrphanedOutputBases enables deletion of output bases whose DO_NOT_BUILD_HERE
+	// workspace path has been removed. Orphan candidates bypass
+	// keep_recent_output_bases but never bypass active-use or workspace protection.
+	ReapOrphanedOutputBases bool `yaml:"reap_orphaned_output_bases"`
+	// OrphanStaleAfter is the age threshold applied to orphaned output bases. It is
+	// independent of stale_after because a removed workspace cannot come back to
+	// reuse its output base.
+	OrphanStaleAfter string `yaml:"orphan_stale_after"`
+	// OrphanWorkspaceMountRoots are directories treated as mount containers when
+	// resolving a removed workspace path. When the nearest existing ancestor of a
+	// DO_NOT_BUILD_HERE path is one of these (or the filesystem root), the workspace
+	// is treated as unreachable rather than deleted, so an unmounted volume never
+	// makes every workspace on it look orphaned.
+	OrphanWorkspaceMountRoots []string `yaml:"orphan_workspace_mount_roots"`
 }
 
 // NixConfig holds Nix store and profile generation cleanup settings.
@@ -364,6 +453,11 @@ type DevArtifactsConfig struct {
 	AgentTranscriptRoots []string `yaml:"agent_transcript_roots"`
 	// AgentTranscriptCompressAfter is the age after which JSONL transcripts are compressed.
 	AgentTranscriptCompressAfter string `yaml:"agent_transcript_compress_after"`
+	// AgentTranscriptCodec is the compression codec used for new transcript
+	// writes: "zstd" (default) or "gzip". The existing .jsonl.gz corpus stays
+	// readable and recognized either way, and an already-archived transcript is
+	// never re-encoded into the other codec.
+	AgentTranscriptCodec string `yaml:"agent_transcript_codec"`
 	// PnpmStore enables pnpm store prune for the rebuildable global package store.
 	PnpmStore bool `yaml:"pnpm_store"`
 	// GoBuildCache enables Go build cache cleanup
@@ -491,19 +585,26 @@ func DefaultConfig() *Config {
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{
-			Cache:         true,
-			NixGC:         true,
-			Docker:        true,
-			Podman:        true,
-			Lima:          runtime.GOOS == "darwin",
-			Homebrew:      runtime.GOOS == "darwin",
-			IOSSimulator:  runtime.GOOS == "darwin",
-			GitLabRunner:  true,
-			ICloud:        runtime.GOOS == "darwin",
-			Photos:        runtime.GOOS == "darwin",
-			DevArtifacts:  true,
-			Bazel:         true,
-			APFSSnapshots: runtime.GOOS == "darwin",
+			Cache:            true,
+			NixGC:            true,
+			Docker:           true,
+			Podman:           true,
+			Lima:             runtime.GOOS == "darwin",
+			Homebrew:         runtime.GOOS == "darwin",
+			IOSSimulator:     runtime.GOOS == "darwin",
+			ICloud:           runtime.GOOS == "darwin",
+			Photos:           runtime.GOOS == "darwin",
+			DevArtifacts:     true,
+			Bazel:            true,
+			APFSSnapshots:    runtime.GOOS == "darwin",
+			ArchiveLifecycle: true,
+			DebrisReport:     false,
+		},
+		DebrisReport: DebrisReportConfig{
+			ScanPaths: append([]string{home, filepath.Join(home, "git")}, defaultTempScanPaths...),
+			Patterns:  DefaultDebrisPatterns(),
+			OlderThan: "24h",
+			MaxDepth:  2,
 		},
 		Docker: DockerConfig{
 			PruneImagesAge:           "24h",
@@ -539,6 +640,9 @@ func DefaultConfig() *Config {
 			},
 			AllowStopIdleServers:         true,
 			AllowDeleteActiveOutputBases: false,
+			ReapOrphanedOutputBases:      true,
+			OrphanStaleAfter:             "7d",
+			OrphanWorkspaceMountRoots:    defaultOrphanWorkspaceMountRoots(),
 		},
 		Nix: NixConfig{
 			MinUserGenerations:                            5,
@@ -597,6 +701,7 @@ func DefaultConfig() *Config {
 			AgentTranscriptCompression:   false,
 			AgentTranscriptRoots:         []string{filepath.Join(home, ".codex", "sessions")},
 			AgentTranscriptCompressAfter: "14d",
+			AgentTranscriptCodec:         "zstd",
 			PnpmStore:                    false,
 			GoBuildCache:                 true,
 			HaskellCache:                 true,
@@ -662,6 +767,11 @@ func DefaultConfig() *Config {
 			KeepRecentDays:  1,
 			DeleteOSUpdates: true,
 		},
+		ArchiveLifecycle: ArchiveLifecycleConfig{
+			DryRun:            false,
+			RetireAfter:       "14d",
+			MaxGroupsPerCycle: 32,
+		},
 		Notify: NotifyConfig{
 			Enabled: false,
 		},
@@ -677,6 +787,20 @@ func DefaultConfig() *Config {
 	return config
 }
 
+// DefaultDebrisPatterns returns the base-name globs the debris report plugin
+// inventories by default. A trailing "/" restricts a pattern to directories.
+func DefaultDebrisPatterns() []string {
+	return []string{
+		"*-20[0-9][0-9][01][0-9][0-3][0-9]*",
+		".bulkload-*",
+		"pre-boundary-*",
+		"continuity-*",
+		"rollback/",
+		"*-carry/",
+		".RECLAIM-PENDING-*",
+	}
+}
+
 func defaultBazelRoots(home string) []string {
 	roots := []string{filepath.Join(home, ".cache", "bazel")}
 	if runtime.GOOS == "darwin" {
@@ -689,6 +813,18 @@ func defaultBazelRoots(home string) []string {
 		roots = append(roots, "/private/tmp")
 	}
 	return roots
+}
+
+// defaultOrphanWorkspaceMountRoots returns the directories that only ever hold
+// mount points. A DO_NOT_BUILD_HERE workspace whose nearest surviving ancestor
+// is one of these is unreachable rather than deleted: an unmounted external
+// volume must not make every workspace it hosted look orphaned.
+func defaultOrphanWorkspaceMountRoots() []string {
+	roots := []string{"/"}
+	if runtime.GOOS == "darwin" {
+		return append(roots, "/Volumes", "/System/Volumes", "/net", "/private/var/folders")
+	}
+	return append(roots, "/mnt", "/media", "/run/media", "/net", "/srv")
 }
 
 // LoadConfig loads configuration from a YAML file, merging with defaults.

@@ -22,12 +22,18 @@ on:
         required: false
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   shared-cache-proof:
     name: Bazel cache and RBE proof
+    if: github.ref == 'refs/heads/main'
     runs-on: tinyland-nix
     steps:
       - uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
       - name: Go validation
         run: |
           go test ./...
@@ -74,9 +80,9 @@ jobs:
       - name: Bazel cache contract
         run: bash scripts/validation/bazel-cache-contract.sh --strict
       - name: Bazel cache-backed test
-        run: nix shell nixpkgs#bazelisk --command bash scripts/bazel-cache-backed.sh test //...
+        run: nix develop --command bash scripts/bazel-cache-backed.sh test //...
       - name: Bazel explicit RBE proof
         if: ${{ inputs.bazel_remote_executor != '' }}
         env:
           RBE_PROOF_TARGET: ${{ inputs.rbe_proof_target }}
-        run: nix shell nixpkgs#bazelisk --command bash scripts/bazel-rbe-proof.sh --target "$RBE_PROOF_TARGET"
+        run: nix develop --command bash scripts/bazel-rbe-proof.sh --target "$RBE_PROOF_TARGET"

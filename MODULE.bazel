@@ -6,7 +6,7 @@
 module(
     name = "tinyland_cleanup",
     # Keep in sync with //VERSION (checked by the CI version-consistency step).
-    version = "0.3.0",
+    version = "0.4.0",
     compatibility_level = 1,
 )
 
@@ -23,6 +23,7 @@ go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
 use_repo(
     go_deps,
+    "com_github_klauspost_compress",
     "com_github_shirou_gopsutil_v3",
     "in_gopkg_yaml_v3",
     "net_pgregory_rapid",

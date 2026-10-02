@@ -2,15 +2,15 @@
 #
 # This file is endpoint-free on purpose. Set BAZEL_REMOTE_CACHE,
 # BAZEL_REMOTE_EXECUTOR, GF_BAZEL_SUBSTRATE_MODE, and runtime auth through the
-# fleet-managed profile, CI runtime, or .env.flywheel.local fallback. The
-# gloriousflywheel-bazel wrapper passes concrete endpoint flags after validating
-# the profile shape.
+# invoking process environment. Nothing in the consumer kit automatically
+# sources repo-local environment files. The gloriousflywheel-bazel wrapper
+# passes concrete endpoint flags after validating the profile shape.
 
-build:ci-cached --remote_upload_local_results=true
+build:ci-cached --remote_upload_local_results=false
 build:ci-cached --remote_timeout=60
 build:ci-cached --experimental_remote_cache_compression
 
-test:ci-cached --remote_upload_local_results=true
+test:ci-cached --remote_upload_local_results=false
 test:ci-cached --remote_timeout=60
 test:ci-cached --experimental_remote_cache_compression
 

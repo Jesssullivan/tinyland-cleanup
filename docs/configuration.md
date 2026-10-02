@@ -26,6 +26,16 @@ inode_thresholds:
   critical: 95
 ```
 
+On filesystems that allocate inodes dynamically (XFS, APFS, ZFS, Btrfs) the
+used percentage is not a pressure signal, and the percentage inode ladder is
+skipped. Set `inode_free_floor` (an absolute free-inode count) to get inode
+escalation there: fewer free inodes than the floor is critical, otherwise none.
+A floor, global or per mount, replaces the ladder on every filesystem.
+
+```yaml
+inode_free_floor: 2000000
+```
+
 Per-mount overrides use `monitored_mounts`:
 
 ```yaml
@@ -36,6 +46,7 @@ monitored_mounts:
     threshold_critical: 85
     threshold_inode_warning: 70
     threshold_inode_critical: 90
+    inode_free_floor: 1000000
 ```
 
 ## Cleanup policy

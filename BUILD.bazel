@@ -13,6 +13,7 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 gazelle(name = "gazelle")
 
 exports_files([
+    ".gitignore",
     ".bazelrc",
     ".github/actionlint.yaml",
     ".github/workflows/ci.yml",
@@ -21,6 +22,7 @@ exports_files([
     ".bazelrc.flywheel",
     "config/bazel-rbe-target-eligibility.json",
     "flake.nix",
+    "flake.lock",
     "Justfile",
     "justfile.flywheel",
     "scripts/bazel-cache-backed.sh",
@@ -44,9 +46,11 @@ filegroup(
         ".github/workflows/ci.yml",
         ".github/workflows/docs-deploy.yml",
         ".github/workflows/gloriousflywheel-proof.yml",
+        ".gitignore",
         "Justfile",
         "config/bazel-rbe-target-eligibility.json",
         "flake.nix",
+        "flake.lock",
         "justfile.flywheel",
         "scripts/bazel-cache-backed.sh",
         "scripts/bazel-rbe-proof.sh",
@@ -216,13 +220,14 @@ go_test(
 go_library(
     name = "plugins",
     srcs = [
+        "plugins/archive_lifecycle.go",
         "plugins/bazel.go",
         "plugins/cache.go",
+        "plugins/debris_report.go",
         "plugins/devartifacts.go",
         "plugins/docker.go",
         "plugins/etcd.go",
         "plugins/fs.go",
-        "plugins/gitlab_runner.go",
         "plugins/nix.go",
         "plugins/plugin.go",
         "plugins/podman.go",
@@ -232,15 +237,18 @@ go_library(
         "@platforms//os:macos": [
             "plugins/apfs_darwin.go",
             "plugins/darwin.go",
+            "plugins/fs_ctime_darwin.go",
             "plugins/lima.go",
             "plugins/nix_process_argv_darwin.go",
         ],
         "@platforms//os:linux": [
+            "plugins/fs_ctime_linux.go",
             "plugins/github_runner.go",
             "plugins/nix_process_argv_linux.go",
             "plugins/yum.go",
         ],
         "//conditions:default": [
+            "plugins/fs_ctime_other.go",
             "plugins/github_runner.go",
             "plugins/nix_process_argv_other.go",
             "plugins/yum.go",
@@ -248,7 +256,10 @@ go_library(
     }),
     importpath = "github.com/Jesssullivan/tinyland-cleanup/plugins",
     visibility = ["//visibility:public"],
-    deps = [":config"] + select({
+    deps = [
+        ":config",
+        "@com_github_klauspost_compress//zstd",
+    ] + select({
         "@platforms//os:macos": ["@org_golang_x_sys//unix"],
         "//conditions:default": [],
     }),
@@ -257,8 +268,11 @@ go_library(
 go_test(
     name = "plugins_test",
     srcs = [
+        "plugins/archive_lifecycle_test.go",
         "plugins/bazel_test.go",
+        "plugins/debris_report_test.go",
         "plugins/devartifacts_test.go",
+        "plugins/fs_test.go",
         "plugins/nix_test.go",
         "plugins/plugin_pbt_test.go",
         "plugins/plugin_test.go",
