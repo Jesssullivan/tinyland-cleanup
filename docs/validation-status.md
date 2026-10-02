@@ -2,6 +2,13 @@
 
 Updated: 2026-10-02
 
+## v0.4.1 (TIN-3342)
+
+- **Merged:** per-path `temp_scan_max_roots` budget and the remembered
+  undeletable-path set in dev-artifacts (#131).
+- **Validated** on sting (Linux x86_64): `go build`/`vet`/`test`, plus CI
+  Go/Bazel/Nix on #131. Delivered to sting through lab's pin bump.
+
 ## v0.4.0 (TIN-3342 / TIN-3181)
 
 - **CI restored.** The private GloriousFlywheel dev-shell input is gone (#130),
