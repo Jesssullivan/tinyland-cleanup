@@ -17,7 +17,6 @@ enable:
   lima: false
   homebrew: false
   ios_simulator: false
-  gitlab_runner: true
   github_runner: true
   yum: true
   podman: true

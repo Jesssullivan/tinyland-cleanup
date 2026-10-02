@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- The `gitlab-runner` plugin and its `enable.gitlab_runner` key. No GitLab
+  runners remain in the estate. Config decoding is strict, so a config that
+  still sets `enable.gitlab_runner` is rejected (exit 2); delete the key.
+- The Darwin release tarballs. They were unsigned, undocumented and
+  unconsumed; Darwin hosts build from source through Nix. Releases now carry
+  the Linux amd64/arm64 tarballs and RPMs.
+
 ### Added
 
 - `inode_free_floor`, global and per mount: an absolute free-inode floor that

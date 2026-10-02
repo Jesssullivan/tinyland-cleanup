@@ -17,10 +17,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
           - goos: linux
             goarch: amd64
           - goos: linux
@@ -32,7 +28,6 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Install Nix
-        if: matrix.goos == 'linux'
         uses: DeterminateSystems/nix-installer-action@v22
       - name: Build
         run: |
@@ -49,7 +44,6 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
       - name: RPM
-        if: matrix.goos == 'linux'
         run: |
           artifact="tinyland-cleanup-${GITHUB_REF_NAME}-${GOOS}-${GOARCH}"
           version="${GITHUB_REF_NAME#v}"
