@@ -52,7 +52,7 @@ import (
 // version mirrors the VERSION file; it is the dev default and is overridden at
 // release time by -ldflags "-X main.version=<tag>". CI checks it matches VERSION.
 var (
-	version = "0.4.0"
+	version = "0.4.1"
 	commit  = "dev"
 	date    = "unknown"
 )
