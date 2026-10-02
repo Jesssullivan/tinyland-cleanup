@@ -4,12 +4,14 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2479,5 +2481,143 @@ func TestHarnessScratchFreshTranscriptProtectsIdleSession(t *testing.T) {
 	}
 	if _, err := os.Stat(session); !os.IsNotExist(err) {
 		t.Fatalf("session should be deleted after transcript went stale, stat err=%v", err)
+	}
+}
+
+// perPathTempBudgetFixture builds two temp scan paths: the first holds more
+// fresh Nix temp roots than temp_scan_max_roots, the second holds one stale,
+// deletable Nix temp root (OI-1001-Q4).
+func perPathTempBudgetFixture(t *testing.T) (*config.Config, string) {
+	t.Helper()
+	crowded := t.TempDir()
+	for i := 0; i < 6; i++ {
+		if err := os.MkdirAll(filepath.Join(crowded, "nix-shell.Fresh"+strconv.Itoa(i)), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second := t.TempDir()
+	staleRoot := filepath.Join(second, "nix-develop-1000-4242")
+	if err := os.MkdirAll(staleRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staleRoot, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(staleRoot, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	cfg := nixTempRootConfig(crowded)
+	cfg.DevArtifacts.TempScanPaths = []string{crowded, second}
+	cfg.DevArtifacts.TempScanMaxRoots = 3
+	return cfg, staleRoot
+}
+
+func TestPlanCleanupTempRootBudgetIsPerScanPath(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	cfg, staleRoot := perPathTempBudgetFixture(t)
+
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, slog.Default())
+
+	target := findDevArtifactTarget(t, plan.Targets, "nix-temp-root", staleRoot)
+	if target.Action != "delete" {
+		t.Fatalf("expected second temp path's stale root to be deletable, got %#v", target)
+	}
+	if plan.Metadata["temp_scan_paths_truncated"] != "1" {
+		t.Fatalf("expected exactly the crowded temp path to be truncated, got %#v", plan.Metadata)
+	}
+	if plan.Metadata["scan_budget_exhausted"] != "true" {
+		t.Fatalf("expected partial-evidence flag for the truncated temp path, got %#v", plan.Metadata)
+	}
+}
+
+func TestCleanupTempRootBudgetDoesNotStarveLaterScanPaths(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg, staleRoot := perPathTempBudgetFixture(t)
+
+	result := p.Cleanup(context.Background(), LevelCritical, cfg, logger)
+
+	if pathExists(staleRoot) {
+		t.Fatal("expected the second temp scan path to be cleaned even though the first exceeded its root budget")
+	}
+	if result.BytesFreed <= 0 {
+		t.Fatalf("expected freed bytes from the second temp scan path, got %#v", result)
+	}
+}
+
+func TestCleanupRemembersUndeletableTempRoots(t *testing.T) {
+	p := newDevArtifactsPluginWithActive(nil)
+	var attempts int
+	p.removeAll = func(path string) error {
+		attempts++
+		return &fs.PathError{Op: "unlinkat", Path: path, Err: syscall.EACCES}
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	tmpDir := t.TempDir()
+	root := filepath.Join(tmpDir, "nix-shell.Locked1")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	cfg := nixTempRootConfig(tmpDir)
+
+	for cycle := 0; cycle < 3; cycle++ {
+		p.Cleanup(context.Background(), LevelCritical, cfg, logger)
+	}
+
+	if attempts != 1 {
+		t.Fatalf("expected one removal attempt for an undeletable path across cycles, got %d", attempts)
+	}
+	if !p.knownUndeletable(root) {
+		t.Fatal("expected undeletable path to be remembered")
+	}
+}
+
+func TestRemoveDevArtifactPathOnlyRemembersPermissionAndBusyErrors(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, tc := range []struct {
+		err      error
+		remember bool
+	}{
+		{syscall.EACCES, true},
+		{syscall.EPERM, true},
+		{syscall.EBUSY, true},
+		{syscall.ENOTEMPTY, false},
+	} {
+		p := NewDevArtifactsPlugin()
+		p.removeAll = func(path string) error { return &fs.PathError{Op: "unlinkat", Path: path, Err: tc.err} }
+		_ = p.removeDevArtifactPath("/nonexistent/x", logger)
+		if got := p.knownUndeletable("/nonexistent/x"); got != tc.remember {
+			t.Fatalf("%v: remembered=%v, want %v", tc.err, got, tc.remember)
+		}
+	}
+}
+
+func TestRemoveDevArtifactPathWarnsOnceWhenUndeletableCacheIsFull(t *testing.T) {
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	p := NewDevArtifactsPlugin()
+	p.undeletable = make(map[string]struct{}, maxRememberedUndeletablePaths)
+	for i := 0; i < maxRememberedUndeletablePaths; i++ {
+		p.undeletable["/remembered/"+strconv.Itoa(i)] = struct{}{}
+	}
+	p.removeAll = func(path string) error { return &fs.PathError{Op: "unlinkat", Path: path, Err: syscall.EACCES} }
+
+	for i := 0; i < 3; i++ {
+		_ = p.removeDevArtifactPath("/overflow/"+strconv.Itoa(i), logger)
+	}
+
+	if got := strings.Count(logs.String(), "undeletable cache full"); got != 1 {
+		t.Fatalf("expected one cache-full warning, got %d:\n%s", got, logs.String())
+	}
+	if p.knownUndeletable("/overflow/0") {
+		t.Fatal("a path past the cache limit must not be remembered")
 	}
 }

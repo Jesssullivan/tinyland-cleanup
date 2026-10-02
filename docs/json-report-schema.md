@@ -65,6 +65,9 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `bytes_freed`, `estimated_bytes_freed`, `command_bytes_freed`, `host_bytes_freed` (int64); `items_cleaned` (int)
 - `cooldown_remaining_seconds` (int64, optional); `error` (string, optional)
 - `plan` (object, optional) — dry-run plan with `targets`, byte accounting, and warnings
+  - `plan.metadata` (object of string to string, optional) — plugin-specific keys. The `dev-artifacts` scan-budget keys include:
+    - `temp_scan_max_roots_scope` — always `per_temp_scan_path`: `temp_scan_max_roots` is applied to each entry of `temp_scan_paths` separately
+    - `temp_scan_paths_truncated` — decimal count of temp scan paths whose own budget was exhausted this cycle; their truncations also appear in `scan_truncated_paths` and set `scan_budget_exhausted` to `true`
 
 ## Example (dry-run)
 

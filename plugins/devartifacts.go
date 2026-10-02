@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -67,6 +69,16 @@ type devArtifactScanBudget struct {
 	tempRoots             int
 	tempRootSeen          map[string]struct{}
 	truncatedPath         map[string]string
+	// tempTruncatedPath records truncations inside a single temp scan path's
+	// own budget. They are reported as partial evidence, and a path cut by its
+	// own temp root budget does not gate the remaining temp scan paths or
+	// later lanes: one huge temp path must not starve the others
+	// (OI-1001-Q4). Entry and duration shares are different: each path's
+	// entries fold back into the shared budget and the shared scan deadline
+	// still applies, so when temp paths use up their entry or time shares the
+	// later lanes truncate exactly as they did before per-path budgets.
+	tempTruncatedPath  map[string]string
+	tempPathsTruncated int
 }
 
 type devArtifactWorkspaceCursorState struct {
@@ -82,6 +94,7 @@ func newDevArtifactScanBudget(cfg config.DevArtifactsConfig) *devArtifactScanBud
 		tempMaxRoots:      cfg.TempScanMaxRoots,
 		tempRootSeen:      map[string]struct{}{},
 		truncatedPath:     map[string]string{},
+		tempTruncatedPath: map[string]string{},
 	}
 }
 
@@ -228,6 +241,42 @@ func (b *devArtifactScanBudget) mergeWorkspaceRootBudget(rootBudget *devArtifact
 	}
 }
 
+// tempPathBudget returns an independent budget for one temp scan path.
+// temp_scan_max_roots applies per path (as documented in config), while the
+// entry and duration budgets are split evenly across the temp scan paths so
+// the total temp-lane work stays bounded by the configured scan budget. Each
+// child budget's root-dedup map is dropped after its path finishes, so memory
+// is bounded by a single path's temp_scan_max_roots rather than the sum.
+func (b *devArtifactScanBudget) tempPathBudget(pathCount int) *devArtifactScanBudget {
+	if b == nil {
+		return nil
+	}
+	child := b.workspaceRootBudget(pathCount)
+	child.tempMaxRoots = b.tempMaxRoots
+	return child
+}
+
+// mergeTempPathBudget folds a finished temp scan path's accounting back into
+// the shared budget. Truncations are kept for reporting only, but the child's
+// entries count against the shared entry budget, so exhausted entry shares
+// still truncate the later lanes.
+func (b *devArtifactScanBudget) mergeTempPathBudget(child *devArtifactScanBudget) {
+	if b == nil || child == nil || child == b {
+		return
+	}
+	b.entries += child.entries
+	b.tempRoots += child.tempRoots
+	if child.exhausted() {
+		b.tempPathsTruncated++
+	}
+	for path, reason := range child.truncatedPath {
+		if len(b.tempTruncatedPath) >= 20 {
+			break
+		}
+		b.tempTruncatedPath[path] = reason
+	}
+}
+
 func optionalDevArtifactScanBudget(budgets []*devArtifactScanBudget) *devArtifactScanBudget {
 	if len(budgets) == 0 {
 		return nil
@@ -298,16 +347,27 @@ func (b *devArtifactScanBudget) markTruncated(path, reason string) {
 	b.truncatedPath[path] = reason
 }
 
+// exhausted reports whether the shared budget was exhausted. It gates later
+// lanes; per-temp-path truncations do not (see partial).
 func (b *devArtifactScanBudget) exhausted() bool {
 	return b != nil && len(b.truncatedPath) > 0
 }
 
+// partial reports whether any scan evidence is incomplete, including
+// truncations confined to a single temp scan path.
+func (b *devArtifactScanBudget) partial() bool {
+	return b != nil && (len(b.truncatedPath) > 0 || len(b.tempTruncatedPath) > 0)
+}
+
 func (b *devArtifactScanBudget) truncatedDetails() []string {
-	if b == nil || len(b.truncatedPath) == 0 {
+	if b == nil || !b.partial() {
 		return nil
 	}
-	details := make([]string, 0, len(b.truncatedPath))
+	details := make([]string, 0, len(b.truncatedPath)+len(b.tempTruncatedPath))
 	for path, reason := range b.truncatedPath {
+		details = append(details, path+" ("+reason+")")
+	}
+	for path, reason := range b.tempTruncatedPath {
 		details = append(details, path+" ("+reason+")")
 	}
 	sort.Strings(details)
@@ -326,8 +386,10 @@ func (b *devArtifactScanBudget) annotatePlan(plan *CleanupPlan) {
 	plan.Metadata["temp_scan_max_roots"] = strconv.Itoa(b.tempMaxRoots)
 	plan.Metadata["scan_entries_visited"] = strconv.Itoa(b.entries)
 	plan.Metadata["temp_roots_visited"] = strconv.Itoa(b.tempRoots)
-	plan.Metadata["scan_budget_exhausted"] = strconv.FormatBool(b.exhausted())
-	if !b.exhausted() {
+	plan.Metadata["temp_scan_max_roots_scope"] = "per_temp_scan_path"
+	plan.Metadata["temp_scan_paths_truncated"] = strconv.Itoa(b.tempPathsTruncated)
+	plan.Metadata["scan_budget_exhausted"] = strconv.FormatBool(b.partial())
+	if !b.partial() {
 		return
 	}
 	details := b.truncatedDetails()
@@ -341,6 +403,85 @@ func (b *devArtifactScanBudget) annotatePlan(plan *CleanupPlan) {
 // DevArtifactsPlugin handles stale development artifact cleanup.
 type DevArtifactsPlugin struct {
 	activeProcesses func(context.Context) (map[string]string, error)
+	// removeAll is os.RemoveAll unless a test injects a fake.
+	removeAll func(string) error
+
+	// undeletable remembers paths whose removal failed with EACCES, EPERM
+	// or EBUSY so the daemon does not size and retry them every cycle
+	// (OI-1001-Q4). It lives for the plugin's (daemon's) lifetime.
+	undeletableMu       sync.Mutex
+	undeletable         map[string]struct{}
+	undeletableFullWarn sync.Once
+}
+
+// maxRememberedUndeletablePaths bounds the undeletable-path memory.
+const maxRememberedUndeletablePaths = 4096
+
+var errUndeletableDevArtifactPath = errors.New("dev artifact path is not deletable by this daemon")
+
+func isUndeletableRemoveError(err error) bool {
+	return errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EBUSY)
+}
+
+// knownUndeletable reports whether path previously failed removal with a
+// permission or busy error during this daemon's lifetime.
+func (p *DevArtifactsPlugin) knownUndeletable(path string) bool {
+	p.undeletableMu.Lock()
+	defer p.undeletableMu.Unlock()
+	_, ok := p.undeletable[filepath.Clean(path)]
+	return ok
+}
+
+// rememberUndeletable records path and reports whether it was newly
+// remembered. full is true when the cache is at capacity and path could not
+// be recorded.
+func (p *DevArtifactsPlugin) rememberUndeletable(path string) (added, full bool) {
+	p.undeletableMu.Lock()
+	defer p.undeletableMu.Unlock()
+	if p.undeletable == nil {
+		p.undeletable = map[string]struct{}{}
+	}
+	clean := filepath.Clean(path)
+	if _, ok := p.undeletable[clean]; ok {
+		return false, false
+	}
+	if len(p.undeletable) >= maxRememberedUndeletablePaths {
+		return false, true
+	}
+	p.undeletable[clean] = struct{}{}
+	return true, false
+}
+
+// removeDevArtifactPath removes path unless it is already known to be
+// undeletable. Permission/busy failures are remembered and logged once; the
+// returned error then wraps errUndeletableDevArtifactPath so callers can skip
+// their own per-cycle failure logging.
+func (p *DevArtifactsPlugin) removeDevArtifactPath(path string, logger *slog.Logger) error {
+	if p.knownUndeletable(path) {
+		return errUndeletableDevArtifactPath
+	}
+	remove := p.removeAll
+	if remove == nil {
+		remove = os.RemoveAll
+	}
+	err := remove(path)
+	if err == nil || !isUndeletableRemoveError(err) {
+		return err
+	}
+	added, full := p.rememberUndeletable(path)
+	if logger != nil {
+		switch {
+		case added:
+			logger.Warn("dev artifact path is not deletable; skipping it for the rest of this daemon's lifetime", "path", path, "error", err)
+		case full:
+			// Once the cache is full, new undeletable paths are retried
+			// every cycle again; say so once rather than per path.
+			p.undeletableFullWarn.Do(func() {
+				logger.Warn("undeletable cache full; further undeletable paths will be retried every cycle", "limit", maxRememberedUndeletablePaths, "path", path, "error", err)
+			})
+		}
+	}
+	return fmt.Errorf("%w: %v", errUndeletableDevArtifactPath, err)
 }
 
 // NewDevArtifactsPlugin creates a new development artifact cleanup plugin.
@@ -426,24 +567,27 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		activeScratchSessions := activeHarnessScratchSessions(ctx, daCfg.TempScanPaths, home, daCfg)
 		tempMinBytes := tempArtifactMinBytes(daCfg)
 		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
-		for _, scanPath := range daCfg.TempScanPaths {
-			expanded := expandHome(scanPath, home)
-			if !pathExistsAndIsDir(expanded) {
-				continue
-			}
+		tempPaths := existingTempScanPaths(daCfg.TempScanPaths, home)
+		for _, expanded := range tempPaths {
+			// Each temp scan path gets its own root budget so one huge path
+			// (e.g. /tmp full of nix-shell.*) cannot starve the next one.
+			pathBudget := scanBudget.tempPathBudget(len(tempPaths))
+			pathCtx, cancelPath := pathBudget.context(scanCtx)
 			// Known-heavy harness scratch first: it is the payload the scan
 			// budget must never starve (TIN-2690).
 			if daCfg.HarnessScratch {
-				p.planHarnessScratchSessions(scanCtx, expanded, home, parseNixPolicyDuration(daCfg.HarnessScratchStaleAfter, 36*time.Hour), level, daCfg, activeScratchSessions, &targets, scanBudget)
+				p.planHarnessScratchSessions(pathCtx, expanded, home, parseNixPolicyDuration(daCfg.HarnessScratchStaleAfter, 36*time.Hour), level, daCfg, activeScratchSessions, &targets, pathBudget)
 			}
 			nixTempRootMinBytes := nixTempRootMinBytes(daCfg)
 			nixTempRootStaleAfter := parseNixPolicyDuration(daCfg.NixTempRootStaleAfter, 24*time.Hour)
 			nixTempRootDeletes := level >= LevelAggressive
 			if daCfg.NixTempRoots {
-				p.planNixTemporaryRoots(scanCtx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, nixTempRootDeletes, daCfg, activeTempRoots, &targets, scanBudget)
+				p.planNixTemporaryRoots(pathCtx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, nixTempRootDeletes, daCfg, activeTempRoots, &targets, pathBudget)
 			}
-			p.planTemporaryArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, daCfg, activeTempRoots, &targets, scanBudget)
-			p.planTemporaryGeneratedArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets, scanBudget)
+			p.planTemporaryArtifacts(pathCtx, expanded, tempMinBytes, tempStaleAfter, daCfg, activeTempRoots, &targets, pathBudget)
+			p.planTemporaryGeneratedArtifacts(pathCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets, pathBudget)
+			cancelPath()
+			scanBudget.mergeTempPathBudget(pathBudget)
 		}
 	}
 	if daCfg.AgentTranscriptCompression {
@@ -555,44 +699,19 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
 		nixTempRootMinBytes := nixTempRootMinBytes(daCfg)
 		nixTempRootStaleAfter := parseNixPolicyDuration(daCfg.NixTempRootStaleAfter, 24*time.Hour)
-		for _, scanPath := range daCfg.TempScanPaths {
-			expanded := expandHome(scanPath, home)
-			if !pathExistsAndIsDir(expanded) {
-				continue
+		tempPaths := existingTempScanPaths(daCfg.TempScanPaths, home)
+		for _, expanded := range tempPaths {
+			// Each temp scan path gets its own root budget so one huge path
+			// (e.g. /tmp full of nix-shell.*) cannot starve the next one.
+			pathBudget := scanBudget.tempPathBudget(len(tempPaths))
+			pathCtx, cancelPath := pathBudget.context(scanCtx)
+			p.cleanTemporaryScanPath(pathCtx, expanded, home, level, daCfg, active, activeTempRoots, activeScratchSessions, tracker, logger, pathBudget,
+				tempMinBytes, tempStaleAfter, nixTempRootMinBytes, nixTempRootStaleAfter, nodeAge, venvAge, rustAge, zigAge, &result)
+			cancelPath()
+			if pathBudget.exhausted() {
+				logger.Warn("temp scan path budget exhausted; continuing with next temp scan path", "path", expanded, "truncated_paths", strings.Join(pathBudget.truncatedDetails(), "; "))
 			}
-			// Known-heavy harness scratch first: it is the payload the scan
-			// budget must never starve (TIN-2690).
-			if daCfg.HarnessScratch && level >= LevelAggressive {
-				freed := p.cleanHarnessScratchSessions(scanCtx, expanded, home, parseNixPolicyDuration(daCfg.HarnessScratchStaleAfter, 36*time.Hour), daCfg, activeScratchSessions, logger, scanBudget)
-				result.BytesFreed += freed
-				if freed > 0 {
-					result.ItemsCleaned++
-				}
-			}
-			if scanBudget.exhausted() {
-				logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
-				return result
-			}
-			if daCfg.NixTempRoots && level >= LevelAggressive {
-				freed := p.cleanNixTemporaryRoots(scanCtx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, daCfg.ProtectPaths, activeTempRoots, logger, scanBudget)
-				result.BytesFreed += freed
-				if freed > 0 {
-					result.ItemsCleaned++
-				}
-			}
-			if scanBudget.exhausted() {
-				logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
-				return result
-			}
-			freed := p.cleanTemporaryGeneratedArtifacts(scanCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, daCfg, active, activeTempRoots, tracker, logger, scanBudget)
-			result.BytesFreed += freed
-			if freed > 0 {
-				result.ItemsCleaned++
-			}
-			if scanBudget.exhausted() {
-				logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
-				return result
-			}
+			scanBudget.mergeTempPathBudget(pathBudget)
 		}
 	}
 	if daCfg.AgentTranscriptCompression {
@@ -724,6 +843,48 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	}
 
 	return result
+}
+
+// existingTempScanPaths expands the configured temp scan paths and keeps the
+// ones that exist as directories, so per-path budgets are split only across
+// paths that will actually be scanned.
+func existingTempScanPaths(scanPaths []string, home string) []string {
+	paths := make([]string, 0, len(scanPaths))
+	for _, scanPath := range scanPaths {
+		expanded := expandHome(scanPath, home)
+		if pathExistsAndIsDir(expanded) {
+			paths = append(paths, expanded)
+		}
+	}
+	return paths
+}
+
+// cleanTemporaryScanPath runs the temp lanes for one temp scan path against
+// that path's own budget. A budget hit stops the remaining lanes for this
+// path only.
+func (p *DevArtifactsPlugin) cleanTemporaryScanPath(ctx context.Context, expanded, home string, level CleanupLevel, daCfg config.DevArtifactsConfig, active devArtifactActivity, activeTempRoots, activeScratchSessions map[string]string, tracker *devArtifactGitTracker, logger *slog.Logger, budget *devArtifactScanBudget,
+	tempMinBytes int64, tempStaleAfter time.Duration, nixTempRootMinBytes int64, nixTempRootStaleAfter time.Duration, nodeAge, venvAge, rustAge, zigAge time.Duration, result *CleanupResult) {
+	record := func(freed int64) {
+		result.BytesFreed += freed
+		if freed > 0 {
+			result.ItemsCleaned++
+		}
+	}
+	// Known-heavy harness scratch first: it is the payload the scan
+	// budget must never starve (TIN-2690).
+	if daCfg.HarnessScratch && level >= LevelAggressive {
+		record(p.cleanHarnessScratchSessions(ctx, expanded, home, parseNixPolicyDuration(daCfg.HarnessScratchStaleAfter, 36*time.Hour), daCfg, activeScratchSessions, logger, budget))
+	}
+	if budget.exhausted() {
+		return
+	}
+	if daCfg.NixTempRoots && level >= LevelAggressive {
+		record(p.cleanNixTemporaryRoots(ctx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, daCfg.ProtectPaths, activeTempRoots, logger, budget))
+	}
+	if budget.exhausted() {
+		return
+	}
+	record(p.cleanTemporaryGeneratedArtifacts(ctx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, daCfg, active, activeTempRoots, tracker, logger, budget))
 }
 
 func devArtifactThresholds(level CleanupLevel) (nodeAge, venvAge, rustAge, zigAge time.Duration, mutates bool) {
@@ -1149,8 +1310,10 @@ func (p *DevArtifactsPlugin) cleanAgentWorktreeRoots(ctx context.Context, home s
 			logger.Debug("preserving git agent worktree", "path", path, "reason", reason)
 			return
 		}
-		if err := os.RemoveAll(path); err != nil {
-			logger.Warn("failed to delete stale agent worktree", "path", path, "error", err)
+		if err := p.removeDevArtifactPath(path, logger); err != nil {
+			if !errors.Is(err, errUndeletableDevArtifactPath) {
+				logger.Warn("failed to delete stale agent worktree", "path", path, "error", err)
+			}
 			return
 		}
 		totalFreed += bytes
@@ -1423,6 +1586,9 @@ func (p *DevArtifactsPlugin) cleanHarnessScratchSessions(ctx context.Context, sc
 			if !stale || activeReason != "" {
 				return
 			}
+			if p.knownUndeletable(session) {
+				return
+			}
 			// Size is accounting only. On a budget hit keep the partial figure
 			// and DELETE ANYWAY: skipping would strand the very payload this
 			// lane exists for and re-burn the budget every cycle (TIN-2690).
@@ -1437,8 +1603,10 @@ func (p *DevArtifactsPlugin) cleanHarnessScratchSessions(ctx context.Context, sc
 				logger.Info("skipping revived harness scratch session", "path", session)
 				return
 			}
-			if err := os.RemoveAll(session); err != nil {
-				logger.Warn("failed to delete stale harness scratch session", "path", session, "error", err)
+			if err := p.removeDevArtifactPath(session, logger); err != nil {
+				if !errors.Is(err, errUndeletableDevArtifactPath) {
+					logger.Warn("failed to delete stale harness scratch session", "path", session, "error", err)
+				}
 				return
 			}
 			totalFreed += size
@@ -1645,6 +1813,9 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 		if !canManageDevTempRoot(info) {
 			continue
 		}
+		if p.knownUndeletable(path) {
+			continue
+		}
 		activeReason := activeRoots[canonicalTempArtifactPath(path)]
 		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, p.isProtected(path, protectPaths), activeReason, true)
 		if target.Action != "delete" {
@@ -1665,8 +1836,10 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 			return totalFreed
 		}
 		logger.Debug("removing stale Nix temporary root", "path", path, "size_mb", size/(1024*1024))
-		if err := os.RemoveAll(path); err != nil {
-			logger.Debug("failed to remove stale Nix temporary root", "path", path, "error", err)
+		if err := p.removeDevArtifactPath(path, logger); err != nil {
+			if !errors.Is(err, errUndeletableDevArtifactPath) {
+				logger.Debug("failed to remove stale Nix temporary root", "path", path, "error", err)
+			}
 			continue
 		}
 		totalFreed += size
@@ -3408,8 +3581,10 @@ func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath stri
 		}
 
 		logger.Debug("removing stale node_modules", "path", dir, "size_mb", size/(1024*1024))
-		if err := os.RemoveAll(dir); err != nil {
-			logger.Debug("failed to remove node_modules", "path", dir, "error", err)
+		if err := p.removeDevArtifactPath(dir, logger); err != nil {
+			if !errors.Is(err, errUndeletableDevArtifactPath) {
+				logger.Debug("failed to remove node_modules", "path", dir, "error", err)
+			}
 			return
 		}
 		totalFreed += size
@@ -3475,8 +3650,10 @@ func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath stri
 		}
 
 		logger.Debug("removing stale .venv", "path", dir, "size_mb", size/(1024*1024))
-		if err := os.RemoveAll(dir); err != nil {
-			logger.Debug("failed to remove .venv", "path", dir, "error", err)
+		if err := p.removeDevArtifactPath(dir, logger); err != nil {
+			if !errors.Is(err, errUndeletableDevArtifactPath) {
+				logger.Debug("failed to remove .venv", "path", dir, "error", err)
+			}
 			return
 		}
 		totalFreed += size
@@ -3499,8 +3676,10 @@ func (p *DevArtifactsPlugin) cleanTCFSRustTargetCaches(ctx context.Context, home
 			return
 		}
 		logger.Debug("removing stale TCFS Rust target cache", "path", path, "size_mb", bytes/(1024*1024))
-		if err := os.RemoveAll(path); err != nil {
-			logger.Debug("failed to remove TCFS Rust target cache", "path", path, "error", err)
+		if err := p.removeDevArtifactPath(path, logger); err != nil {
+			if !errors.Is(err, errUndeletableDevArtifactPath) {
+				logger.Debug("failed to remove TCFS Rust target cache", "path", path, "error", err)
+			}
 			return
 		}
 		totalFreed += bytes
@@ -3574,8 +3753,10 @@ func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath stri
 		}
 
 		logger.Debug("removing stale Rust target", "path", dir, "size_mb", size/(1024*1024))
-		if err := os.RemoveAll(dir); err != nil {
-			logger.Debug("failed to remove Rust target", "path", dir, "error", err)
+		if err := p.removeDevArtifactPath(dir, logger); err != nil {
+			if !errors.Is(err, errUndeletableDevArtifactPath) {
+				logger.Debug("failed to remove Rust target", "path", dir, "error", err)
+			}
 			return
 		}
 		totalFreed += size
@@ -3618,8 +3799,10 @@ func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath str
 			}
 
 			logger.Debug("removing stale Zig artifact", "path", dir, "size_mb", size/(1024*1024))
-			if err := os.RemoveAll(dir); err != nil {
-				logger.Debug("failed to remove Zig artifact", "path", dir, "error", err)
+			if err := p.removeDevArtifactPath(dir, logger); err != nil {
+				if !errors.Is(err, errUndeletableDevArtifactPath) {
+					logger.Debug("failed to remove Zig artifact", "path", dir, "error", err)
+				}
 				return
 			}
 			totalFreed += size
