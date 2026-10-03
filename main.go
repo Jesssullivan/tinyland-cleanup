@@ -200,6 +200,7 @@ func main() {
 		report:       os.Stdout,
 		diskStats:    monitor.GetDiskStats,
 		now:          time.Now,
+		after:        time.After,
 	}
 
 	// Determine operation mode
@@ -264,30 +265,99 @@ type daemon struct {
 	report       io.Writer
 	diskStats    func(path string) (*monitor.DiskStats, error)
 	now          func() time.Time
+	// after is the scheduler's clock seam. It defaults to time.After; tests
+	// inject a fake so the wait between cycles can be observed and driven.
+	after func(time.Duration) <-chan time.Time
 }
 
+// run is the daemon loop. Each pass runs one cleanup cycle and then waits a
+// full poll interval measured from that cycle's completion, so a cycle that
+// outlasts the interval is never followed by an immediate catch-up cycle the
+// way a time.Ticker's pending tick would cause (TIN-3342).
 func (d *daemon) run(ctx context.Context) error {
-	ticker := time.NewTicker(time.Duration(d.config.PollInterval) * time.Second)
-	defer ticker.Stop()
-
-	// Run immediately on start
-	if err := d.runOnce(ctx, monitor.LevelNone); err != nil {
-		d.logger.Error("initial cleanup failed", "error", err)
-	}
+	interval := d.pollInterval()
+	overrunning := false
+	first := true
 
 	for {
+		report, err := d.runCycle(ctx, monitor.LevelNone)
+		if err != nil {
+			if first {
+				d.logger.Error("initial cleanup failed", "error", err)
+			} else {
+				d.logger.Error("cleanup cycle failed", "error", err)
+			}
+		} else {
+			nextCycleAt := d.currentTime().Add(interval)
+			report.NextCycleAt = nextCycleAt.UTC().Format(time.RFC3339)
+			duration := time.Duration(report.CycleDurationMs) * time.Millisecond
+			if duration > interval {
+				// Log once per overrun streak, not every overrunning cycle.
+				if !overrunning {
+					d.logger.Warn("cleanup cycle outlasted the poll interval; next cycle is scheduled from completion",
+						"cycle_duration", duration.Round(time.Millisecond).String(),
+						"poll_interval", interval.String(),
+						"next_cycle_at", report.NextCycleAt,
+					)
+				}
+				overrunning = true
+			} else {
+				overrunning = false
+			}
+			if werr := d.writeReport(report); werr != nil {
+				d.logger.Error("cleanup cycle failed", "error", werr)
+			}
+		}
+		first = false
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
-			if err := d.runOnce(ctx, monitor.LevelNone); err != nil {
-				d.logger.Error("cleanup cycle failed", "error", err)
-			}
+		case <-d.wait(interval):
 		}
 	}
 }
 
+// pollInterval returns the configured poll interval, never less than one
+// second, so a zero or negative value cannot spin the loop.
+func (d *daemon) pollInterval() time.Duration {
+	interval := time.Second
+	if d.config != nil && d.config.PollInterval > 0 {
+		interval = time.Duration(d.config.PollInterval) * time.Second
+	}
+	return interval
+}
+
+func (d *daemon) wait(interval time.Duration) <-chan time.Time {
+	if d.after != nil {
+		return d.after(interval)
+	}
+	return time.After(interval)
+}
+
+// runOnce runs one cleanup cycle and writes its report. It is the entry point
+// for --once, --level and the tests; the daemon loop calls runCycle directly so
+// it can add scheduling fields before the report is written.
 func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) error {
+	report, err := d.runCycle(ctx, forcedLevel)
+	if err != nil {
+		return err
+	}
+	return d.writeReport(report)
+}
+
+// runCycle assesses the monitored mounts, runs every eligible plugin, updates
+// persisted state, and returns the cycle report without writing it.
+func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel) (report cycleReport, err error) {
+	now := d.currentTime()
+	defer func() {
+		elapsed := d.currentTime().Sub(now)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		report.CycleDurationMs = elapsed.Milliseconds()
+	}()
+
 	assessment := d.assessMounts()
 	level := forcedLevel
 
@@ -295,8 +365,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		level = assessment.Level
 	}
 
-	now := d.currentTime()
-	report := cycleReport{
+	report = cycleReport{
 		Timestamp:     now.UTC().Format(time.RFC3339),
 		DryRun:        d.dryRun,
 		ForcedLevel:   forcedLevel != monitor.LevelNone,
@@ -313,10 +382,17 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 	}
 	report.MinimumFreeBytes = d.minimumFreeBytes()
 	report.StateFile = expandPathHome(d.config.Policy.StateFile)
-	state, stateErr := d.loadStateForCycle()
+	state, quarantined, stateErr := d.loadStateForCycle(now)
 	if stateErr != nil {
 		report.StateError = stateErr.Error()
 		d.logger.Warn("failed to load cleanup state", "path", report.StateFile, "error", stateErr)
+	}
+	if quarantined != "" {
+		report.StateQuarantined = quarantined
+		d.logger.Warn("cleanup state was unreadable; quarantined it and continuing with fresh state",
+			"path", report.StateFile,
+			"quarantined_to", quarantined,
+		)
 	}
 	if stateErr == nil {
 		report.InodeNoProgressCount = state.inodeNoProgressCount(report.MonitorPath)
@@ -338,7 +414,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 	}
 
 	if level == monitor.LevelNone {
-		return d.writeReport(report)
+		return report, nil
 	}
 
 	// Engage the inode-pressure circuit breaker for this cycle when inode-only
@@ -495,7 +571,7 @@ func (d *daemon) runOnce(ctx context.Context, forcedLevel monitor.CleanupLevel) 
 		)
 	}
 
-	return d.writeReport(report)
+	return report, nil
 }
 
 type cycleReport struct {
@@ -525,11 +601,19 @@ type cycleReport struct {
 	InodeNoProgressCount int `json:"inode_no_progress_count,omitempty"`
 	// InodeBackoff reports that the inode-pressure circuit breaker engaged this
 	// cycle, so the daemon applied cooldown instead of bypassing it.
-	InodeBackoff    bool   `json:"inode_backoff,omitempty"`
-	HostFreeError   string `json:"host_free_error,omitempty"`
-	StateFile       string `json:"state_file,omitempty"`
-	StateError      string `json:"state_error,omitempty"`
-	CooldownSeconds int64  `json:"cooldown_seconds,omitempty"`
+	InodeBackoff  bool   `json:"inode_backoff,omitempty"`
+	HostFreeError string `json:"host_free_error,omitempty"`
+	StateFile     string `json:"state_file,omitempty"`
+	StateError    string `json:"state_error,omitempty"`
+	// StateQuarantined is the path an undecodable state file was renamed to
+	// this cycle; accounting continued with fresh state.
+	StateQuarantined string `json:"state_quarantined,omitempty"`
+	CooldownSeconds  int64  `json:"cooldown_seconds,omitempty"`
+	// CycleDurationMs is the wall-clock duration of this cycle in milliseconds.
+	CycleDurationMs int64 `json:"cycle_duration_ms"`
+	// NextCycleAt is when the daemon will start its next cycle: completion plus
+	// the poll interval. It is empty outside daemon mode.
+	NextCycleAt string `json:"next_cycle_at,omitempty"`
 	// TargetUsedPercent is the legacy target_free config value as a maximum used percentage.
 	TargetUsedPercent int `json:"target_used_percent"`
 	// TargetFreeBytes is the free-space equivalent required to satisfy TargetUsedPercent.
@@ -888,11 +972,11 @@ func (d *daemon) cleanupCooldown() time.Duration {
 	return duration
 }
 
-func (d *daemon) loadStateForCycle() (*cleanupState, error) {
+func (d *daemon) loadStateForCycle(now time.Time) (*cleanupState, string, error) {
 	if d.dryRun || d.config == nil {
-		return newCleanupState(), nil
+		return newCleanupState(), "", nil
 	}
-	return loadCleanupState(expandPathHome(d.config.Policy.StateFile))
+	return loadCleanupState(expandPathHome(d.config.Policy.StateFile), now)
 }
 
 func (d *daemon) shouldApplyCooldown(report cycleReport, level monitor.CleanupLevel) bool {
