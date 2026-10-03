@@ -110,6 +110,18 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 			return err
 		}
 	}
+	if report.StateQuarantined != "" {
+		if _, err := fmt.Fprintf(w, "state: unreadable file quarantined to %s; continuing with fresh state\n",
+			report.StateQuarantined); err != nil {
+			return err
+		}
+	}
+	if report.NextCycleAt != "" {
+		if _, err := fmt.Fprintf(w, "next cycle: %s (this cycle took %dms)\n",
+			report.NextCycleAt, report.CycleDurationMs); err != nil {
+			return err
+		}
+	}
 
 	if len(report.Mounts) > 0 {
 		if _, err := fmt.Fprintln(w, "mounts:"); err != nil {

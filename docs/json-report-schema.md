@@ -38,12 +38,15 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `cooldown_seconds` (int64, optional)
 - `stop_reason` (string, optional) — e.g. `target_free_met`
 - `state_file` (string, optional), `state_error` (string, optional)
+- `state_quarantined` (string, optional) — path an undecodable state file was renamed to (`<state_file>.corrupt-<ts>`); the cycle continued with fresh state
 - `host_free_error` (string, optional)
 
 ### Plan and totals
 - `planned_estimated_bytes_freed`, `planned_required_free_bytes` (int64, optional) — dry-run aggregates
 - `planned_targets` (int, optional)
 - `total_bytes_freed` (int64), `total_items_cleaned` (int)
+- `cycle_duration_ms` (int64) — wall-clock duration of this cycle
+- `next_cycle_at` (string, optional, RFC3339) — daemon mode only: when the next cycle starts (this cycle's completion plus `poll_interval`)
 - `plugin_filter` (array of string, optional) — present when `--plugins` was used
 
 ### Collections
