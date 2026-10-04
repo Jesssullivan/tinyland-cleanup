@@ -14,9 +14,8 @@
         buildVersion = pkgs.lib.fileContents ./VERSION;
         buildCommit = inputs.self.rev or "dirty";
         buildDate = inputs.self.lastModifiedDate or "unknown";
-      in {
-        packages.default = pkgs.buildGoModule {
-          pname = "tinyland-cleanup";
+        mkCleanup = { pname, tags ? [ ], doCheck ? true }: pkgs.buildGoModule {
+          inherit pname tags doCheck;
           version = buildVersion;
           src = ./.;
           vendorHash = null;
@@ -35,6 +34,20 @@
             platforms = platforms.unix;
             mainProgram = "tinyland-cleanup";
           };
+        };
+      in {
+        packages.default = mkCleanup { pname = "tinyland-cleanup"; };
+
+        # TIN-3342 consumer-test hook: the same source built with the
+        # tinyland_sim tag, which reads disk statistics from
+        # TINYLAND_CLEANUP_SIM_DISKSTATS instead of statfs (see
+        # docs/operator-workflow.md). The Go and Bazel lanes run its tests;
+        # this package is the binary a consumer check runs. For consumer
+        # checks only; never install or deploy it.
+        packages.sim = mkCleanup {
+          pname = "tinyland-cleanup-sim";
+          tags = [ "tinyland_sim" ];
+          doCheck = false;
         };
 
         # Documentation site (MkDocs Material), built hermetically through Nix.

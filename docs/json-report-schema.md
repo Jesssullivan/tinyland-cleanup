@@ -87,6 +87,26 @@ are omitted when empty. The source of truth is the `cycleReport`,
     - `scan_root_share` — always `carry_over`: each root's share is the lane's remaining budget divided by the roots still to come
     - `scan_sizing_entries_visited` — decimal count of entries visited while sizing artifact directories; reported, not enforced against `scan_max_entries`
 
+## Unchanged daemon cycles
+
+In daemon mode, a cycle whose levels, reasons, backoff state, retry times and
+plugin outcomes match the last full report is written as one compact object
+instead of a `cycleReport` (see `policy.log_repeat_window`). It is the only
+object with a `report` field:
+
+```json
+{"report":"unchanged","timestamp":"2026-10-04T00:05:00Z","level":"critical","reason":"byte_backoff,zero_yield_backoff","free_gb":"24.0","next_retry_at":"2026-10-04T00:30:00Z","next_cycle_at":"2026-10-04T00:10:00Z","unchanged_count":1}
+```
+
+- `reason` — the stop reason, `no_pressure` at level none, or the sorted
+  distinct skip reasons (plus `byte_backoff` when engaged)
+- `free_gb` — free space on the monitored path before the cycle, as text
+  with one decimal
+- `unchanged_count` — unchanged cycles since the last full report
+
+Text output writes the same as one `cycle unchanged:` line. `--once`,
+`--level` and non-daemon runs always write the full report.
+
 ## Example (dry-run)
 
 ```json

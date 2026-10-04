@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- daemon: bounded repeated logs (TIN-3342). In daemon mode a log line is
+  emitted when its content changes and otherwise at most once per
+  `policy.log_repeat_window` (default 1h; Error lines at least every 15m),
+  carrying `repeats_suppressed`. Drifting measurements (`free_gb`,
+  `used_percent`, free-space deltas) are not a change, so `disk status` is
+  logged on level changes rather than every poll; a new `reason` or
+  `retry_at` is logged at once. An unchanged cycle report is written as one
+  `cycle unchanged` line (JSON: `{"report":"unchanged",...}`) with `reason`,
+  `next_retry_at` and `next_cycle_at`. `0s` disables it; operator runs are
+  never throttled.
+- `tinyland_sim` build tag and `packages.sim` flake output (TIN-3342): a
+  consumer-test build that reads disk statistics from
+  `TINYLAND_CLEANUP_SIM_DISKSTATS` instead of statfs, so a consumer can hold
+  the daemon under byte pressure without filling a disk. Never compiled into
+  a release or the default package; `--version` reports `SIMULATION BUILD`.
+
 ### Fixed
 
 - dev-artifacts: per-root scan budgets (TIN-3342, #129). A workspace root

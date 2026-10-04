@@ -135,6 +135,34 @@ the particular expensive passes that keep finding nothing:
 - `zero_yield_limit: 0` uses the default of 2; a negative value disables
   suppression.
 
+### Bounded repeated logs
+
+```yaml
+policy:
+  log_repeat_window: 1h
+```
+
+In daemon mode, a pinned host otherwise repeats the same lines every poll.
+The daemon bounds that:
+
+- A log line is emitted when its content changes and otherwise at most once
+  per `log_repeat_window`. The restated line carries `repeats_suppressed=N`,
+  the number of copies held back. Error lines are restated at least every
+  15 minutes.
+- A line's identity is its level, message and its `plugin`, `path`, `mount`,
+  `label` or `instance` attributes. Measurements that drift every cycle
+  (`free_gb`, `used_percent`, `inodes_free`, the free-space deltas) are not a
+  change, so the `disk status` line is logged when a level changes, not every
+  poll. A new `reason` or `retry_at` is a change and is logged at once.
+- A cycle report whose levels, reasons, backoff state, retry times and plugin
+  outcomes match the last full report is written as one line (see the JSON
+  report schema). The full report is written on any change and at least once
+  per window.
+- Debug lines (`--verbose`) and operator runs (`--once`, `--level`,
+  non-daemon `--dry-run`) are never throttled.
+- `0s` disables throttling. The throttle lives in memory, so a restart logs
+  everything once.
+
 ## Plugins
 
 The `enable` map controls plugin availability:

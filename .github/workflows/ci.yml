@@ -49,6 +49,8 @@ jobs:
         run: nix develop --command go build ./...
       - name: Test
         run: nix develop --command go test ./...
+      - name: Test simulation build (tinyland_sim)
+        run: nix develop --command go test -tags tinyland_sim .
       - name: Vet
         run: nix develop --command go vet ./...
 
@@ -78,3 +80,5 @@ jobs:
         run: nix flake check --no-build
       - name: Build package
         run: nix build .#default --no-link --print-build-logs
+      - name: Build simulation package (consumer-test hook)
+        run: nix build .#sim --no-link --print-build-logs
