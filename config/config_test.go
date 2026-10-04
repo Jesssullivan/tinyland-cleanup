@@ -1161,6 +1161,35 @@ darwin_dev_caches:
 	}
 }
 
+func TestZeroYieldPolicyDefaultsAndOverrides(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Policy.ZeroYieldLimit != 2 || cfg.Policy.ZeroYieldBackoffBase != "30m" ||
+		cfg.Policy.ZeroYieldBackoffMax != "6h" || len(cfg.Policy.ZeroYieldExemptPlugins) != 0 {
+		t.Fatalf("unexpected zero-yield defaults: %+v", cfg.Policy)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+policy:
+  zero_yield_limit: -1
+  zero_yield_backoff_base: 10m
+  zero_yield_backoff_max: 2h
+  zero_yield_exempt_plugins: [nix-gc]
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("zero-yield keys should load under strict decoding: %v", err)
+	}
+	if cfg.Policy.ZeroYieldLimit != -1 || cfg.Policy.ZeroYieldBackoffBase != "10m" ||
+		cfg.Policy.ZeroYieldBackoffMax != "2h" || len(cfg.Policy.ZeroYieldExemptPlugins) != 1 ||
+		cfg.Policy.ZeroYieldExemptPlugins[0] != "nix-gc" {
+		t.Fatalf("zero-yield overrides not applied: %+v", cfg.Policy)
+	}
+}
+
 func TestByteBackoffPolicyDefaultsAndOverrides(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Policy.ByteNoProgressLimit != 3 || cfg.Policy.ByteProgressMinMB != 256 ||

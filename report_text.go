@@ -127,6 +127,11 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 			return err
 		}
 	}
+	if report.NextRetryAt != "" {
+		if _, err := fmt.Fprintf(w, "next plugin retry: %s\n", report.NextRetryAt); err != nil {
+			return err
+		}
+	}
 	if report.NextCycleAt != "" {
 		if _, err := fmt.Fprintf(w, "next cycle: %s (this cycle took %dms)\n",
 			report.NextCycleAt, report.CycleDurationMs); err != nil {
@@ -320,6 +325,17 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 	}
 	if plugin.BytesFreed > 0 || plugin.ItemsCleaned > 0 {
 		if _, err := fmt.Fprintf(w, "  cleaned: %s\n", formatCleaned(plugin.BytesFreed, plugin.ItemsCleaned)); err != nil {
+			return err
+		}
+	}
+	if plugin.SuppressedUntil != "" {
+		if _, err := fmt.Fprintf(w, "  zero yield: %d runs, suppressed until %s\n",
+			plugin.ZeroYieldCount, plugin.SuppressedUntil); err != nil {
+			return err
+		}
+	}
+	if plugin.ZeroYieldLifted != "" {
+		if _, err := fmt.Fprintf(w, "  zero-yield suppression lifted: %s\n", plugin.ZeroYieldLifted); err != nil {
 			return err
 		}
 	}

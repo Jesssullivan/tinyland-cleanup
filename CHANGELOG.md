@@ -27,6 +27,19 @@ All notable changes to this project will be documented in this file.
   `policy.emergency_free_gb` (default 20 GiB free), for `--level` or
   `--dry-run` runs, or right after the byte level rises. The counter persists
   in `state.json` (state version 2).
+- daemon: zero-yield suppression (TIN-3342). After `policy.zero_yield_limit`
+  (default 2) consecutive runs of a plugin that each reclaim less than
+  `policy.byte_progress_min_mb`, that plugin is skipped for
+  `policy.zero_yield_backoff_base` (default 30m), doubling per further
+  zero-yield run up to `policy.zero_yield_backoff_max` (default 6h). It runs
+  early when the level rises above its last run, when the config or binary
+  version changes, after pressure clears, or below `policy.emergency_free_gb`,
+  and never applies to `--level`, `--dry-run` or `--plugins` runs,
+  `policy.zero_yield_exempt_plugins` or `apfs-snapshots`. In a 24-hour simulation pinned at 95% used with nothing
+  reclaimable, a plugin runs 8 times instead of 288.
+- JSON report: `next_retry_at`, and per-plugin `zero_yield_count`,
+  `suppressed_until` and `zero_yield_lifted`; `skip_reason` gains
+  `zero_yield_backoff`.
 - JSON report: `byte_no_progress_count`, `byte_backoff`,
   `byte_backoff_reason`, `byte_backoff_seconds`, `emergency_free_bytes`,
   `host_byte_level_after`, and per-plugin `retry_at`.

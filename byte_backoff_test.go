@@ -30,6 +30,9 @@ func newByteBackoffDaemon(t *testing.T, stats *monitor.DiskStats) (*daemon, *rep
 	d := newTestDaemonWithPlugins(t, &output, plugin)
 	d.config.Policy.MinimumFreeGB = 40
 	d.config.TargetFree = 70
+	// Isolate byte backoff from zero-yield suppression, which would otherwise
+	// hold this zero-yield plugin back first (zero_yield_test.go covers both).
+	d.config.Policy.ZeroYieldLimit = -1
 	clock := &fakeClock{t: time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)}
 	d.now = clock.Now
 	d.diskStats = sequenceDiskStats(t, stats)
@@ -270,6 +273,7 @@ func TestPropertyByteBackoffSpacing(t *testing.T) {
 		d := newTestDaemonWithPlugins(t, &output, plugin)
 		d.config.Policy.Cooldown = cooldown
 		d.config.Policy.MinimumFreeGB = 40
+		d.config.Policy.ZeroYieldLimit = -1
 		d.config.Policy.StateFile = filepath.Join(t.TempDir(), "state.json")
 		clock := &fakeClock{t: time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)}
 		d.now = clock.Now

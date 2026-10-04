@@ -36,6 +36,39 @@ type pluginStateRecord struct {
 	LastBytesFreed   int64  `json:"last_bytes_freed"`
 	LastItemsCleaned int    `json:"last_items_cleaned"`
 	LastError        string `json:"last_error,omitempty"`
+	// ZeroYieldCount is the number of consecutive runs that reclaimed less
+	// than policy.byte_progress_min_mb (TIN-3342).
+	ZeroYieldCount int `json:"zero_yield_count,omitempty"`
+	// SuppressedUntil is when a zero-yield-suppressed plugin may run again
+	// (RFC3339). Empty when the plugin is not suppressed.
+	SuppressedUntil string `json:"suppressed_until,omitempty"`
+	// ConfigDigest identifies the configuration and binary version the
+	// zero-yield count was measured under. A change clears suppression.
+	ConfigDigest string `json:"config_digest,omitempty"`
+}
+
+// zeroYieldPolicy is the resolved zero-yield suppression policy for a cycle.
+type zeroYieldPolicy struct {
+	limit int
+	base  time.Duration
+	max   time.Duration
+}
+
+// zeroYieldBackoff returns how long a plugin is suppressed after count
+// consecutive zero-yield runs: base at the limit, doubling per further run,
+// capped at max. Below the limit, or with suppression disabled, it is zero.
+func zeroYieldBackoff(count int, policy zeroYieldPolicy) time.Duration {
+	if policy.limit <= 0 || count < policy.limit || policy.base <= 0 {
+		return 0
+	}
+	interval := policy.base
+	for i := policy.limit; i < count && interval < policy.max; i++ {
+		interval *= 2
+	}
+	if policy.max > 0 && interval > policy.max {
+		interval = policy.max
+	}
+	return interval
 }
 
 // inodeProgressRecord records the inode state observed at the end of the most
@@ -231,17 +264,94 @@ func (s *cleanupState) recordPluginRun(plugin string, level plugins.CleanupLevel
 	if s.Plugins == nil {
 		s.Plugins = map[string]pluginStateRecord{}
 	}
-	record := pluginStateRecord{
-		LastRun:          now.UTC().Format(time.RFC3339),
-		LastLevel:        level.String(),
-		LastLevelValue:   int(level),
-		LastBytesFreed:   result.BytesFreed,
-		LastItemsCleaned: result.ItemsCleaned,
-	}
+	// Merge into the existing record so the zero-yield fields survive.
+	record := s.Plugins[plugin]
+	record.LastRun = now.UTC().Format(time.RFC3339)
+	record.LastLevel = level.String()
+	record.LastLevelValue = int(level)
+	record.LastBytesFreed = result.BytesFreed
+	record.LastItemsCleaned = result.ItemsCleaned
+	record.LastError = ""
 	if result.Error != nil {
 		record.LastError = result.Error.Error()
 	}
 	s.Plugins[plugin] = record
+}
+
+// recordPluginYield updates a plugin's zero-yield count after it ran. A count
+// measured under a different config digest starts over. A run with yield
+// resets the count and lifts suppression; a zero-yield run advances it and,
+// once the limit is reached, suppresses the plugin from now until
+// now+zeroYieldBackoff. It returns the updated record.
+func (s *cleanupState) recordPluginYield(plugin string, zeroYield bool, now time.Time, digest string, policy zeroYieldPolicy) pluginStateRecord {
+	if s == nil {
+		return pluginStateRecord{}
+	}
+	if s.Plugins == nil {
+		s.Plugins = map[string]pluginStateRecord{}
+	}
+	record := s.Plugins[plugin]
+	if record.ConfigDigest != digest {
+		record.ZeroYieldCount = 0
+	}
+	record.ConfigDigest = digest
+	record.SuppressedUntil = ""
+	if !zeroYield || policy.limit <= 0 {
+		record.ZeroYieldCount = 0
+	} else {
+		record.ZeroYieldCount++
+		if interval := zeroYieldBackoff(record.ZeroYieldCount, policy); interval > 0 {
+			record.SuppressedUntil = now.Add(interval).UTC().Format(time.RFC3339)
+		}
+	}
+	s.Plugins[plugin] = record
+	return record
+}
+
+// liftZeroYieldSuppression clears every plugin's zero-yield retry time and
+// reports whether any was set. Counts are kept, so a plugin that still yields
+// nothing is suppressed again after its one fresh run, with a longer interval.
+func (s *cleanupState) liftZeroYieldSuppression() bool {
+	if s == nil {
+		return false
+	}
+	lifted := false
+	for name, record := range s.Plugins {
+		if record.SuppressedUntil == "" {
+			continue
+		}
+		record.SuppressedUntil = ""
+		s.Plugins[name] = record
+		lifted = true
+	}
+	return lifted
+}
+
+// zeroYieldSuppression reports whether plugin is suppressed for zero yield
+// at level and digest, until when, and its zero-yield count. Suppression
+// holds only while now is before the recorded retry time, the level is not
+// above the plugin's last run, and the config digest is unchanged. When the
+// retry time is still ahead but a condition changed, lifted names it:
+// "level_rose" or "config_changed".
+func (s *cleanupState) zeroYieldSuppression(plugin string, level plugins.CleanupLevel, now time.Time, digest string) (until time.Time, count int, lifted string, suppressed bool) {
+	if s == nil || s.Plugins == nil {
+		return time.Time{}, 0, "", false
+	}
+	record, ok := s.Plugins[plugin]
+	if !ok || record.SuppressedUntil == "" {
+		return time.Time{}, 0, "", false
+	}
+	until, err := time.Parse(time.RFC3339, record.SuppressedUntil)
+	if err != nil || !now.Before(until) {
+		return time.Time{}, record.ZeroYieldCount, "", false
+	}
+	switch {
+	case int(level) > record.LastLevelValue:
+		return until, record.ZeroYieldCount, "level_rose", false
+	case record.ConfigDigest != digest:
+		return until, record.ZeroYieldCount, "config_changed", false
+	}
+	return until, record.ZeroYieldCount, "", true
 }
 
 // inodeNoProgressCount returns the number of consecutive recent cleanup cycles
