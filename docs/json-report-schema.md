@@ -21,6 +21,12 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `host_free_before_bytes`, `host_free_after_bytes` (uint64)
 - `host_free_delta_bytes` (int64) — net bytes freed this cycle
 - `host_byte_level` (string, optional) — byte-driven level for the primary path
+- `host_byte_level_after` (string, optional) — byte-driven level measured after cleanup
+- `byte_no_progress_count` (int, optional) — consecutive cleanup cycles under byte pressure without `byte_progress_min_mb` of reclaim
+- `byte_backoff` (bool, optional) — byte backoff engaged this cycle
+- `byte_backoff_reason` (string, optional) — `no_progress` when engaged; `below_emergency_floor` when the limit was reached but free space is under the floor
+- `byte_backoff_seconds` (int64, optional) — per-plugin interval applied while engaged
+- `emergency_free_bytes` (uint64, optional) — free-space floor below which byte backoff never engages
 
 ### Inode state
 - `host_inodes_total`, `host_inodes_free_before`, `host_inodes_free_after` (uint64, optional)
@@ -64,9 +70,10 @@ are omitted when empty. The source of truth is the `cycleReport`,
 ## pluginCycleReport
 - `name`, `description` (string); `level` (string); `dry_run`, `would_run` (bool)
 - `ran` (bool) — `Cleanup` was actually invoked this cycle (never true in dry-run); `would_run` is eligibility, `ran` is the outcome
-- `skip_reason` (string, optional) — e.g. `dry_run`, `cooldown`, `target_free_met`
+- `skip_reason` (string, optional) — e.g. `dry_run`, `cooldown`, `byte_backoff`, `target_free_met`
 - `bytes_freed`, `estimated_bytes_freed`, `command_bytes_freed`, `host_bytes_freed` (int64); `items_cleaned` (int)
 - `cooldown_remaining_seconds` (int64, optional); `error` (string, optional)
+- `retry_at` (string, optional) — RFC3339 time a plugin held back by `cooldown` or `byte_backoff` becomes eligible again
 - `plan` (object, optional) — dry-run plan with `targets`, byte accounting, and warnings
   - `plan.metadata` (object of string to string, optional) — plugin-specific keys. The `dev-artifacts` scan-budget keys include:
     - `temp_scan_max_roots_scope` — always `per_temp_scan_path`: `temp_scan_max_roots` is applied to each entry of `temp_scan_paths` separately

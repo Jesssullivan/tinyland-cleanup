@@ -110,6 +110,17 @@ func writeTextReport(w io.Writer, report cycleReport) error {
 			return err
 		}
 	}
+	if report.ByteBackoff {
+		if _, err := fmt.Fprintf(w, "byte backoff: pressure unrelieved after %d cycles, plugins run at most every %ds\n",
+			report.ByteNoProgressCount, report.ByteBackoffSeconds); err != nil {
+			return err
+		}
+	} else if report.ByteBackoffReason == "below_emergency_floor" {
+		if _, err := fmt.Fprintf(w, "byte backoff: held off, free space below the %s emergency floor\n",
+			formatByteCount(int64(report.EmergencyFreeBytes))); err != nil {
+			return err
+		}
+	}
 	if report.StateQuarantined != "" {
 		if _, err := fmt.Fprintf(w, "state: unreadable file quarantined to %s; continuing with fresh state\n",
 			report.StateQuarantined); err != nil {
@@ -299,6 +310,11 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 	}
 	if plugin.CooldownRemainingSeconds > 0 {
 		if _, err := fmt.Fprintf(w, "  cooldown remaining: %ds\n", plugin.CooldownRemainingSeconds); err != nil {
+			return err
+		}
+	}
+	if plugin.RetryAt != "" {
+		if _, err := fmt.Fprintf(w, "  retry at: %s\n", plugin.RetryAt); err != nil {
 			return err
 		}
 	}

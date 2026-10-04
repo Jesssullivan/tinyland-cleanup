@@ -11,7 +11,10 @@ import (
 	"github.com/Jesssullivan/tinyland-cleanup/plugins"
 )
 
-const cleanupStateVersion = 1
+// cleanupStateVersion 2 adds per-path byte progress (TIN-3342). Version 1
+// files load unchanged with an empty byte map, and older binaries ignore the
+// new field, so a rollback keeps working.
+const cleanupStateVersion = 2
 
 type cleanupState struct {
 	Version int                          `json:"version"`
@@ -20,6 +23,10 @@ type cleanupState struct {
 	// detect inode pressure that repeated cleanup cycles fail to relieve and
 	// back off instead of churning every poll interval (TIN-2170).
 	Inodes map[string]inodeProgressRecord `json:"inodes,omitempty"`
+	// Bytes tracks per-monitor-path byte reclaim progress so the daemon can
+	// detect byte pressure that repeated cleanup cycles fail to relieve and
+	// back off instead of rescanning every poll interval (TIN-3342).
+	Bytes map[string]byteProgressRecord `json:"bytes,omitempty"`
 }
 
 type pluginStateRecord struct {
@@ -42,11 +49,28 @@ type inodeProgressRecord struct {
 	NoProgressCount       int     `json:"no_progress_count"`
 }
 
+// byteProgressRecord records the byte state observed at the end of the most
+// recent cleanup cycle for one monitored path, plus a counter of consecutive
+// cycles that ran cleanup under byte pressure without meaningful reclaim.
+type byteProgressRecord struct {
+	LastRun        string `json:"last_run"`
+	LastFreeBytes  uint64 `json:"last_free_bytes"`
+	LastByteLevel  string `json:"last_byte_level"`
+	LastLevelValue int    `json:"last_level_value"`
+	// NoProgressCount is the number of consecutive no-progress cycles at or
+	// below LastLevelValue.
+	NoProgressCount int `json:"no_progress_count"`
+	// Engaged records whether byte backoff was engaged on the last cycle, so
+	// the engage and release transitions are logged once each.
+	Engaged bool `json:"engaged,omitempty"`
+}
+
 func newCleanupState() *cleanupState {
 	return &cleanupState{
 		Version: cleanupStateVersion,
 		Plugins: map[string]pluginStateRecord{},
 		Inodes:  map[string]inodeProgressRecord{},
+		Bytes:   map[string]byteProgressRecord{},
 	}
 }
 
@@ -85,7 +109,12 @@ func loadCleanupState(path string, now time.Time) (*cleanupState, string, error)
 	if state.Inodes == nil {
 		state.Inodes = map[string]inodeProgressRecord{}
 	}
-	if state.Version == 0 {
+	if state.Bytes == nil {
+		state.Bytes = map[string]byteProgressRecord{}
+	}
+	// Older versions only lack the byte map, which is now initialised, so the
+	// state is saved as the current schema. A newer version is left as is.
+	if state.Version < cleanupStateVersion {
 		state.Version = cleanupStateVersion
 	}
 	return state, "", nil
@@ -246,4 +275,69 @@ func (s *cleanupState) recordInodeProgress(path string, inodesFree uint64, usedP
 	record.LastInodesUsedPercent = usedPercent
 	record.LastInodeLevel = level
 	s.Inodes[path] = record
+}
+
+// byteNoProgressCount returns the number of consecutive recent cleanup cycles
+// that failed to relieve byte pressure on path at the given byte level. A
+// level above the recorded one returns zero: an escalation earns a fresh
+// attempt before backoff can engage again.
+func (s *cleanupState) byteNoProgressCount(path string, level int) int {
+	if s == nil || s.Bytes == nil || path == "" {
+		return 0
+	}
+	record, ok := s.Bytes[path]
+	if !ok || level > record.LastLevelValue {
+		return 0
+	}
+	return record.NoProgressCount
+}
+
+// byteNoProgressPending reports whether path carries a non-zero byte
+// no-progress count at any level. Unlike byteNoProgressCount it does not
+// compare levels, so a streak accrued below critical is still found and reset
+// when pressure clears (TIN-3342 review).
+func (s *cleanupState) byteNoProgressPending(path string) bool {
+	if s == nil || s.Bytes == nil || path == "" {
+		return false
+	}
+	return s.Bytes[path].NoProgressCount > 0
+}
+
+// byteBackoffEngaged reports whether byte backoff was engaged for path on the
+// most recent recorded cycle.
+func (s *cleanupState) byteBackoffEngaged(path string) bool {
+	if s == nil || s.Bytes == nil || path == "" {
+		return false
+	}
+	return s.Bytes[path].Engaged
+}
+
+// recordByteProgress updates the byte no-progress tracker for path. progress
+// resets the counter. Otherwise, when cleanupRan is true the counter advances;
+// a cycle where every plugin was held back leaves it unchanged, so the counter
+// measures cleanup attempts rather than polls. A level above the recorded one
+// restarts counting from zero before the cycle is applied.
+func (s *cleanupState) recordByteProgress(path string, freeBytes uint64, level string, levelValue int, now time.Time, progress, cleanupRan, engaged bool) {
+	if s == nil || path == "" {
+		return
+	}
+	if s.Bytes == nil {
+		s.Bytes = map[string]byteProgressRecord{}
+	}
+	record := s.Bytes[path]
+	if levelValue > record.LastLevelValue {
+		record.NoProgressCount = 0
+	}
+	switch {
+	case progress:
+		record.NoProgressCount = 0
+	case cleanupRan:
+		record.NoProgressCount++
+	}
+	record.LastRun = now.UTC().Format(time.RFC3339)
+	record.LastFreeBytes = freeBytes
+	record.LastByteLevel = level
+	record.LastLevelValue = levelValue
+	record.Engaged = engaged
+	s.Bytes[path] = record
 }

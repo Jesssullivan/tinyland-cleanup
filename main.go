@@ -63,6 +63,14 @@ var (
 // is unset.
 const defaultInodeNoProgressLimit = 3
 
+// Byte backoff defaults (TIN-3342), used when the matching policy key is
+// unset or invalid.
+const (
+	defaultByteNoProgressLimit = 3
+	defaultByteProgressMinMB   = 256
+	defaultByteBackoffMax      = 30 * time.Minute
+)
+
 func main() {
 	// Parse command line flags
 	var (
@@ -381,6 +389,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		report.CooldownSeconds = int64(cooldown / time.Second)
 	}
 	report.MinimumFreeBytes = d.minimumFreeBytes()
+	report.EmergencyFreeBytes = d.emergencyFreeBytes()
 	report.StateFile = expandPathHome(d.config.Policy.StateFile)
 	state, quarantined, stateErr := d.loadStateForCycle(now)
 	if stateErr != nil {
@@ -411,9 +420,27 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		report.HostInodeLevel = d.inodeLevelForPath(report.MonitorPath, beforeStats).String()
 		report.HostByteLevel = d.byteLevelForPath(report.MonitorPath, beforeStats).String()
 		d.updateTargetFreeStatus(&report, beforeStats)
+		if stateErr == nil {
+			report.ByteNoProgressCount = state.byteNoProgressCount(report.MonitorPath, int(parseLevel(report.HostByteLevel)))
+		}
 	}
+	byteBackoffWasEngaged := stateErr == nil && state.byteBackoffEngaged(report.MonitorPath)
 
 	if level == monitor.LevelNone {
+		// Pressure cleared: release byte backoff and reset its counter so a
+		// later episode starts from a clean slate.
+		if !d.dryRun && stateErr == nil && beforeErr == nil &&
+			(byteBackoffWasEngaged || state.byteNoProgressPending(report.MonitorPath)) {
+			state.recordByteProgress(report.MonitorPath, report.HostFreeBeforeBytes, report.HostByteLevel,
+				int(monitor.LevelNone), now, true, false, false)
+			if byteBackoffWasEngaged {
+				d.logger.Info("byte backoff released", "path", report.MonitorPath, "reason", "pressure_cleared")
+			}
+			if err := saveCleanupState(report.StateFile, state); err != nil {
+				report.StateError = err.Error()
+				d.logger.Warn("failed to save cleanup state", "path", report.StateFile, "error", err)
+			}
+		}
 		return report, nil
 	}
 
@@ -428,6 +455,39 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 			"inode_level", report.HostInodeLevel,
 			"no_progress_count", report.InodeNoProgressCount,
 		)
+	}
+
+	// Engage byte backoff when byte pressure has survived the configured number
+	// of cleanup cycles without meaningful reclaim (TIN-3342). While engaged,
+	// plugins stop bypassing cooldown and run at most once per backoff
+	// interval, capped at policy.byte_backoff_max. It never engages below the
+	// emergency free-space floor, for forced or dry runs, or right after the
+	// byte level rises.
+	if !report.ForcedLevel && !d.dryRun && stateErr == nil {
+		report.ByteBackoff, report.ByteBackoffReason = d.byteBackoffActive(report)
+	}
+	if report.ByteBackoff {
+		interval := d.byteBackoffInterval()
+		report.ByteBackoffSeconds = int64(interval / time.Second)
+		attrs := []any{
+			"path", report.MonitorPath,
+			"reason", report.ByteBackoffReason,
+			"byte_level", report.HostByteLevel,
+			"no_progress_count", report.ByteNoProgressCount,
+			"interval", interval.String(),
+			"free_bytes", report.HostFreeBeforeBytes,
+		}
+		if byteBackoffWasEngaged {
+			d.logger.Debug("byte backoff engaged", attrs...)
+		} else {
+			d.logger.Warn("byte pressure unrelieved by recent cleanup cycles; engaging byte backoff", attrs...)
+		}
+	} else if byteBackoffWasEngaged && !report.ForcedLevel && !d.dryRun {
+		reason := report.ByteBackoffReason
+		if reason == "" {
+			reason = "progress_or_escalation"
+		}
+		d.logger.Info("byte backoff released", "path", report.MonitorPath, "reason", reason)
 	}
 
 	// Convert monitor level to plugin level
@@ -458,13 +518,16 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 			continue
 		}
 
-		if d.shouldApplyCooldown(report, level) && stateErr == nil {
-			if remaining := state.cooldownRemaining(p.Name(), pluginLevel, now, cooldown); remaining > 0 {
-				pluginReport.WouldRun = false
-				pluginReport.SkipReason = "cooldown"
-				pluginReport.CooldownRemainingSeconds = int64(remaining.Round(time.Second) / time.Second)
-				report.Plugins = append(report.Plugins, pluginReport)
-				continue
+		if stateErr == nil {
+			if pluginCooldown, reason, ok := d.pluginCooldown(report, level); ok {
+				if remaining := state.cooldownRemaining(p.Name(), pluginLevel, now, pluginCooldown); remaining > 0 {
+					pluginReport.WouldRun = false
+					pluginReport.SkipReason = reason
+					pluginReport.CooldownRemainingSeconds = int64(remaining.Round(time.Second) / time.Second)
+					pluginReport.RetryAt = now.Add(remaining).UTC().Format(time.RFC3339)
+					report.Plugins = append(report.Plugins, pluginReport)
+					continue
+				}
 			}
 		}
 
@@ -549,6 +612,22 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		}
 	}
 
+	// Record byte reclaim progress for the monitored path so byte backoff can
+	// detect byte pressure that repeated cycles fail to relieve (TIN-3342). A
+	// cycle counts as progress when plugins or the host free-space delta reach
+	// policy.byte_progress_min_mb, or when the byte level dropped or cleared.
+	if !d.dryRun && stateErr == nil && beforeErr == nil && report.HostFreeError == "" {
+		beforeLevel := parseLevel(report.HostByteLevel)
+		if beforeLevel != monitor.LevelNone || byteBackoffWasEngaged ||
+			state.byteNoProgressPending(report.MonitorPath) {
+			state.recordByteProgress(report.MonitorPath, report.HostFreeAfterBytes, report.HostByteLevel,
+				int(beforeLevel), now, d.byteProgressMade(report), anyPluginRan(report.Plugins),
+				// A forced run is exempt from backoff; it does not release it.
+				report.ByteBackoff || (report.ForcedLevel && byteBackoffWasEngaged))
+			stateDirty = true
+		}
+	}
+
 	if stateDirty {
 		if err := saveCleanupState(report.StateFile, state); err != nil {
 			report.StateError = err.Error()
@@ -601,10 +680,30 @@ type cycleReport struct {
 	InodeNoProgressCount int `json:"inode_no_progress_count,omitempty"`
 	// InodeBackoff reports that the inode-pressure circuit breaker engaged this
 	// cycle, so the daemon applied cooldown instead of bypassing it.
-	InodeBackoff  bool   `json:"inode_backoff,omitempty"`
-	HostFreeError string `json:"host_free_error,omitempty"`
-	StateFile     string `json:"state_file,omitempty"`
-	StateError    string `json:"state_error,omitempty"`
+	InodeBackoff bool `json:"inode_backoff,omitempty"`
+	// HostByteLevelAfter is the byte-driven level for the monitored primary
+	// path measured after cleanup.
+	HostByteLevelAfter string `json:"host_byte_level_after,omitempty"`
+	// ByteNoProgressCount is the number of consecutive prior cleanup cycles
+	// that ran under byte pressure without meaningful reclaim on the primary
+	// path, at or below the current byte level.
+	ByteNoProgressCount int `json:"byte_no_progress_count,omitempty"`
+	// ByteBackoff reports that byte backoff engaged this cycle: plugins did not
+	// bypass cooldown and ran at most once per ByteBackoffSeconds.
+	ByteBackoff bool `json:"byte_backoff,omitempty"`
+	// ByteBackoffReason explains the byte backoff decision when the no-progress
+	// limit was reached: "no_progress" when engaged, "below_emergency_floor"
+	// when the emergency free-space floor kept it off.
+	ByteBackoffReason string `json:"byte_backoff_reason,omitempty"`
+	// ByteBackoffSeconds is the per-plugin interval applied while byte backoff
+	// is engaged.
+	ByteBackoffSeconds int64 `json:"byte_backoff_seconds,omitempty"`
+	// EmergencyFreeBytes is the free-space floor below which byte backoff
+	// never engages.
+	EmergencyFreeBytes uint64 `json:"emergency_free_bytes,omitempty"`
+	HostFreeError      string `json:"host_free_error,omitempty"`
+	StateFile          string `json:"state_file,omitempty"`
+	StateError         string `json:"state_error,omitempty"`
 	// StateQuarantined is the path an undecodable state file was renamed to
 	// this cycle; accounting continued with fresh state.
 	StateQuarantined string `json:"state_quarantined,omitempty"`
@@ -688,7 +787,10 @@ type pluginCycleReport struct {
 	HostBytesFreed           int64                `json:"host_bytes_freed"`
 	ItemsCleaned             int                  `json:"items_cleaned"`
 	CooldownRemainingSeconds int64                `json:"cooldown_remaining_seconds,omitempty"`
-	Error                    string               `json:"error,omitempty"`
+	// RetryAt is when a plugin held back by cooldown or byte backoff becomes
+	// eligible again (RFC3339).
+	RetryAt string `json:"retry_at,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 type pluginListReport struct {
@@ -1014,6 +1116,111 @@ func (d *daemon) inodeBackoffActive(report cycleReport) bool {
 	return report.InodeNoProgressCount >= d.inodeNoProgressLimit()
 }
 
+// pluginCooldown returns the interval that holds a plugin back after its last
+// run this cycle, with the skip reason to report. Normal cooldown wins when it
+// applies. Otherwise, while byte backoff is engaged, the byte backoff interval
+// applies where pressure would have bypassed cooldown.
+func (d *daemon) pluginCooldown(report cycleReport, level monitor.CleanupLevel) (time.Duration, string, bool) {
+	if d.shouldApplyCooldown(report, level) {
+		return d.cleanupCooldown(), "cooldown", true
+	}
+	if report.ByteBackoff {
+		return d.byteBackoffInterval(), "byte_backoff", true
+	}
+	return 0, "", false
+}
+
+// byteBackoffActive reports whether byte backoff should engage this cycle and
+// why. It engages when the primary path is under byte pressure, the configured
+// number of consecutive cleanup cycles have failed to make byte progress at or
+// below the current level, and free space is at or above the emergency floor.
+func (d *daemon) byteBackoffActive(report cycleReport) (bool, string) {
+	limit := d.byteNoProgressLimit()
+	if limit <= 0 || report.HostByteLevel == "" {
+		return false, ""
+	}
+	if parseLevel(report.HostByteLevel) == monitor.LevelNone {
+		return false, ""
+	}
+	if report.ByteNoProgressCount < limit {
+		return false, ""
+	}
+	if floor := d.emergencyFreeBytes(); floor > 0 && report.HostFreeBeforeBytes < floor {
+		return false, "below_emergency_floor"
+	}
+	return true, "no_progress"
+}
+
+// byteProgressMade reports whether a cycle relieved byte pressure: enough
+// bytes were freed by plugins or appeared on the host, or the byte level
+// dropped or cleared.
+func (d *daemon) byteProgressMade(report cycleReport) bool {
+	before := parseLevel(report.HostByteLevel)
+	after := parseLevel(report.HostByteLevelAfter)
+	if before == monitor.LevelNone || after < before {
+		return true
+	}
+	minBytes := d.byteProgressMinBytes()
+	return report.TotalBytesFreed >= minBytes || report.HostFreeDeltaBytes >= minBytes
+}
+
+func anyPluginRan(reports []pluginCycleReport) bool {
+	for _, plugin := range reports {
+		if plugin.Ran {
+			return true
+		}
+	}
+	return false
+}
+
+// byteNoProgressLimit returns the configured byte no-progress limit. Zero uses
+// the default; a negative value disables byte backoff and is returned as is.
+func (d *daemon) byteNoProgressLimit() int {
+	if d.config == nil || d.config.Policy.ByteNoProgressLimit == 0 {
+		return defaultByteNoProgressLimit
+	}
+	return d.config.Policy.ByteNoProgressLimit
+}
+
+func (d *daemon) byteProgressMinBytes() int64 {
+	mb := defaultByteProgressMinMB
+	if d.config != nil && d.config.Policy.ByteProgressMinMB > 0 {
+		mb = d.config.Policy.ByteProgressMinMB
+	}
+	return int64(mb) * 1024 * 1024
+}
+
+// byteBackoffMax returns the configured cap on the byte backoff interval.
+func (d *daemon) byteBackoffMax() time.Duration {
+	if d.config == nil || d.config.Policy.ByteBackoffMax == "" {
+		return defaultByteBackoffMax
+	}
+	duration, err := time.ParseDuration(d.config.Policy.ByteBackoffMax)
+	if err != nil || duration <= 0 {
+		return defaultByteBackoffMax
+	}
+	return duration
+}
+
+// byteBackoffInterval is the per-plugin interval while byte backoff is
+// engaged: the configured cooldown, capped at byte_backoff_max, or the cap
+// itself when no cooldown is configured.
+func (d *daemon) byteBackoffInterval() time.Duration {
+	limit := d.byteBackoffMax()
+	cooldown := d.cleanupCooldown()
+	if cooldown <= 0 || cooldown > limit {
+		return limit
+	}
+	return cooldown
+}
+
+func (d *daemon) emergencyFreeBytes() uint64 {
+	if d.config == nil || d.config.Policy.EmergencyFreeGB <= 0 {
+		return 0
+	}
+	return uint64(d.config.Policy.EmergencyFreeGB) * 1024 * 1024 * 1024
+}
+
 func (d *daemon) inodeNoProgressLimit() int {
 	if d.config != nil && d.config.Policy.InodeNoProgressLimit > 0 {
 		return d.config.Policy.InodeNoProgressLimit
@@ -1053,6 +1260,7 @@ func (d *daemon) updateHostFreeAfter(report *cycleReport, beforeStats *monitor.D
 	report.HostInodesFreeAfter = afterStats.InodesFree
 	report.HostInodesUsedPercentAfter = afterStats.InodesUsedPercent
 	report.HostInodeLevel = d.inodeLevelForPath(report.MonitorPath, afterStats).String()
+	report.HostByteLevelAfter = d.byteLevelForPath(report.MonitorPath, afterStats).String()
 	if beforeErr == nil && beforeStats != nil {
 		report.HostFreeDeltaBytes = int64(afterStats.Free) - int64(beforeStats.Free)
 		report.HostInodesFreeDelta = int64(afterStats.InodesFree) - int64(beforeStats.InodesFree)

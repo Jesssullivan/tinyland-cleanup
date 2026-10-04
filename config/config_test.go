@@ -1160,3 +1160,34 @@ darwin_dev_caches:
 		t.Errorf("DarwinDevCaches.Cursor.StaleAfterDays should be 5 per config, got %d", cfg.DarwinDevCaches.Cursor.StaleAfterDays)
 	}
 }
+
+func TestByteBackoffPolicyDefaultsAndOverrides(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Policy.ByteNoProgressLimit != 3 || cfg.Policy.ByteProgressMinMB != 256 ||
+		cfg.Policy.ByteBackoffMax != "30m" || cfg.Policy.EmergencyFreeGB != 20 {
+		t.Fatalf("unexpected byte backoff defaults: %+v", cfg.Policy)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := `
+policy:
+  byte_no_progress_limit: 5
+  byte_progress_min_mb: 64
+  byte_backoff_max: 10m
+  emergency_free_gb: 0
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("byte backoff keys should load under strict decoding: %v", err)
+	}
+	if cfg.Policy.ByteNoProgressLimit != 5 || cfg.Policy.ByteProgressMinMB != 64 ||
+		cfg.Policy.ByteBackoffMax != "10m" || cfg.Policy.EmergencyFreeGB != 0 {
+		t.Fatalf("byte backoff overrides not applied: %+v", cfg.Policy)
+	}
+	if cfg.Policy.Cooldown != "30m" {
+		t.Fatalf("unset policy keys keep their defaults, got cooldown %q", cfg.Policy.Cooldown)
+	}
+}
