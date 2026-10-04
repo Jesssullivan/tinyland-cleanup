@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"math"
+	"strings"
 	"testing"
 	"testing/quick"
 	"time"
@@ -181,8 +183,11 @@ func TestZeroYieldExemptions(t *testing.T) {
 			if !p.Ran {
 				t.Fatalf("cycle %d: a safety-critical plugin is never suppressed, got %+v", i, p)
 			}
-			if i >= d.zeroYieldPolicy().limit && p.ZeroYieldLifted != "safety_critical" {
-				t.Fatalf("cycle %d: expected zero_yield_lifted=safety_critical, got %+v", i, p)
+			// It keeps counting as evidence but is never given a retry
+			// time, so it neither re-logs "extended" each cycle nor
+			// drives next_retry_at (TIN-3342 review).
+			if p.ZeroYieldCount != i+1 || p.SuppressedUntil != "" || p.ZeroYieldLifted != "" {
+				t.Fatalf("cycle %d: want count=%d and no suppression, got %+v", i, i+1, p)
 			}
 			clock.Advance(5 * time.Minute)
 		}
@@ -192,8 +197,9 @@ func TestZeroYieldExemptions(t *testing.T) {
 		d, clock, output := newZeroYieldDaemon(t, bytePressureStats(25, 95), &reportingPlugin{name: "dev-artifacts"})
 		d.config.Policy.ZeroYieldExemptPlugins = []string{"dev-artifacts"}
 		for i := 0; i < 5; i++ {
-			if p := onlyPlugin(t, runByteCycle(t, d, output)); !p.Ran {
-				t.Fatalf("cycle %d: an exempt plugin is never suppressed, got %+v", i, p)
+			rep := runByteCycle(t, d, output)
+			if p := onlyPlugin(t, rep); !p.Ran || p.SuppressedUntil != "" || rep.NextRetryAt != "" {
+				t.Fatalf("cycle %d: an exempt plugin is never suppressed, got %+v next_retry_at=%q", i, p, rep.NextRetryAt)
 			}
 			clock.Advance(5 * time.Minute)
 		}
@@ -252,7 +258,7 @@ func TestRecordPluginRunPreservesZeroYieldFields(t *testing.T) {
 	now := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
 	policy := zeroYieldPolicy{limit: 1, base: time.Hour, max: 6 * time.Hour}
 	s.recordPluginRun("p", plugins.LevelCritical, now, plugins.CleanupResult{})
-	want := s.recordPluginYield("p", true, now, "digest", policy)
+	want := s.recordPluginYield("p", true, now, "digest", policy, true)
 	s.recordPluginRun("p", plugins.LevelCritical, now.Add(time.Minute), plugins.CleanupResult{ItemsCleaned: 1})
 	got := s.Plugins["p"]
 	if got.ZeroYieldCount != want.ZeroYieldCount || got.SuppressedUntil != want.SuppressedUntil || got.ConfigDigest != "digest" {
@@ -377,7 +383,7 @@ func TestPropertyRecordPluginYield(t *testing.T) {
 			} else {
 				streak = 0
 			}
-			record := s.recordPluginYield("p", zero, now, digest, policy)
+			record := s.recordPluginYield("p", zero, now, digest, policy, true)
 			if record.ZeroYieldCount != streak {
 				return false
 			}
@@ -417,5 +423,39 @@ func TestTextReportShowsZeroYield(t *testing.T) {
 		if !bytes.Contains(out.Bytes(), []byte(want)) {
 			t.Fatalf("text report missing %q:\n%s", want, out.String())
 		}
+	}
+}
+
+// TestZeroYieldRecurringLiftLogsBounded guards R-C159 criterion 5 below the
+// emergency floor: every cycle lifts suppression and extends it again with a
+// new retry_at, so the extension must not be an Info line each poll.
+func TestZeroYieldRecurringLiftLogsBounded(t *testing.T) {
+	d, clock, output := newZeroYieldDaemon(t, bytePressureStats(15, 97), &reportingPlugin{name: "dev-artifacts"})
+	var logs bytes.Buffer
+	d.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	for i := 0; i < 12; i++ {
+		if p := onlyPlugin(t, runByteCycle(t, d, output)); !p.Ran {
+			t.Fatalf("cycle %d: below the floor the plugin runs every cycle, got %+v", i, p)
+		}
+		clock.Advance(5 * time.Minute)
+	}
+	if n := strings.Count(logs.String(), "suppressing it until conditions change"); n != 1 {
+		t.Fatalf("want one engage line, got %d:\n%s", n, logs.String())
+	}
+	if n := strings.Count(logs.String(), "zero-yield suppression extended"); n != 0 {
+		t.Fatalf("want no Info extension lines under a recurring lift, got %d:\n%s", n, logs.String())
+	}
+}
+
+// TestPropertyZeroYieldBackoffHugeCap: a cap near the duration limit never
+// overflows into a negative or zero interval.
+func TestPropertyZeroYieldBackoffHugeCap(t *testing.T) {
+	policy := zeroYieldPolicy{limit: 2, base: 30 * time.Minute, max: time.Duration(math.MaxInt64)}
+	check := func(extra uint8) bool {
+		got := zeroYieldBackoff(policy.limit+int(extra), policy)
+		return got >= policy.base && got <= policy.max
+	}
+	if err := quick.Check(check, nil); err != nil {
+		t.Fatal(err)
 	}
 }

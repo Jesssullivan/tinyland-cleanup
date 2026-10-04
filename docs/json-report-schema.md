@@ -77,7 +77,7 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `retry_at` (string, optional) — RFC3339 time a plugin held back by `cooldown`, `byte_backoff` or `zero_yield_backoff` becomes eligible again
 - `zero_yield_count` (int, optional) — consecutive runs that reclaimed less than `policy.byte_progress_min_mb`
 - `suppressed_until` (string, optional) — RFC3339; this run left the plugin suppressed for zero yield until then
-- `zero_yield_lifted` (string, optional) — why a suppressed plugin ran anyway: `level_rose`, `config_changed`, `operator_run`, `safety_critical`, `exempt_plugin`, `below_emergency_floor`, `free_unknown`
+- `zero_yield_lifted` (string, optional) — why a suppressed plugin ran anyway: `level_rose`, `config_changed`, `operator_run`, `below_emergency_floor`, `free_unknown` (`safety_critical` and `exempt_plugin` appear only for a retry time recorded before the plugin became exempt; exempt plugins are otherwise never suppressed)
 - `plan` (object, optional) — dry-run plan with `targets`, byte accounting, and warnings
   - `plan.metadata` (object of string to string, optional) — plugin-specific keys. The `dev-artifacts` scan-budget keys include:
     - `temp_scan_max_roots_scope` — always `per_temp_scan_path`: `temp_scan_max_roots` is applied to each entry of `temp_scan_paths` separately

@@ -63,6 +63,11 @@ func zeroYieldBackoff(count int, policy zeroYieldPolicy) time.Duration {
 	}
 	interval := policy.base
 	for i := policy.limit; i < count && interval < policy.max; i++ {
+		if policy.max > 0 && interval > policy.max/2 {
+			// Doubling would pass the cap (or overflow for a huge cap).
+			interval = policy.max
+			break
+		}
 		interval *= 2
 	}
 	if policy.max > 0 && interval > policy.max {
@@ -283,7 +288,10 @@ func (s *cleanupState) recordPluginRun(plugin string, level plugins.CleanupLevel
 // resets the count and lifts suppression; a zero-yield run advances it and,
 // once the limit is reached, suppresses the plugin from now until
 // now+zeroYieldBackoff. It returns the updated record.
-func (s *cleanupState) recordPluginYield(plugin string, zeroYield bool, now time.Time, digest string, policy zeroYieldPolicy) pluginStateRecord {
+//
+// suppressible false (a permanently exempt plugin) still counts zero-yield
+// runs but never sets a retry time.
+func (s *cleanupState) recordPluginYield(plugin string, zeroYield bool, now time.Time, digest string, policy zeroYieldPolicy, suppressible bool) pluginStateRecord {
 	if s == nil {
 		return pluginStateRecord{}
 	}
@@ -300,7 +308,7 @@ func (s *cleanupState) recordPluginYield(plugin string, zeroYield bool, now time
 		record.ZeroYieldCount = 0
 	} else {
 		record.ZeroYieldCount++
-		if interval := zeroYieldBackoff(record.ZeroYieldCount, policy); interval > 0 {
+		if interval := zeroYieldBackoff(record.ZeroYieldCount, policy); suppressible && interval > 0 {
 			record.SuppressedUntil = now.Add(interval).UTC().Format(time.RFC3339)
 		}
 	}

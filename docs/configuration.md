@@ -125,7 +125,12 @@ the particular expensive passes that keep finding nothing:
   suppressed again at once.
 - It never applies to `--level`, `--dry-run` or `--plugins` runs
   (`operator_run`), to plugins in `zero_yield_exempt_plugins`, or to
-  safety-critical plugins (`apfs-snapshots`).
+  safety-critical plugins (`apfs-snapshots`). Exempt and safety-critical
+  plugins still report `zero_yield_count` as evidence but are never given a
+  `suppressed_until`, so they do not drive `next_retry_at`.
+- While a lift recurs every cycle (`operator_run`, `below_emergency_floor`,
+  `free_unknown`), re-extending a plugin's suppression logs at debug level
+  only, so the log stays bounded.
 - The count and retry time live in `state_file`, so they survive restarts.
 - `zero_yield_limit: 0` uses the default of 2; a negative value disables
   suppression.

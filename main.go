@@ -523,7 +523,12 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 	minYield := d.byteProgressMinBytes()
 	recordRun := func(p plugins.Plugin, pluginReport *pluginCycleReport, result plugins.CleanupResult) {
 		state.recordPluginRun(p.Name(), pluginLevel, now, result)
-		record := state.recordPluginYield(p.Name(), result.BytesFreed < minYield, now, digest, zeroYield)
+		// A permanently exempt plugin (safety-critical or listed in
+		// zero_yield_exempt_plugins) keeps its zero-yield count as evidence
+		// but is never given a retry time: it would be lifted every cycle,
+		// logging a fresh "extended" line and skewing next_retry_at.
+		suppressible := d.zeroYieldPermanentExemption(p) == ""
+		record := state.recordPluginYield(p.Name(), result.BytesFreed < minYield, now, digest, zeroYield, suppressible)
 		pluginReport.ZeroYieldCount = record.ZeroYieldCount
 		pluginReport.SuppressedUntil = record.SuppressedUntil
 		stateDirty = true
@@ -536,9 +541,15 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 			"zero_yield_count", record.ZeroYieldCount,
 			"retry_at", record.SuppressedUntil,
 		}
-		if record.ZeroYieldCount == zeroYield.limit {
+		switch {
+		case record.ZeroYieldCount == zeroYield.limit:
 			d.logger.Warn("plugin reclaimed nothing on repeated runs; suppressing it until conditions change", attrs...)
-		} else {
+		case zeroYieldRecurringLift(pluginReport.ZeroYieldLifted):
+			// Lifted again next cycle (operator run, emergency floor, unknown
+			// free space): an Info line here would repeat every poll with a
+			// new retry_at, which the log throttle cannot fold (R-C159 c5).
+			d.logger.Debug("plugin still reclaiming nothing; zero-yield suppression extended", attrs...)
+		default:
 			d.logger.Info("plugin still reclaiming nothing; zero-yield suppression extended", attrs...)
 		}
 	}
@@ -866,8 +877,9 @@ type pluginCycleReport struct {
 	// zero yield: it is skipped until then unless conditions change.
 	SuppressedUntil string `json:"suppressed_until,omitempty"`
 	// ZeroYieldLifted names why a suppressed plugin ran anyway: level_rose,
-	// config_changed, operator_run, safety_critical, exempt_plugin,
-	// below_emergency_floor or free_unknown.
+	// config_changed, operator_run, below_emergency_floor or free_unknown
+	// (safety_critical or exempt_plugin only for a retry time recorded before
+	// the plugin became exempt).
 	ZeroYieldLifted string `json:"zero_yield_lifted,omitempty"`
 	Error           string `json:"error,omitempty"`
 }
@@ -1348,6 +1360,22 @@ func (d *daemon) zeroYieldExemption(p plugins.Plugin, report cycleReport, freeKn
 	if report.ForcedLevel || d.dryRun || len(d.pluginFilter) > 0 {
 		return "operator_run"
 	}
+	if reason := d.zeroYieldPermanentExemption(p); reason != "" {
+		return reason
+	}
+	if !freeKnown {
+		return "free_unknown"
+	}
+	if floor := d.emergencyFreeBytes(); floor > 0 && report.HostFreeBeforeBytes < floor {
+		return "below_emergency_floor"
+	}
+	return ""
+}
+
+// zeroYieldPermanentExemption returns why plugin p is never suppressed for
+// zero yield, whatever the cycle's conditions: "safety_critical",
+// "exempt_plugin", or "".
+func (d *daemon) zeroYieldPermanentExemption(p plugins.Plugin) string {
 	if critical, ok := p.(plugins.SafetyCritical); ok && critical.SafetyCritical() {
 		return "safety_critical"
 	}
@@ -1358,13 +1386,19 @@ func (d *daemon) zeroYieldExemption(p plugins.Plugin, report cycleReport, freeKn
 			}
 		}
 	}
-	if !freeKnown {
-		return "free_unknown"
-	}
-	if floor := d.emergencyFreeBytes(); floor > 0 && report.HostFreeBeforeBytes < floor {
-		return "below_emergency_floor"
-	}
 	return ""
+}
+
+// zeroYieldRecurringLift reports whether a zero-yield lift reason holds for
+// as long as its condition lasts, so the plugin is lifted again every cycle.
+// level_rose and config_changed are one-shot: the run records the new level
+// and digest.
+func zeroYieldRecurringLift(reason string) bool {
+	switch reason {
+	case "operator_run", "below_emergency_floor", "free_unknown":
+		return true
+	}
+	return false
 }
 
 // nextRetryAt returns the earliest retry or suppression time across plugins,
