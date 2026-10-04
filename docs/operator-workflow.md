@@ -239,15 +239,21 @@ the daemon state file, so one giant worktree cannot starve later
 `node_modules`, `.venv`, `target`, or Zig artifact cleanup indefinitely.
 Temporary-root discovery is separately bounded by
 `dev_artifacts.temp_scan_max_roots`, applied **per temp scan path**: each entry
-in `temp_scan_paths` gets its own root budget (and an even share of the entry
-and duration budgets), so a `/tmp` full of `nix-shell.*` roots cannot starve a
+in `temp_scan_paths` gets its own root budget (and a carry-over share of the
+entry and duration budgets: what the lane has left divided by the paths still
+to come), so a `/tmp` full of `nix-shell.*` roots cannot starve a
 later path such as `/srv/fast-local/<user>/tmp`. A temp path cut by its own
 root budget is reported (`temp_scan_paths_truncated`, `scan_truncated_paths`)
 and the remaining temp paths and later lanes still run. The entry and duration
 shares are not independent of the rest of the cycle: each path's entries count
 against the shared entry budget and the shared scan deadline still applies, so
 if the temp paths exhaust their entry or time shares the later lanes truncate
-as they did before. When a budget is hit, dry-run metadata sets
+as they did before. Workspace roots get the same treatment: each selected
+root walks against a carry-over share of its family's budget, and a root that
+uses its whole share is reported (`workspace_roots_truncated`,
+`scan_truncated_paths`) while the walk continues with the next root, family
+and scan path. Only `scan_budget_shared_exhausted: true` stops the remaining
+walks, and the global cache lanes still run then. When a budget is hit, dry-run metadata sets
 `scan_budget_exhausted: true`, reports `scan_truncated_paths`, and treats the
 omitted evidence as non-actionable. Paths whose removal fails with `EACCES`,
 `EPERM` or `EBUSY` (for example another user's or another session's scratch)
