@@ -292,6 +292,17 @@ func (s *cleanupState) byteNoProgressCount(path string, level int) int {
 	return record.NoProgressCount
 }
 
+// byteNoProgressPending reports whether path carries a non-zero byte
+// no-progress count at any level. Unlike byteNoProgressCount it does not
+// compare levels, so a streak accrued below critical is still found and reset
+// when pressure clears (TIN-3342 review).
+func (s *cleanupState) byteNoProgressPending(path string) bool {
+	if s == nil || s.Bytes == nil || path == "" {
+		return false
+	}
+	return s.Bytes[path].NoProgressCount > 0
+}
+
 // byteBackoffEngaged reports whether byte backoff was engaged for path on the
 // most recent recorded cycle.
 func (s *cleanupState) byteBackoffEngaged(path string) bool {

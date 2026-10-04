@@ -430,7 +430,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		// Pressure cleared: release byte backoff and reset its counter so a
 		// later episode starts from a clean slate.
 		if !d.dryRun && stateErr == nil && beforeErr == nil &&
-			(byteBackoffWasEngaged || state.byteNoProgressCount(report.MonitorPath, int(monitor.LevelCritical)) > 0) {
+			(byteBackoffWasEngaged || state.byteNoProgressPending(report.MonitorPath)) {
 			state.recordByteProgress(report.MonitorPath, report.HostFreeBeforeBytes, report.HostByteLevel,
 				int(monitor.LevelNone), now, true, false, false)
 			if byteBackoffWasEngaged {
@@ -619,7 +619,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 	if !d.dryRun && stateErr == nil && beforeErr == nil && report.HostFreeError == "" {
 		beforeLevel := parseLevel(report.HostByteLevel)
 		if beforeLevel != monitor.LevelNone || byteBackoffWasEngaged ||
-			state.byteNoProgressCount(report.MonitorPath, int(monitor.LevelCritical)) > 0 {
+			state.byteNoProgressPending(report.MonitorPath) {
 			state.recordByteProgress(report.MonitorPath, report.HostFreeAfterBytes, report.HostByteLevel,
 				int(beforeLevel), now, d.byteProgressMade(report), anyPluginRan(report.Plugins),
 				// A forced run is exempt from backoff; it does not release it.

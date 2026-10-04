@@ -366,3 +366,32 @@ func TestTextReportShowsByteBackoffAndRetryAt(t *testing.T) {
 		}
 	}
 }
+
+// TestByteBackoffCounterResetsWhenPressureClearsBelowCritical guards the
+// clean-slate rule for every byte level, not only critical: a no-progress
+// streak accrued at aggressive must not carry into the next pressure episode.
+func TestByteBackoffCounterResetsWhenPressureClearsBelowCritical(t *testing.T) {
+	stats := bytePressureStats(37, 92) // aggressive
+	d, _, clock, output := newByteBackoffDaemon(t, stats)
+	limit := d.byteNoProgressLimit()
+	for i := 0; i < limit-1; i++ {
+		runByteCycle(t, d, output)
+		clock.Advance(5 * time.Minute)
+	}
+
+	*stats = *bytePressureStats(200, 50) // pressure clears
+	if rep := runByteCycle(t, d, output); rep.Level != monitor.LevelNone.String() {
+		t.Fatalf("expected pressure to clear, got level %q", rep.Level)
+	}
+	clock.Advance(5 * time.Minute)
+
+	*stats = *bytePressureStats(37, 92) // a new episode at the same level
+	for i := 0; i < limit; i++ {
+		rep := runByteCycle(t, d, output)
+		if rep.ByteNoProgressCount != i || rep.ByteBackoff || !pluginRan(rep) {
+			t.Fatalf("new episode cycle %d: want count=%d without backoff, got count=%d backoff=%v plugins=%+v",
+				i, i, rep.ByteNoProgressCount, rep.ByteBackoff, rep.Plugins)
+		}
+		clock.Advance(5 * time.Minute)
+	}
+}
