@@ -1,6 +1,17 @@
 # Validation status
 
-Updated: 2026-10-02
+Updated: 2026-10-04
+
+## v0.4.2 (TIN-3342)
+
+- **Scope:** the five stacked TIN-3342 PRs (R-C194): completion-relative
+  scheduling and atomic state (#137), byte backoff (#138), zero-yield
+  suppression (#139), per-root scan budgets (#140), bounded repeated logs and
+  the `tinyland_sim` consumer-test hook (PR5).
+- **Validated** on neo (darwin arm64, GOMAXPROCS=2, `-p 2`): `go vet ./...`
+  and `go test ./...` in the default and `tinyland_sim` builds, `-race` on
+  the new daemon tests. CI Go/Bazel/Nix/Build site per PR. Not yet delivered:
+  lab pins it with the simulated-pressure consumer check.
 
 ## v0.4.1 (TIN-3342)
 

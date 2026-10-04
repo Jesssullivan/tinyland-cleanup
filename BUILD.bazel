@@ -138,7 +138,7 @@ go_binary(
     x_defs = {
         "main.commit": "{STABLE_GIT_COMMIT}",
         "main.date": "{BUILD_TIMESTAMP}",
-        "main.version": "0.4.1",
+        "main.version": "0.4.2",
     },
 )
 

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-04
+
 ### Added
 
 - daemon: bounded repeated logs (TIN-3342). In daemon mode a log line is
