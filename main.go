@@ -54,7 +54,7 @@ import (
 // version mirrors the VERSION file; it is the dev default and is overridden at
 // release time by -ldflags "-X main.version=<tag>". CI checks it matches VERSION.
 var (
-	version = "0.4.1"
+	version = "0.4.2"
 	commit  = "dev"
 	date    = "unknown"
 )
@@ -109,7 +109,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("tinyland-cleanup %s (%s) built %s\n", version, commit, date)
+		fmt.Printf("tinyland-cleanup %s (%s) built %s%s\n", version, commit, date, simulationSuffix())
 		os.Exit(0)
 	}
 
@@ -189,9 +189,21 @@ func main() {
 
 	// Create multi-writer for stderr and the configured log file when available.
 	multiWriter := io.MultiWriter(logWriters...)
-	logger := slog.New(slog.NewTextHandler(multiWriter, &slog.HandlerOptions{
+	var handler slog.Handler = slog.NewTextHandler(multiWriter, &slog.HandlerOptions{
 		Level: logLevel,
-	}))
+	})
+	// Daemon mode bounds repeated log lines and compacts unchanged cycle
+	// reports (TIN-3342). Operator runs (--once, --level, --dry-run without
+	// --daemon) keep every line.
+	daemonMode := *level == "" && !*once && *runDaemon
+	repeatWindow := logRepeatWindow(cfg.Policy.LogRepeatWindow)
+	if daemonMode {
+		handler = newDedupeHandler(handler, newLogThrottle(repeatWindow, time.Now))
+	}
+	logger := slog.New(handler)
+	if simulationBuild {
+		logger.Warn("SIMULATION BUILD: disk statistics come from " + simDiskStatsEnv + ", not statfs; never deploy this binary")
+	}
 
 	// Create disk monitor
 	diskMon := monitor.NewDiskMonitorWithInodeThresholds(
@@ -216,9 +228,12 @@ func main() {
 		output:       *output,
 		pluginFilter: pluginFilter,
 		report:       os.Stdout,
-		diskStats:    monitor.GetDiskStats,
+		diskStats:    diskStatsReader(),
 		now:          time.Now,
 		after:        time.After,
+	}
+	if daemonMode {
+		d.reports = &reportThrottle{window: repeatWindow}
 	}
 
 	// Determine operation mode
@@ -286,6 +301,9 @@ type daemon struct {
 	// after is the scheduler's clock seam. It defaults to time.After; tests
 	// inject a fake so the wait between cycles can be observed and driven.
 	after func(time.Duration) <-chan time.Time
+	// reports compacts unchanged cycle reports in daemon mode; nil writes
+	// every report in full.
+	reports *reportThrottle
 }
 
 // run is the daemon loop. Each pass runs one cleanup cycle and then waits a
@@ -322,7 +340,7 @@ func (d *daemon) run(ctx context.Context) error {
 			} else {
 				overrunning = false
 			}
-			if werr := d.writeReport(report); werr != nil {
+			if werr := d.writeDaemonReport(report); werr != nil {
 				d.logger.Error("cleanup cycle failed", "error", werr)
 			}
 		}
@@ -1126,6 +1144,15 @@ func (d *daemon) primaryMonitorPath(assessment mountAssessment) string {
 		return home
 	}
 	return "/"
+}
+
+// writeDaemonReport writes a daemon cycle's report, compacting it to one line
+// when nothing an operator acts on changed since the last full report.
+func (d *daemon) writeDaemonReport(report cycleReport) error {
+	if d.reports != nil && !d.reports.full(report, d.currentTime()) {
+		return writeCompactReport(d.report, d.output, report, d.reports.unchanged)
+	}
+	return d.writeReport(report)
 }
 
 func (d *daemon) writeReport(report cycleReport) error {

@@ -1220,3 +1220,20 @@ policy:
 		t.Fatalf("unset policy keys keep their defaults, got cooldown %q", cfg.Policy.Cooldown)
 	}
 }
+
+func TestLogRepeatWindowDefaultAndOverride(t *testing.T) {
+	if got := DefaultConfig().Policy.LogRepeatWindow; got != "1h" {
+		t.Fatalf("log_repeat_window default = %q, want 1h", got)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("policy:\n  log_repeat_window: 0s\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("log_repeat_window should load under strict decoding: %v", err)
+	}
+	if cfg.Policy.LogRepeatWindow != "0s" {
+		t.Fatalf("override not applied: %q", cfg.Policy.LogRepeatWindow)
+	}
+}

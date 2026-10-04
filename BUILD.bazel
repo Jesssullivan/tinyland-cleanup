@@ -138,13 +138,16 @@ go_binary(
     x_defs = {
         "main.commit": "{STABLE_GIT_COMMIT}",
         "main.date": "{BUILD_TIMESTAMP}",
-        "main.version": "0.2.0",
+        "main.version": "0.4.2",
     },
 )
 
 go_library(
     name = "tinyland-cleanup_lib",
     srcs = [
+        "diskstats_default.go",
+        "diskstats_sim.go",
+        "logthrottle.go",
         "main.go",
         "report_text.go",
         "state.go",
@@ -166,12 +169,39 @@ go_test(
     name = "tinyland-cleanup_test",
     srcs = [
         "byte_backoff_test.go",
+        "diskstats_default_test.go",
+        "diskstats_sim_test.go",
+        "logthrottle_test.go",
         "main_test.go",
         "state_test.go",
         "volume_probe_test.go",
         "zero_yield_test.go",
     ],
     embed = [":tinyland-cleanup_lib"],
+    deps = [
+        ":config",
+        ":monitor",
+        ":plugins",
+    ],
+)
+
+# The TIN-3342 simulation hook, compiled only under the tinyland_sim tag. This
+# target runs the root package tests in the simulation build; no binary target
+# sets the tag, so the hook never reaches a release.
+go_test(
+    name = "tinyland-cleanup_sim_test",
+    srcs = [
+        "byte_backoff_test.go",
+        "diskstats_default_test.go",
+        "diskstats_sim_test.go",
+        "logthrottle_test.go",
+        "main_test.go",
+        "state_test.go",
+        "volume_probe_test.go",
+        "zero_yield_test.go",
+    ],
+    embed = [":tinyland-cleanup_lib"],
+    gotags = ["tinyland_sim"],
     deps = [
         ":config",
         ":monitor",
@@ -313,6 +343,7 @@ test_suite(
         ":config_test",
         ":monitor_test",
         ":plugins_test",
+        ":tinyland-cleanup_sim_test",
         ":tinyland-cleanup_test",
     ],
 )

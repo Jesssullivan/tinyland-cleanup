@@ -289,6 +289,12 @@ type PolicyConfig struct {
 	// addition to the plugins that declare themselves safety-critical
 	// (apfs-snapshots).
 	ZeroYieldExemptPlugins []string `yaml:"zero_yield_exempt_plugins"`
+	// LogRepeatWindow bounds repeated daemon log lines and cycle reports
+	// (TIN-3342). A line whose content is unchanged is emitted at most once
+	// per window, carrying repeats_suppressed; Error lines use at most 15m.
+	// An unchanged cycle report is written as one line. Empty or invalid uses
+	// the built-in default (1h); "0s" disables throttling.
+	LogRepeatWindow string `yaml:"log_repeat_window"`
 }
 
 // DockerConfig holds Docker-specific cleanup settings.
@@ -628,6 +634,7 @@ func DefaultConfig() *Config {
 			ZeroYieldLimit:       2,
 			ZeroYieldBackoffBase: "30m",
 			ZeroYieldBackoffMax:  "6h",
+			LogRepeatWindow:      "1h",
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{

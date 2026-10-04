@@ -318,6 +318,29 @@ deferred while active Simulator, Xcode, SourceKit, or `xcodebuild` work is
 visible. Simulator runtime deletion remains critical-level and passwordless-sudo
 only.
 
+## Simulated Pressure (consumer tests)
+
+Byte-pressure behaviour (byte backoff, zero-yield suppression, bounded logs)
+is proved without filling a disk by a simulation build:
+
+```bash
+nix build .#sim                       # or: go build -tags tinyland_sim .
+TINYLAND_CLEANUP_SIM_DISKSTATS='{"total_bytes": 493921239040, "free_bytes": 26843545600}' \
+  ./result/bin/tinyland-cleanup --daemon --output json --config ./sim.yaml
+```
+
+- The `tinyland_sim` build tag replaces statfs with
+  `TINYLAND_CLEANUP_SIM_DISKSTATS`: JSON for one object applied to every
+  path, an object keyed by path with an optional `"*"` fallback, or
+  `@<file>`, re-read on every call so a test can change pressure mid-run.
+  Fields: `total_bytes`, `free_bytes` (required), `inodes_total`,
+  `inodes_free`, `fstype`. A missing or malformed value is a statfs error,
+  never real statistics.
+- Only disk statistics are simulated. Plugins still walk and delete on the
+  real filesystem, so point the config's scan paths at a fixture.
+- The binary prints `SIMULATION BUILD` in `--version` and warns at start. No
+  release, default Nix package or Bazel binary sets the tag; never install it.
+
 ## Current Boundary
 
 This is the first stable reporting surface. It now exposes typed targets for
