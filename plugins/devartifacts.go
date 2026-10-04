@@ -3665,8 +3665,9 @@ func (p *DevArtifactsPlugin) findArtifactDirs(ctx context.Context, scanPath stri
 	// Each root walks against its own share of the family's budget. A root
 	// that uses its whole share is truncated on its own (partial evidence)
 	// and the walk continues with the next root, which inherits whatever the
-	// earlier roots left unused. Only the caller's own context ending (the
-	// shared deadline or a cancel) stops the remaining roots.
+	// earlier roots left unused. Only the caller's own context ending stops
+	// the remaining roots; the family lanes pass the outer context, so that
+	// is a cancel, not the shared scan deadline.
 	pool := budget.rootPool(len(selectedRoots))
 	for _, root := range selectedRoots {
 		if ctx.Err() != nil {

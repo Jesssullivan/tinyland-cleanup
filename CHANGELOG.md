@@ -11,10 +11,15 @@ All notable changes to this project will be documented in this file.
   it is reported as partial evidence (`workspace_roots_truncated`,
   `scan_truncated_paths`) and the pass continues with the next root, the
   remaining artifact families and the next scan path, instead of ending the
-  whole dev-artifacts pass. Only the shared budget itself (the shared deadline
-  or the post-workspace lanes' entry count) stops the remaining walks, and the
-  global cache lanes (Go build cache, pnpm, Haskell, LM Studio) still run
-  then, because they do not depend on walk evidence.
+  whole dev-artifacts pass. Each artifact family (node_modules, venv, Rust,
+  Zig) walks each scan path against its own pool of `scan_max_entries` and
+  `scan_max_duration`, as in v0.4.1; root truncations no longer stop the
+  later families, so a cycle can now spend every family's pool. The shared
+  deadline bounds the temp, transcript and agent-worktree lanes, and the
+  shared entry count (which family entries fold into) bounds the
+  post-workspace lanes; when the shared budget is exhausted the remaining
+  walks stop and the global cache lanes (Go build cache, pnpm, Haskell,
+  LM Studio) still run, because they do not depend on walk evidence.
 - dev-artifacts: per-root shares carry over. Each workspace root and temp scan
   path gets what its lane has left divided by the roots still to come, so
   roots that use less than their share leave the rest to later roots instead

@@ -83,7 +83,7 @@ are omitted when empty. The source of truth is the `cycleReport`,
     - `temp_scan_max_roots_scope` — always `per_temp_scan_path`: `temp_scan_max_roots` is applied to each entry of `temp_scan_paths` separately
     - `temp_scan_paths_truncated` — decimal count of temp scan paths whose own budget was exhausted this cycle; their truncations also appear in `scan_truncated_paths` and set `scan_budget_exhausted` to `true`
     - `workspace_roots_truncated` — decimal count of workspace roots whose own share was exhausted this cycle; like temp paths, they appear in `scan_truncated_paths`, set `scan_budget_exhausted` to `true`, and do not stop the remaining roots or lanes
-    - `scan_budget_shared_exhausted` — `true` when the shared budget itself ran out (shared deadline, or the entry count in a lane that walks against the shared budget); only this stops the remaining walk lanes
+    - `scan_budget_shared_exhausted` — `true` when the shared budget itself ran out (the shared deadline in the temp, transcript or agent-worktree lanes, or the shared entry count in a lane that walks against it); only this stops the remaining walk lanes. Artifact-family walks use per-family pools and never set it
     - `scan_root_share` — always `carry_over`: each root's share is the lane's remaining budget divided by the roots still to come
     - `scan_sizing_entries_visited` — decimal count of entries visited while sizing artifact directories; reported, not enforced against `scan_max_entries`
 

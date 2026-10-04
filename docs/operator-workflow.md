@@ -252,8 +252,13 @@ as they did before. Workspace roots get the same treatment: each selected
 root walks against a carry-over share of its family's budget, and a root that
 uses its whole share is reported (`workspace_roots_truncated`,
 `scan_truncated_paths`) while the walk continues with the next root, family
-and scan path. Only `scan_budget_shared_exhausted: true` stops the remaining
-walks, and the global cache lanes still run then. When a budget is hit, dry-run metadata sets
+and scan path. Each family's pool is a full `scan_max_entries` and
+`scan_max_duration` per scan path, not a slice of one cycle-wide budget, so
+the worst-case walk per cycle is families x scan paths x the budget; the
+shared deadline does not bound family walks. Only
+`scan_budget_shared_exhausted: true` (temp, transcript, agent-worktree and
+post-workspace lanes) stops the remaining walks, and the global cache lanes
+still run then. When a budget is hit, dry-run metadata sets
 `scan_budget_exhausted: true`, reports `scan_truncated_paths`, and treats the
 omitted evidence as non-actionable. Paths whose removal fails with `EACCES`,
 `EPERM` or `EBUSY` (for example another user's or another session's scratch)

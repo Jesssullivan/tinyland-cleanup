@@ -47,8 +47,10 @@ type devArtifactScanBudget struct {
 	// partial evidence, and they never gate the remaining roots or lanes:
 	// one huge root must not starve the others (OI-1001-Q4 for temp paths,
 	// TIN-3342 PR4 for workspace roots). Entries still fold back into the
-	// shared count, and a shared deadline still applies, so when the shared
-	// budget itself runs out the later lanes stop exactly as before.
+	// shared count, so the post-workspace lanes that walk against the shared
+	// budget stop when it runs out. Artifact-family walks are bounded per
+	// family by their root pool; their callers pass the outer context, so
+	// the shared deadline does not bound them.
 	rootTruncatedPath       map[string]string
 	tempPathsTruncated      int
 	workspaceRootsTruncated int
