@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -942,4 +945,232 @@ type planningPlugin struct {
 
 func (p *planningPlugin) PlanCleanup(context.Context, plugins.CleanupLevel, *config.Config, *slog.Logger) plugins.CleanupPlan {
 	return p.plan
+}
+
+// fakeClock is a manually advanced clock for scheduler tests.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// clockAdvancingPlugin simulates a slow cleanup by advancing the fake clock
+// while it runs, and records each invocation in a shared event log.
+type clockAdvancingPlugin struct {
+	reportingPlugin
+	clock   *fakeClock
+	advance time.Duration
+	mu      sync.Mutex
+	calls   int
+	events  *[]string
+}
+
+func (p *clockAdvancingPlugin) Cleanup(ctx context.Context, level plugins.CleanupLevel, cfg *config.Config, logger *slog.Logger) plugins.CleanupResult {
+	p.mu.Lock()
+	p.calls++
+	if p.events != nil {
+		*p.events = append(*p.events, "cycle")
+	}
+	p.mu.Unlock()
+	p.clock.Advance(p.advance)
+	return p.reportingPlugin.Cleanup(ctx, level, cfg, logger)
+}
+
+func (p *clockAdvancingPlugin) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func decodeCycleReports(t *testing.T, data []byte) []cycleReport {
+	t.Helper()
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var reports []cycleReport
+	for decoder.More() {
+		var report cycleReport
+		if err := decoder.Decode(&report); err != nil {
+			t.Fatalf("failed to decode JSON report stream: %v\n%s", err, string(data))
+		}
+		reports = append(reports, report)
+	}
+	return reports
+}
+
+func TestDaemonSchedulesNextCycleFromCompletion(t *testing.T) {
+	var output bytes.Buffer
+	var logs bytes.Buffer
+	var events []string
+	clock := &fakeClock{t: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	const interval = 300 * time.Second
+	plugin := &clockAdvancingPlugin{
+		reportingPlugin: reportingPlugin{name: "dev-artifacts"},
+		clock:           clock,
+		// Each cycle takes three poll intervals, the TIN-3342 overrun shape
+		// that made the old ticker fire a catch-up cycle immediately.
+		advance: 3 * interval,
+		events:  &events,
+	}
+	d := newTestDaemonWithPlugins(t, &output, plugin)
+	d.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	d.config.PollInterval = int(interval / time.Second)
+	d.now = clock.Now
+	// 97% used is critical, which bypasses cooldown, so the plugin runs every cycle.
+	d.diskStats = sequenceDiskStats(t, diskStats(1000, 30, 97))
+
+	const cycles = 3
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var waits []time.Duration
+	d.after = func(requested time.Duration) <-chan time.Time {
+		waits = append(waits, requested)
+		events = append(events, "wait")
+		if len(waits) == cycles {
+			cancel()
+			return make(chan time.Time)
+		}
+		clock.Advance(requested)
+		fired := make(chan time.Time, 1)
+		fired <- clock.Now()
+		return fired
+	}
+
+	if err := d.run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("run returned %v, want context.Canceled", err)
+	}
+
+	if got := plugin.callCount(); got != cycles {
+		t.Fatalf("plugin ran %d times, want %d", got, cycles)
+	}
+	for i, requested := range waits {
+		if requested != interval {
+			t.Fatalf("wait %d requested %s, want the full poll interval %s", i, requested, interval)
+		}
+	}
+	// Every cycle is followed by a full wait: no back-to-back catch-up cycle.
+	want := []string{"cycle", "wait", "cycle", "wait", "cycle", "wait"}
+	if strings.Join(events, ",") != strings.Join(want, ",") {
+		t.Fatalf("event order = %v, want %v", events, want)
+	}
+
+	reports := decodeCycleReports(t, output.Bytes())
+	if len(reports) != cycles {
+		t.Fatalf("got %d reports, want %d", len(reports), cycles)
+	}
+	for i, report := range reports {
+		if report.CycleDurationMs != (3 * interval).Milliseconds() {
+			t.Fatalf("report %d cycle_duration_ms = %d, want %d", i, report.CycleDurationMs, (3 * interval).Milliseconds())
+		}
+		start, err := time.Parse(time.RFC3339, report.Timestamp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantNext := start.Add(3 * interval).Add(interval).UTC().Format(time.RFC3339)
+		if report.NextCycleAt != wantNext {
+			t.Fatalf("report %d next_cycle_at = %q, want completion plus interval %q", i, report.NextCycleAt, wantNext)
+		}
+		if i > 0 && report.Timestamp != reports[i-1].NextCycleAt {
+			t.Fatalf("cycle %d started at %s, previous report promised %s", i, report.Timestamp, reports[i-1].NextCycleAt)
+		}
+	}
+
+	if got := strings.Count(logs.String(), "outlasted the poll interval"); got != 1 {
+		t.Fatalf("overrun warning logged %d times across a 3-cycle overrun streak, want 1\n%s", got, logs.String())
+	}
+}
+
+func TestDaemonCancelDuringWait(t *testing.T) {
+	var output bytes.Buffer
+	clock := &fakeClock{t: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	plugin := &clockAdvancingPlugin{
+		reportingPlugin: reportingPlugin{name: "dev-artifacts"},
+		clock:           clock,
+		advance:         time.Second,
+	}
+	d := newTestDaemonWithPlugins(t, &output, plugin)
+	d.config.PollInterval = 300
+	d.now = clock.Now
+	d.diskStats = sequenceDiskStats(t, diskStats(1000, 30, 97))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waiting := make(chan time.Duration, 1)
+	d.after = func(requested time.Duration) <-chan time.Time {
+		waiting <- requested
+		return make(chan time.Time) // never fires: only cancellation can end the wait
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- d.run(ctx) }()
+
+	select {
+	case requested := <-waiting:
+		if requested != 300*time.Second {
+			t.Fatalf("wait requested %s, want 5m0s", requested)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon never reached the wait after its first cycle")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("run returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop when cancelled during the wait")
+	}
+	if got := plugin.callCount(); got != 1 {
+		t.Fatalf("plugin ran %d times, want exactly 1 before cancellation", got)
+	}
+}
+
+func TestRunOnceQuarantinesCorruptStateAndKeepsAccounting(t *testing.T) {
+	var output bytes.Buffer
+	plugin := &reportingPlugin{
+		name:   "nix",
+		result: plugins.CleanupResult{Plugin: "nix", Level: plugins.LevelModerate, BytesFreed: 42, ItemsCleaned: 1},
+	}
+	d := newTestDaemonWithPlugins(t, &output, plugin)
+	statePath := d.config.Policy.StateFile
+	if err := os.WriteFile(statePath, []byte("{\"plugins\": {"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// 87% used is moderate: below the cooldown bypass level, so cooldown
+	// accounting matters for the next cycle.
+	d.diskStats = sequenceDiskStats(t, diskStats(1000, 130, 87))
+
+	if err := d.runOnce(context.Background(), monitor.LevelNone); err != nil {
+		t.Fatal(err)
+	}
+	report := decodeCycleReport(t, output.Bytes())
+	if report.StateError != "" {
+		t.Fatalf("corrupt state must not disable accounting, got state_error %q", report.StateError)
+	}
+	if !strings.HasPrefix(report.StateQuarantined, statePath+".corrupt-") {
+		t.Fatalf("state_quarantined = %q, want a %s.corrupt-<ts> path", report.StateQuarantined, statePath)
+	}
+	if !plugin.called {
+		t.Fatal("expected the plugin to run with fresh state")
+	}
+
+	state, quarantined, err := loadCleanupState(statePath, time.Now())
+	if err != nil || quarantined != "" {
+		t.Fatalf("state written after quarantine should load cleanly: quarantined=%q err=%v", quarantined, err)
+	}
+	if state.Plugins["nix"].LastBytesFreed != 42 {
+		t.Fatalf("plugin run was not recorded after quarantine: %+v", state.Plugins["nix"])
+	}
 }

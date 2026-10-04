@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -49,24 +50,34 @@ func newCleanupState() *cleanupState {
 	}
 }
 
-func loadCleanupState(path string) (*cleanupState, error) {
+// loadCleanupState reads the persisted cleanup state. A missing or empty file
+// yields fresh state. A file that exists but does not decode is quarantined:
+// it is renamed to <path>.corrupt-<timestamp> and fresh state is returned
+// together with the quarantine path, so one bad write cannot disable cooldown
+// and backoff accounting for every later cycle (TIN-3342). An error is
+// returned only when the file cannot be read or the quarantine rename fails.
+func loadCleanupState(path string, now time.Time) (*cleanupState, string, error) {
 	if path == "" {
-		return newCleanupState(), nil
+		return newCleanupState(), "", nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return newCleanupState(), nil
+			return newCleanupState(), "", nil
 		}
-		return nil, err
+		return nil, "", err
 	}
 	if len(data) == 0 {
-		return newCleanupState(), nil
+		return newCleanupState(), "", nil
 	}
 
 	state := newCleanupState()
 	if err := json.Unmarshal(data, state); err != nil {
-		return nil, err
+		quarantined, qerr := quarantineCleanupState(path, now)
+		if qerr != nil {
+			return nil, "", fmt.Errorf("decode cleanup state: %v; quarantine failed: %w", err, qerr)
+		}
+		return newCleanupState(), quarantined, nil
 	}
 	if state.Plugins == nil {
 		state.Plugins = map[string]pluginStateRecord{}
@@ -77,14 +88,41 @@ func loadCleanupState(path string) (*cleanupState, error) {
 	if state.Version == 0 {
 		state.Version = cleanupStateVersion
 	}
-	return state, nil
+	return state, "", nil
 }
 
-func saveCleanupState(path string, state *cleanupState) error {
+// quarantineCleanupState renames an undecodable state file out of the way and
+// returns the new path. It never overwrites an earlier quarantined file.
+func quarantineCleanupState(path string, now time.Time) (string, error) {
+	base := path + ".corrupt-" + now.UTC().Format("20060102T150405Z")
+	target := base
+	for i := 1; ; i++ {
+		if _, err := os.Lstat(target); errors.Is(err, os.ErrNotExist) {
+			break
+		} else if err != nil {
+			return "", err
+		}
+		if i > 100 {
+			return "", fmt.Errorf("no free quarantine name for %s", path)
+		}
+		target = fmt.Sprintf("%s-%d", base, i)
+	}
+	if err := os.Rename(path, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// saveCleanupState writes the state atomically: it writes a temp file in the
+// same directory, syncs it, and renames it over the destination, so a crash or
+// restart mid-write leaves either the old state or the new one, never a
+// truncated file (TIN-3342).
+func saveCleanupState(path string, state *cleanupState) (err error) {
 	if path == "" || state == nil {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -92,7 +130,47 @@ func saveCleanupState(path string, state *cleanupState) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0644)
+
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+	if err = tmp.Chmod(0644); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	syncDir(dir)
+	return nil
+}
+
+// syncDir makes a completed rename durable by syncing its directory. It is
+// best effort: the rename has already happened, so a failure here (for example
+// a filesystem that does not support directory fsync) is not a save error.
+func syncDir(dir string) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = f.Sync()
+	_ = f.Close()
 }
 
 func (s *cleanupState) cooldownRemaining(plugin string, level plugins.CleanupLevel, now time.Time, cooldown time.Duration) time.Duration {

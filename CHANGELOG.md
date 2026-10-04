@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- daemon: the next cycle is scheduled a full `poll_interval` after the previous
+  cycle completes, replacing the fixed ticker. A cycle that outlasts the
+  interval is no longer followed by an immediate catch-up cycle; one warning is
+  logged per overrun streak (TIN-3342).
+- state: `state.json` is written atomically (temp file, fsync, rename). An
+  undecodable state file is renamed to `state.json.corrupt-<timestamp>` and the
+  cycle continues with fresh state, instead of disabling cooldown accounting
+  for every later cycle (TIN-3342).
+
+### Added
+
+- JSON report: `cycle_duration_ms`, `next_cycle_at` (daemon mode) and
+  `state_quarantined`.
+
 ## [0.4.1] - 2026-10-02
 
 ### Fixed

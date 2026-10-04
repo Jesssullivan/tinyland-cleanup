@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"testing/quick"
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/plugins"
@@ -44,7 +50,7 @@ func TestInodeProgressTracking(t *testing.T) {
 	if err := saveCleanupState(path, state); err != nil {
 		t.Fatalf("saveCleanupState: %v", err)
 	}
-	loaded, err := loadCleanupState(path)
+	loaded, _, err := loadCleanupState(path, time.Now())
 	if err != nil {
 		t.Fatalf("loadCleanupState: %v", err)
 	}
@@ -70,7 +76,7 @@ func TestCleanupStateRoundTripAndCooldown(t *testing.T) {
 	if err := saveCleanupState(path, state); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := loadCleanupState(path)
+	loaded, _, err := loadCleanupState(path, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,14 +91,159 @@ func TestCleanupStateRoundTripAndCooldown(t *testing.T) {
 }
 
 func TestLoadCleanupStateMissingFile(t *testing.T) {
-	state, err := loadCleanupState(filepath.Join(t.TempDir(), "missing.json"))
+	state, quarantined, err := loadCleanupState(filepath.Join(t.TempDir(), "missing.json"), time.Now())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if quarantined != "" {
+		t.Fatalf("missing file should not be quarantined, got %q", quarantined)
 	}
 	if state.Version != cleanupStateVersion {
 		t.Fatalf("version = %d, want %d", state.Version, cleanupStateVersion)
 	}
 	if len(state.Plugins) != 0 {
 		t.Fatalf("expected empty plugin state, got %#v", state.Plugins)
+	}
+}
+
+func TestLoadCleanupStateQuarantinesCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	corrupt := []byte("{\"version\": 1, \"plugins\": {\"nix\": ")
+	if err := os.WriteFile(path, corrupt, 0644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+
+	state, quarantined, err := loadCleanupState(path, now)
+	if err != nil {
+		t.Fatalf("corrupt state must not disable accounting, got error %v", err)
+	}
+	if state == nil || state.Version != cleanupStateVersion || len(state.Plugins) != 0 {
+		t.Fatalf("expected fresh state, got %#v", state)
+	}
+	want := path + ".corrupt-20261003T120000Z"
+	if quarantined != want {
+		t.Fatalf("quarantined = %q, want %q", quarantined, want)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("corrupt file should have been moved away, stat err = %v", err)
+	}
+	kept, err := os.ReadFile(quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(kept, corrupt) {
+		t.Fatalf("quarantined bytes changed: %q", kept)
+	}
+
+	// A second corrupt file in the same second never overwrites the first.
+	if err := os.WriteFile(path, []byte("not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := loadCleanupState(path, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second == quarantined || !strings.HasPrefix(second, want) {
+		t.Fatalf("second quarantine = %q, want a distinct name after %q", second, want)
+	}
+	if kept, _ := os.ReadFile(quarantined); !bytes.Equal(kept, corrupt) {
+		t.Fatal("first quarantined file was overwritten")
+	}
+}
+
+func TestSaveCleanupStateIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(path, []byte("{\"version\": 1, \"plugins\": {}}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	state := newCleanupState()
+	state.recordPluginRun("nix", plugins.LevelModerate, time.Now(), plugins.CleanupResult{Plugin: "nix", BytesFreed: 7})
+
+	if err := saveCleanupState(path, state); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "state.json" {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("expected only state.json after save, found %v", names)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0644 {
+		t.Fatalf("state mode = %v, want 0644", info.Mode().Perm())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded cleanupState
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("saved state does not decode: %v", err)
+	}
+	if decoded.Plugins["nix"].LastBytesFreed != 7 {
+		t.Fatalf("saved record = %+v", decoded.Plugins["nix"])
+	}
+}
+
+// Property: whatever bytes sit in state.json, loading never disables
+// accounting. It returns usable state with no error, and when it quarantines
+// the file the original bytes survive unchanged at the quarantine path.
+func TestPropertyLoadCleanupStateNeverDisablesAccounting(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	i := 0
+	prop := func(data []byte) bool {
+		i++
+		path := filepath.Join(dir, "state-"+strconv.Itoa(i)+".json")
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		state, quarantined, err := loadCleanupState(path, now)
+		if err != nil || state == nil || state.Plugins == nil {
+			return false
+		}
+		if quarantined == "" {
+			return true
+		}
+		kept, err := os.ReadFile(quarantined)
+		return err == nil && bytes.Equal(kept, data)
+	}
+	if err := quick.Check(prop, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Property: save followed by load returns the recorded plugin run.
+func TestPropertySaveLoadRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	prop := func(name string, bytesFreed int64, items int) bool {
+		state := newCleanupState()
+		state.recordPluginRun(name, plugins.LevelModerate, now,
+			plugins.CleanupResult{Plugin: name, BytesFreed: bytesFreed, ItemsCleaned: items})
+		if err := saveCleanupState(path, state); err != nil {
+			return false
+		}
+		loaded, quarantined, err := loadCleanupState(path, now)
+		if err != nil || quarantined != "" {
+			return false
+		}
+		got := loaded.Plugins[name]
+		return got.LastBytesFreed == bytesFreed && got.LastItemsCleaned == items
+	}
+	if err := quick.Check(prop, nil); err != nil {
+		t.Fatal(err)
 	}
 }
