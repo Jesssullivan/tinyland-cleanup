@@ -154,7 +154,23 @@ func saveCleanupState(path string, state *cleanupState) (err error) {
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err = os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	syncDir(dir)
+	return nil
+}
+
+// syncDir makes a completed rename durable by syncing its directory. It is
+// best effort: the rename has already happened, so a failure here (for example
+// a filesystem that does not support directory fsync) is not a save error.
+func syncDir(dir string) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = f.Sync()
+	_ = f.Close()
 }
 
 func (s *cleanupState) cooldownRemaining(plugin string, level plugins.CleanupLevel, now time.Time, cooldown time.Duration) time.Duration {

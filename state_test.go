@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/quick"
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/plugins"
@@ -95,9 +97,6 @@ func TestLoadCleanupStateMissingFile(t *testing.T) {
 	}
 	if quarantined != "" {
 		t.Fatalf("missing file should not be quarantined, got %q", quarantined)
-	}
-	if err != nil {
-		t.Fatal(err)
 	}
 	if state.Version != cleanupStateVersion {
 		t.Fatalf("version = %d, want %d", state.Version, cleanupStateVersion)
@@ -195,5 +194,56 @@ func TestSaveCleanupStateIsAtomic(t *testing.T) {
 	}
 	if decoded.Plugins["nix"].LastBytesFreed != 7 {
 		t.Fatalf("saved record = %+v", decoded.Plugins["nix"])
+	}
+}
+
+// Property: whatever bytes sit in state.json, loading never disables
+// accounting. It returns usable state with no error, and when it quarantines
+// the file the original bytes survive unchanged at the quarantine path.
+func TestPropertyLoadCleanupStateNeverDisablesAccounting(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	i := 0
+	prop := func(data []byte) bool {
+		i++
+		path := filepath.Join(dir, "state-"+strconv.Itoa(i)+".json")
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		state, quarantined, err := loadCleanupState(path, now)
+		if err != nil || state == nil || state.Plugins == nil {
+			return false
+		}
+		if quarantined == "" {
+			return true
+		}
+		kept, err := os.ReadFile(quarantined)
+		return err == nil && bytes.Equal(kept, data)
+	}
+	if err := quick.Check(prop, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Property: save followed by load returns the recorded plugin run.
+func TestPropertySaveLoadRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	prop := func(name string, bytesFreed int64, items int) bool {
+		state := newCleanupState()
+		state.recordPluginRun(name, plugins.LevelModerate, now,
+			plugins.CleanupResult{Plugin: name, BytesFreed: bytesFreed, ItemsCleaned: items})
+		if err := saveCleanupState(path, state); err != nil {
+			return false
+		}
+		loaded, quarantined, err := loadCleanupState(path, now)
+		if err != nil || quarantined != "" {
+			return false
+		}
+		got := loaded.Plugins[name]
+		return got.LastBytesFreed == bytesFreed && got.LastItemsCleaned == items
+	}
+	if err := quick.Check(prop, nil); err != nil {
+		t.Fatal(err)
 	}
 }
