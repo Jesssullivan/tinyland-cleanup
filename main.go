@@ -30,6 +30,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -69,6 +71,14 @@ const (
 	defaultByteNoProgressLimit = 3
 	defaultByteProgressMinMB   = 256
 	defaultByteBackoffMax      = 30 * time.Minute
+)
+
+// Zero-yield suppression defaults (TIN-3342), used when the matching policy
+// key is unset or invalid.
+const (
+	defaultZeroYieldLimit       = 2
+	defaultZeroYieldBackoffBase = 30 * time.Minute
+	defaultZeroYieldBackoffMax  = 6 * time.Hour
 )
 
 func main() {
@@ -428,7 +438,9 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 
 	if level == monitor.LevelNone {
 		// Pressure cleared: release byte backoff and reset its counter so a
-		// later episode starts from a clean slate.
+		// later episode starts from a clean slate, and lift zero-yield
+		// suppression so each plugin gets one fresh run in the next episode.
+		dirty := false
 		if !d.dryRun && stateErr == nil && beforeErr == nil &&
 			(byteBackoffWasEngaged || state.byteNoProgressPending(report.MonitorPath)) {
 			state.recordByteProgress(report.MonitorPath, report.HostFreeBeforeBytes, report.HostByteLevel,
@@ -436,6 +448,13 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 			if byteBackoffWasEngaged {
 				d.logger.Info("byte backoff released", "path", report.MonitorPath, "reason", "pressure_cleared")
 			}
+			dirty = true
+		}
+		if !d.dryRun && stateErr == nil && state.liftZeroYieldSuppression() {
+			d.logger.Info("zero-yield suppression lifted", "reason", "pressure_cleared")
+			dirty = true
+		}
+		if dirty {
 			if err := saveCleanupState(report.StateFile, state); err != nil {
 				report.StateError = err.Error()
 				d.logger.Warn("failed to save cleanup state", "path", report.StateFile, "error", err)
@@ -497,6 +516,44 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 	enabledPlugins := filterEnabledPlugins(d.registry.GetEnabled(d.config), d.pluginFilter)
 	d.logger.Debug("running plugins", "count", len(enabledPlugins))
 
+	// Zero-yield suppression (TIN-3342): a plugin whose recent runs reclaimed
+	// nothing is skipped until its retry time unless conditions changed.
+	zeroYield := d.zeroYieldPolicy()
+	digest := d.configDigest()
+	minYield := d.byteProgressMinBytes()
+	recordRun := func(p plugins.Plugin, pluginReport *pluginCycleReport, result plugins.CleanupResult) {
+		state.recordPluginRun(p.Name(), pluginLevel, now, result)
+		// A permanently exempt plugin (safety-critical or listed in
+		// zero_yield_exempt_plugins) keeps its zero-yield count as evidence
+		// but is never given a retry time: it would be lifted every cycle,
+		// logging a fresh "extended" line and skewing next_retry_at.
+		suppressible := d.zeroYieldPermanentExemption(p) == ""
+		record := state.recordPluginYield(p.Name(), result.BytesFreed < minYield, now, digest, zeroYield, suppressible)
+		pluginReport.ZeroYieldCount = record.ZeroYieldCount
+		pluginReport.SuppressedUntil = record.SuppressedUntil
+		stateDirty = true
+		if record.SuppressedUntil == "" {
+			return
+		}
+		attrs := []any{
+			"plugin", p.Name(),
+			"reason", "zero_yield",
+			"zero_yield_count", record.ZeroYieldCount,
+			"retry_at", record.SuppressedUntil,
+		}
+		switch {
+		case record.ZeroYieldCount == zeroYield.limit:
+			d.logger.Warn("plugin reclaimed nothing on repeated runs; suppressing it until conditions change", attrs...)
+		case zeroYieldRecurringLift(pluginReport.ZeroYieldLifted):
+			// Lifted again next cycle (operator run, emergency floor, unknown
+			// free space): an Info line here would repeat every poll with a
+			// new retry_at, which the log throttle cannot fold (R-C159 c5).
+			d.logger.Debug("plugin still reclaiming nothing; zero-yield suppression extended", attrs...)
+		default:
+			d.logger.Info("plugin still reclaiming nothing; zero-yield suppression extended", attrs...)
+		}
+	}
+
 	var totalFreed int64
 	var totalItems int
 	for _, p := range enabledPlugins {
@@ -516,6 +573,28 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 			}
 			report.Plugins = append(report.Plugins, pluginReport)
 			continue
+		}
+
+		if stateErr == nil && zeroYield.limit > 0 {
+			until, count, lifted, suppressed := state.zeroYieldSuppression(p.Name(), pluginLevel, now, digest)
+			if suppressed {
+				if exempt := d.zeroYieldExemption(p, report, beforeErr == nil); exempt != "" {
+					lifted = exempt
+				} else {
+					pluginReport.WouldRun = false
+					pluginReport.SkipReason = "zero_yield_backoff"
+					pluginReport.ZeroYieldCount = count
+					pluginReport.RetryAt = until.UTC().Format(time.RFC3339)
+					d.logger.Debug("plugin suppressed for zero yield",
+						"plugin", p.Name(), "zero_yield_count", count, "retry_at", pluginReport.RetryAt)
+					report.Plugins = append(report.Plugins, pluginReport)
+					continue
+				}
+			}
+			if lifted != "" {
+				pluginReport.ZeroYieldCount = count
+				pluginReport.ZeroYieldLifted = lifted
+			}
 		}
 
 		if stateErr == nil {
@@ -560,20 +639,18 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		pluginReport.ItemsCleaned = result.ItemsCleaned
 		if result.Error != nil {
 			pluginReport.Error = result.Error.Error()
-			report.Plugins = append(report.Plugins, pluginReport)
 			d.logger.Error("plugin failed", "plugin", p.Name(), "error", result.Error)
 			if stateErr == nil {
-				state.recordPluginRun(p.Name(), pluginLevel, now, result)
-				stateDirty = true
+				recordRun(p, &pluginReport, result)
 			}
+			report.Plugins = append(report.Plugins, pluginReport)
 			continue
 		}
 
-		report.Plugins = append(report.Plugins, pluginReport)
 		if stateErr == nil {
-			state.recordPluginRun(p.Name(), pluginLevel, now, result)
-			stateDirty = true
+			recordRun(p, &pluginReport, result)
 		}
+		report.Plugins = append(report.Plugins, pluginReport)
 		if result.BytesFreed > 0 || result.ItemsCleaned > 0 {
 			d.logger.Info("plugin completed",
 				"plugin", p.Name(),
@@ -589,6 +666,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 
 	report.TotalBytesFreed = totalFreed
 	report.TotalItemsCleaned = totalItems
+	report.NextRetryAt = nextRetryAt(report.Plugins)
 
 	d.updateHostFreeAfter(&report, beforeStats, beforeErr)
 
@@ -713,6 +791,9 @@ type cycleReport struct {
 	// NextCycleAt is when the daemon will start its next cycle: completion plus
 	// the poll interval. It is empty outside daemon mode.
 	NextCycleAt string `json:"next_cycle_at,omitempty"`
+	// NextRetryAt is the earliest time a plugin held back this cycle (by
+	// cooldown, byte backoff or zero-yield suppression) becomes eligible again.
+	NextRetryAt string `json:"next_retry_at,omitempty"`
 	// TargetUsedPercent is the legacy target_free config value as a maximum used percentage.
 	TargetUsedPercent int `json:"target_used_percent"`
 	// TargetFreeBytes is the free-space equivalent required to satisfy TargetUsedPercent.
@@ -787,10 +868,20 @@ type pluginCycleReport struct {
 	HostBytesFreed           int64                `json:"host_bytes_freed"`
 	ItemsCleaned             int                  `json:"items_cleaned"`
 	CooldownRemainingSeconds int64                `json:"cooldown_remaining_seconds,omitempty"`
-	// RetryAt is when a plugin held back by cooldown or byte backoff becomes
-	// eligible again (RFC3339).
+	// RetryAt is when a plugin held back by cooldown, byte backoff or
+	// zero-yield suppression becomes eligible again (RFC3339).
 	RetryAt string `json:"retry_at,omitempty"`
-	Error   string `json:"error,omitempty"`
+	// ZeroYieldCount is the plugin's consecutive zero-yield run count.
+	ZeroYieldCount int `json:"zero_yield_count,omitempty"`
+	// SuppressedUntil is set when this run left the plugin suppressed for
+	// zero yield: it is skipped until then unless conditions change.
+	SuppressedUntil string `json:"suppressed_until,omitempty"`
+	// ZeroYieldLifted names why a suppressed plugin ran anyway: level_rose,
+	// config_changed, operator_run, below_emergency_floor or free_unknown
+	// (safety_critical or exempt_plugin only for a retry time recorded before
+	// the plugin became exempt).
+	ZeroYieldLifted string `json:"zero_yield_lifted,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type pluginListReport struct {
@@ -1219,6 +1310,119 @@ func (d *daemon) emergencyFreeBytes() uint64 {
 		return 0
 	}
 	return uint64(d.config.Policy.EmergencyFreeGB) * 1024 * 1024 * 1024
+}
+
+// zeroYieldPolicy resolves the zero-yield suppression policy. A zero limit
+// uses the default; a negative limit disables suppression (limit 0).
+func (d *daemon) zeroYieldPolicy() zeroYieldPolicy {
+	policy := zeroYieldPolicy{
+		limit: defaultZeroYieldLimit,
+		base:  defaultZeroYieldBackoffBase,
+		max:   defaultZeroYieldBackoffMax,
+	}
+	if d.config == nil {
+		return policy
+	}
+	switch limit := d.config.Policy.ZeroYieldLimit; {
+	case limit < 0:
+		policy.limit = 0
+	case limit > 0:
+		policy.limit = limit
+	}
+	if duration, err := time.ParseDuration(d.config.Policy.ZeroYieldBackoffBase); err == nil && duration > 0 {
+		policy.base = duration
+	}
+	if duration, err := time.ParseDuration(d.config.Policy.ZeroYieldBackoffMax); err == nil && duration > 0 {
+		policy.max = duration
+	}
+	if policy.max < policy.base {
+		policy.max = policy.base
+	}
+	return policy
+}
+
+// configDigest identifies the effective configuration and binary version. A
+// change, such as a Home Manager switch that renders new budgets, lifts
+// zero-yield suppression so every plugin gets a fresh attempt.
+func (d *daemon) configDigest() string {
+	h := sha256.New()
+	h.Write([]byte(version))
+	h.Write([]byte{0})
+	if data, err := json.Marshal(d.config); err == nil {
+		h.Write(data)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// zeroYieldExemption returns why plugin p runs this cycle even though it is
+// suppressed for zero yield, or "" when suppression applies.
+func (d *daemon) zeroYieldExemption(p plugins.Plugin, report cycleReport, freeKnown bool) string {
+	if report.ForcedLevel || d.dryRun || len(d.pluginFilter) > 0 {
+		return "operator_run"
+	}
+	if reason := d.zeroYieldPermanentExemption(p); reason != "" {
+		return reason
+	}
+	if !freeKnown {
+		return "free_unknown"
+	}
+	if floor := d.emergencyFreeBytes(); floor > 0 && report.HostFreeBeforeBytes < floor {
+		return "below_emergency_floor"
+	}
+	return ""
+}
+
+// zeroYieldPermanentExemption returns why plugin p is never suppressed for
+// zero yield, whatever the cycle's conditions: "safety_critical",
+// "exempt_plugin", or "".
+func (d *daemon) zeroYieldPermanentExemption(p plugins.Plugin) string {
+	if critical, ok := p.(plugins.SafetyCritical); ok && critical.SafetyCritical() {
+		return "safety_critical"
+	}
+	if d.config != nil {
+		for _, name := range d.config.Policy.ZeroYieldExemptPlugins {
+			if strings.TrimSpace(name) == p.Name() {
+				return "exempt_plugin"
+			}
+		}
+	}
+	return ""
+}
+
+// zeroYieldRecurringLift reports whether a zero-yield lift reason holds for
+// as long as its condition lasts, so the plugin is lifted again every cycle.
+// level_rose and config_changed are one-shot: the run records the new level
+// and digest.
+func zeroYieldRecurringLift(reason string) bool {
+	switch reason {
+	case "operator_run", "below_emergency_floor", "free_unknown":
+		return true
+	}
+	return false
+}
+
+// nextRetryAt returns the earliest retry or suppression time across plugins,
+// or "" when no plugin is waiting.
+func nextRetryAt(reports []pluginCycleReport) string {
+	var earliest time.Time
+	for _, plugin := range reports {
+		for _, value := range []string{plugin.RetryAt, plugin.SuppressedUntil} {
+			if value == "" {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339, value)
+			if err != nil {
+				continue
+			}
+			if earliest.IsZero() || at.Before(earliest) {
+				earliest = at
+			}
+		}
+	}
+	if earliest.IsZero() {
+		return ""
+	}
+	return earliest.UTC().Format(time.RFC3339)
 }
 
 func (d *daemon) inodeNoProgressLimit() int {

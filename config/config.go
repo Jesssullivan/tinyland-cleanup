@@ -270,6 +270,25 @@ type PolicyConfig struct {
 	// has less free space than this, byte backoff never engages and cleanup
 	// runs on the normal pressure cadence. Zero disables the floor.
 	EmergencyFreeGB int `yaml:"emergency_free_gb"`
+	// ZeroYieldLimit is the number of consecutive runs of one plugin that
+	// reclaim less than ByteProgressMinMB before that plugin is suppressed
+	// (TIN-3342). A suppressed plugin is skipped until its retry time, which
+	// starts at ZeroYieldBackoffBase and doubles with each further zero-yield
+	// run up to ZeroYieldBackoffMax. Suppression lifts early when the cleanup
+	// level rises above the plugin's last run, when the configuration or
+	// binary version changes, or when free space is below EmergencyFreeGB.
+	// Zero uses the built-in default; a negative value disables suppression.
+	ZeroYieldLimit int `yaml:"zero_yield_limit"`
+	// ZeroYieldBackoffBase is the first suppression interval. Empty or invalid
+	// uses the built-in default.
+	ZeroYieldBackoffBase string `yaml:"zero_yield_backoff_base"`
+	// ZeroYieldBackoffMax caps the suppression interval. Empty or invalid uses
+	// the built-in default.
+	ZeroYieldBackoffMax string `yaml:"zero_yield_backoff_max"`
+	// ZeroYieldExemptPlugins lists plugins that are never suppressed, in
+	// addition to the plugins that declare themselves safety-critical
+	// (apfs-snapshots).
+	ZeroYieldExemptPlugins []string `yaml:"zero_yield_exempt_plugins"`
 }
 
 // DockerConfig holds Docker-specific cleanup settings.
@@ -606,6 +625,9 @@ func DefaultConfig() *Config {
 			ByteProgressMinMB:    256,
 			ByteBackoffMax:       "30m",
 			EmergencyFreeGB:      20,
+			ZeroYieldLimit:       2,
+			ZeroYieldBackoffBase: "30m",
+			ZeroYieldBackoffMax:  "6h",
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{

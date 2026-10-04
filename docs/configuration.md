@@ -94,6 +94,47 @@ reclaimable that becomes a scan storm. Byte backoff stops it:
 - `byte_no_progress_limit: 0` uses the default of 3; a negative value disables
   byte backoff. `emergency_free_gb: 0` disables the floor.
 
+### Zero-yield suppression
+
+```yaml
+policy:
+  zero_yield_limit: 2
+  zero_yield_backoff_base: 30m
+  zero_yield_backoff_max: 6h
+  zero_yield_exempt_plugins: []
+```
+
+Byte backoff spaces out every plugin; zero-yield suppression stops rerunning
+the particular expensive passes that keep finding nothing:
+
+- A plugin run that reclaims less than `byte_progress_min_mb` MiB (or fails)
+  is a **zero-yield** run. A run that reclaims at least that much resets the
+  count.
+- After `zero_yield_limit` consecutive zero-yield runs the plugin is
+  suppressed for `zero_yield_backoff_base`. Each further zero-yield run doubles
+  the interval, capped at `zero_yield_backoff_max`. Suppressed plugins report
+  `skip_reason: zero_yield_backoff` and `retry_at`; the cycle reports
+  `next_retry_at`.
+- Suppression lifts early, and the report names why in `zero_yield_lifted`,
+  when conditions change: the cleanup level rises above the plugin's last run
+  (`level_rose`), the configuration or binary version changes, for example
+  after a Home Manager switch (`config_changed`), or free space is below
+  `emergency_free_gb` (`below_emergency_floor`). When pressure clears, every
+  suppression is lifted and each plugin gets one fresh run in the next
+  episode; the count is kept, so a plugin that still yields nothing is
+  suppressed again at once.
+- It never applies to `--level`, `--dry-run` or `--plugins` runs
+  (`operator_run`), to plugins in `zero_yield_exempt_plugins`, or to
+  safety-critical plugins (`apfs-snapshots`). Exempt and safety-critical
+  plugins still report `zero_yield_count` as evidence but are never given a
+  `suppressed_until`, so they do not drive `next_retry_at`.
+- While a lift recurs every cycle (`operator_run`, `below_emergency_floor`,
+  `free_unknown`), re-extending a plugin's suppression logs at debug level
+  only, so the log stays bounded.
+- The count and retry time live in `state_file`, so they survive restarts.
+- `zero_yield_limit: 0` uses the default of 2; a negative value disables
+  suppression.
+
 ## Plugins
 
 The `enable` map controls plugin availability:

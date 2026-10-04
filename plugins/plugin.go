@@ -253,6 +253,13 @@ type Planner interface {
 	PlanCleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupPlan
 }
 
+// SafetyCritical is implemented by plugins that must run whenever the daemon
+// selects them, however little they reclaimed before: the daemon never
+// suppresses them for zero yield (TIN-3342). Keep this to fast relief valves.
+type SafetyCritical interface {
+	SafetyCritical() bool
+}
+
 // Registry holds registered cleanup plugins.
 type Registry struct {
 	plugins []Plugin

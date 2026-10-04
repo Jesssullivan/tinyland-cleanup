@@ -54,6 +54,17 @@ policy:
   # Below this many GiB free, byte backoff never engages and cleanup keeps the
   # normal pressure cadence. Zero disables the floor.
   emergency_free_gb: 20
+  # Zero-yield suppression (TIN-3342). A plugin whose last zero_yield_limit
+  # runs each reclaimed less than byte_progress_min_mb is skipped until a retry
+  # time that starts at zero_yield_backoff_base and doubles per further
+  # zero-yield run, capped at zero_yield_backoff_max. It runs early when the
+  # cleanup level rises above its last run, when this config or the binary
+  # version changes, or below emergency_free_gb. apfs-snapshots is never
+  # suppressed. Zero uses the default (2); negative disables suppression.
+  zero_yield_limit: 2
+  zero_yield_backoff_base: 30m
+  zero_yield_backoff_max: 6h
+  zero_yield_exempt_plugins: []
 
 # Enable/disable specific cleanup plugins
 enable:

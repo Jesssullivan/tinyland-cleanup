@@ -169,6 +169,7 @@ go_test(
         "main_test.go",
         "state_test.go",
         "volume_probe_test.go",
+        "zero_yield_test.go",
     ],
     embed = [":tinyland-cleanup_lib"],
     deps = [

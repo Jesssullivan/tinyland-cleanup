@@ -36,6 +36,12 @@ func (p *APFSPlugin) Name() string {
 	return "apfs-snapshots"
 }
 
+// SafetyCritical marks snapshot thinning as the fast relief valve: it is never
+// suppressed for zero yield, because APFS can reclaim snapshot space suddenly.
+func (p *APFSPlugin) SafetyCritical() bool {
+	return true
+}
+
 // Description returns the plugin description.
 func (p *APFSPlugin) Description() string {
 	return "Thins APFS local snapshots and Time Machine caches to reclaim disk space"
