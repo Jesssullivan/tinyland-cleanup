@@ -42,6 +42,18 @@ policy:
   # bypassing cooldown and backs off to the cooldown cadence instead of running
   # every plugin every poll interval. Zero uses the built-in default (3).
   inode_no_progress_limit: 3
+  # Byte backoff (TIN-3342). When byte pressure survives this many consecutive
+  # cleanup cycles without byte_progress_min_mb of reclaim, plugins stop
+  # bypassing cooldown (critical level and an unmet minimum_free_gb runway no
+  # longer force a run every poll) and each runs at most once per
+  # min(cooldown, byte_backoff_max). Zero uses the default (3); negative
+  # disables byte backoff.
+  byte_no_progress_limit: 3
+  byte_progress_min_mb: 256
+  byte_backoff_max: 30m
+  # Below this many GiB free, byte backoff never engages and cleanup keeps the
+  # normal pressure cadence. Zero disables the floor.
+  emergency_free_gb: 20
 
 # Enable/disable specific cleanup plugins
 enable:

@@ -165,6 +165,7 @@ go_library(
 go_test(
     name = "tinyland-cleanup_test",
     srcs = [
+        "byte_backoff_test.go",
         "main_test.go",
         "state_test.go",
         "volume_probe_test.go",

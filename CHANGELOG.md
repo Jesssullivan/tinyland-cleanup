@@ -19,6 +19,17 @@ All notable changes to this project will be documented in this file.
 
 - JSON report: `cycle_duration_ms`, `next_cycle_at` (daemon mode) and
   `state_quarantined`.
+- daemon: byte backoff (TIN-3342). After `policy.byte_no_progress_limit`
+  (default 3) consecutive cleanup cycles under byte pressure that reclaim less
+  than `policy.byte_progress_min_mb` (default 256 MiB), plugins stop bypassing
+  cooldown and run at most once per `min(cooldown, policy.byte_backoff_max)`
+  (default cap 30m), including at critical level. It never engages below
+  `policy.emergency_free_gb` (default 20 GiB free), for `--level` or
+  `--dry-run` runs, or right after the byte level rises. The counter persists
+  in `state.json` (state version 2).
+- JSON report: `byte_no_progress_count`, `byte_backoff`,
+  `byte_backoff_reason`, `byte_backoff_seconds`, `emergency_free_bytes`,
+  `host_byte_level_after`, and per-plugin `retry_at`.
 
 ## [0.4.1] - 2026-10-02
 

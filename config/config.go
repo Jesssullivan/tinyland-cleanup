@@ -250,6 +250,26 @@ type PolicyConfig struct {
 	// inode-only escalation and backs off to the cooldown cadence. Zero uses the
 	// built-in default.
 	InodeNoProgressLimit int `yaml:"inode_no_progress_limit"`
+	// ByteNoProgressLimit is the number of consecutive cleanup cycles under
+	// byte pressure that fail to free ByteProgressMinMB before the daemon
+	// engages byte backoff: plugins stop bypassing cooldown (critical level and
+	// an unmet minimum_free_gb runway no longer force a run every poll) and run
+	// at most once per ByteBackoffMax (TIN-3342). Zero uses the built-in
+	// default; a negative value disables byte backoff.
+	ByteNoProgressLimit int `yaml:"byte_no_progress_limit"`
+	// ByteProgressMinMB is the smallest reclaim, in MiB, that counts as byte
+	// progress. Either plugin-reported bytes or the host free-space delta may
+	// satisfy it. Zero uses the built-in default.
+	ByteProgressMinMB int `yaml:"byte_progress_min_mb"`
+	// ByteBackoffMax caps how long byte backoff holds a plugin back. While
+	// backoff is engaged a plugin runs again once min(cooldown, ByteBackoffMax)
+	// has passed since its last run; with no cooldown configured it waits
+	// ByteBackoffMax. Empty or invalid uses the built-in default.
+	ByteBackoffMax string `yaml:"byte_backoff_max"`
+	// EmergencyFreeGB is a free-space floor in GiB. While the monitored path
+	// has less free space than this, byte backoff never engages and cleanup
+	// runs on the normal pressure cadence. Zero disables the floor.
+	EmergencyFreeGB int `yaml:"emergency_free_gb"`
 }
 
 // DockerConfig holds Docker-specific cleanup settings.
@@ -582,6 +602,10 @@ func DefaultConfig() *Config {
 			MinimumFreeGB:        0,
 			StateFile:            stateFile,
 			InodeNoProgressLimit: 3,
+			ByteNoProgressLimit:  3,
+			ByteProgressMinMB:    256,
+			ByteBackoffMax:       "30m",
+			EmergencyFreeGB:      20,
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{

@@ -64,6 +64,36 @@ policy:
 - `minimum_free_gb` keeps cleaning until the host reaches a free-space runway.
 - `state_file` stores cooldown and no-progress state.
 
+### Byte backoff
+
+```yaml
+policy:
+  byte_no_progress_limit: 3
+  byte_progress_min_mb: 256
+  byte_backoff_max: 30m
+  emergency_free_gb: 20
+```
+
+Under byte pressure, critical level and an unmet `minimum_free_gb` runway both
+bypass cooldown, so every plugin runs every poll interval. When nothing is
+reclaimable that becomes a scan storm. Byte backoff stops it:
+
+- A cleanup cycle under byte pressure counts as **no progress** when plugins
+  freed less than `byte_progress_min_mb` MiB, the host free-space delta is
+  below the same amount, and the byte level did not drop.
+- After `byte_no_progress_limit` consecutive no-progress cycles, byte backoff
+  engages. Each plugin then runs at most once per `min(cooldown,
+  byte_backoff_max)`, or once per `byte_backoff_max` when no cooldown is set.
+  Skipped plugins report `skip_reason: byte_backoff` and `retry_at`.
+- Cycles in which every plugin was held back do not advance the counter.
+- Backoff releases on progress, when the byte level rises (an escalation earns
+  a fresh attempt), and when pressure clears.
+- It never engages while free space is below `emergency_free_gb` GiB, for
+  `--level` runs, or for `--dry-run`.
+- The counter lives in `state_file`, so it survives daemon restarts.
+- `byte_no_progress_limit: 0` uses the default of 3; a negative value disables
+  byte backoff. `emergency_free_gb: 0` disables the floor.
+
 ## Plugins
 
 The `enable` map controls plugin availability:
