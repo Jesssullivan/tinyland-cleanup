@@ -6,6 +6,25 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- dev-artifacts: per-root scan budgets (TIN-3342, #129). A workspace root
+  that uses its whole share of the scan budget is now truncated on its own:
+  it is reported as partial evidence (`workspace_roots_truncated`,
+  `scan_truncated_paths`) and the pass continues with the next root, the
+  remaining artifact families and the next scan path, instead of ending the
+  whole dev-artifacts pass. Each artifact family (node_modules, venv, Rust,
+  Zig) walks each scan path against its own pool of `scan_max_entries` and
+  `scan_max_duration`, as in v0.4.1; root truncations no longer stop the
+  later families, so a cycle can now spend every family's pool. The shared
+  deadline bounds the temp, transcript and agent-worktree lanes, and the
+  shared entry count (which family entries fold into) bounds the
+  post-workspace lanes; when the shared budget is exhausted the remaining
+  walks stop and the global cache lanes (Go build cache, pnpm, Haskell,
+  LM Studio) still run, because they do not depend on walk evidence.
+- dev-artifacts: per-root shares carry over. Each workspace root and temp scan
+  path gets what its lane has left divided by the roots still to come, so
+  roots that use less than their share leave the rest to later roots instead
+  of an even split that truncated large roots while small ones left budget
+  unused.
 - daemon: the next cycle is scheduled a full `poll_interval` after the previous
   cycle completes, replacing the fixed ticker. A cycle that outlasts the
   interval is no longer followed by an immediate catch-up cycle; one warning is
@@ -40,6 +59,10 @@ All notable changes to this project will be documented in this file.
 - JSON report: `next_retry_at`, and per-plugin `zero_yield_count`,
   `suppressed_until` and `zero_yield_lifted`; `skip_reason` gains
   `zero_yield_backoff`.
+- JSON report: dev-artifacts plan metadata `workspace_roots_truncated`,
+  `scan_budget_shared_exhausted`, `scan_root_share` (`carry_over`) and
+  `scan_sizing_entries_visited` (entries visited while sizing artifact
+  directories; counted and reported, not enforced against the entry budget).
 - JSON report: `byte_no_progress_count`, `byte_backoff`,
   `byte_backoff_reason`, `byte_backoff_seconds`, `emergency_free_bytes`,
   `host_byte_level_after`, and per-plugin `retry_at`.

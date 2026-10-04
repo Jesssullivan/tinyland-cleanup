@@ -8,7 +8,6 @@ package plugins
 import (
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -39,8 +38,6 @@ var nixTempRootNamePattern = regexp.MustCompile(`^(?:nix-shell\.[A-Za-z0-9]+|nix
 var temporaryProofLaneNamePattern = regexp.MustCompile(`^t[0-9]+[A-Za-z]*-[A-Za-z0-9._-]+$`)
 var tcfsRustTargetCacheNamePattern = regexp.MustCompile(`^tcfs-[A-Za-z0-9._]+-target$`)
 
-var errDevArtifactScanBudgetExceeded = errors.New("dev artifact scan budget exceeded")
-
 type devArtifactActivity struct {
 	familyReasons   map[string]string
 	unscopedReasons map[string]string
@@ -52,352 +49,6 @@ type devArtifactProcessCandidate struct {
 	TargetType string
 	Reason     string
 	Line       string
-}
-
-type devArtifactScanBudget struct {
-	maxDuration             time.Duration
-	maxEntries              int
-	workspaceMaxRoots       int
-	workspaceCursorFile     string
-	workspaceCursorState    devArtifactWorkspaceCursorState
-	persistWorkspaceCursors bool
-	tempMaxRoots            int
-
-	entries               int
-	workspaceRootsVisited int
-	workspaceRootsSkipped int
-	tempRoots             int
-	tempRootSeen          map[string]struct{}
-	truncatedPath         map[string]string
-	// tempTruncatedPath records truncations inside a single temp scan path's
-	// own budget. They are reported as partial evidence, and a path cut by its
-	// own temp root budget does not gate the remaining temp scan paths or
-	// later lanes: one huge temp path must not starve the others
-	// (OI-1001-Q4). Entry and duration shares are different: each path's
-	// entries fold back into the shared budget and the shared scan deadline
-	// still applies, so when temp paths use up their entry or time shares the
-	// later lanes truncate exactly as they did before per-path budgets.
-	tempTruncatedPath  map[string]string
-	tempPathsTruncated int
-}
-
-type devArtifactWorkspaceCursorState struct {
-	Version int               `json:"version"`
-	Cursors map[string]string `json:"cursors"`
-}
-
-func newDevArtifactScanBudget(cfg config.DevArtifactsConfig) *devArtifactScanBudget {
-	return &devArtifactScanBudget{
-		maxDuration:       parseNixPolicyDuration(cfg.ScanMaxDuration, 30*time.Second),
-		maxEntries:        cfg.ScanMaxEntries,
-		workspaceMaxRoots: cfg.WorkspaceScanMaxRoots,
-		tempMaxRoots:      cfg.TempScanMaxRoots,
-		tempRootSeen:      map[string]struct{}{},
-		truncatedPath:     map[string]string{},
-		tempTruncatedPath: map[string]string{},
-	}
-}
-
-func newDevArtifactScanBudgetForConfig(cfg *config.Config, persistWorkspaceCursors bool) *devArtifactScanBudget {
-	budget := newDevArtifactScanBudget(cfg.DevArtifacts)
-	budget.workspaceCursorFile = devArtifactWorkspaceCursorFile(cfg.Policy.StateFile)
-	budget.persistWorkspaceCursors = persistWorkspaceCursors
-	budget.loadWorkspaceCursors()
-	return budget
-}
-
-func devArtifactWorkspaceCursorFile(stateFile string) string {
-	if stateFile == "" {
-		return ""
-	}
-	home, _ := os.UserHomeDir()
-	expanded := expandHome(stateFile, home)
-	ext := filepath.Ext(expanded)
-	if ext == "" {
-		return expanded + ".dev-artifacts.json"
-	}
-	return strings.TrimSuffix(expanded, ext) + ".dev-artifacts" + ext
-}
-
-func (b *devArtifactScanBudget) loadWorkspaceCursors() {
-	if b == nil || b.workspaceCursorFile == "" {
-		return
-	}
-	data, err := os.ReadFile(b.workspaceCursorFile)
-	if err != nil {
-		return
-	}
-	var state devArtifactWorkspaceCursorState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return
-	}
-	if state.Cursors == nil {
-		state.Cursors = map[string]string{}
-	}
-	b.workspaceCursorState = state
-}
-
-func (b *devArtifactScanBudget) saveWorkspaceCursors() {
-	if b == nil || !b.persistWorkspaceCursors || b.workspaceCursorFile == "" || len(b.workspaceCursorState.Cursors) == 0 {
-		return
-	}
-	state := b.workspaceCursorState
-	state.Version = 1
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(b.workspaceCursorFile), 0755); err != nil {
-		return
-	}
-	tmp := b.workspaceCursorFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, b.workspaceCursorFile)
-}
-
-func (b *devArtifactScanBudget) selectWorkspaceRoots(key string, roots []string) []string {
-	if b == nil || len(roots) == 0 {
-		return roots
-	}
-	selected := roots
-	if b.workspaceMaxRoots > 0 && len(roots) > b.workspaceMaxRoots {
-		selected = rotateWorkspaceRootsAfterCursor(roots, b.workspaceCursorState.Cursors[key], b.workspaceMaxRoots)
-		b.workspaceRootsSkipped += len(roots) - len(selected)
-	}
-	b.workspaceRootsVisited += len(selected)
-	return selected
-}
-
-func rotateWorkspaceRootsAfterCursor(roots []string, cursor string, maxRoots int) []string {
-	if maxRoots <= 0 || len(roots) <= maxRoots {
-		return roots
-	}
-	start := 0
-	if cursor != "" {
-		start = len(roots)
-		for idx, root := range roots {
-			if root > cursor {
-				start = idx
-				break
-			}
-		}
-		if start >= len(roots) {
-			start = 0
-		}
-	}
-	selected := make([]string, 0, maxRoots)
-	for offset := 0; offset < len(roots) && len(selected) < maxRoots; offset++ {
-		selected = append(selected, roots[(start+offset)%len(roots)])
-	}
-	return selected
-}
-
-func (b *devArtifactScanBudget) recordWorkspaceCursor(key string, root string) {
-	if b == nil || !b.persistWorkspaceCursors || b.workspaceCursorFile == "" || key == "" || root == "" {
-		return
-	}
-	if b.workspaceCursorState.Cursors == nil {
-		b.workspaceCursorState.Cursors = map[string]string{}
-	}
-	b.workspaceCursorState.Cursors[key] = filepath.Clean(root)
-	b.saveWorkspaceCursors()
-}
-
-func (b *devArtifactScanBudget) workspaceRootBudget(selectedRoots int) *devArtifactScanBudget {
-	if b == nil {
-		return nil
-	}
-	maxDuration := b.maxDuration
-	if selectedRoots > 1 && maxDuration > 0 {
-		maxDuration = maxDuration / time.Duration(selectedRoots)
-		if maxDuration < time.Second {
-			maxDuration = time.Second
-		}
-	}
-	maxEntries := b.maxEntries
-	if selectedRoots > 1 && maxEntries > 0 {
-		maxEntries = (maxEntries + selectedRoots - 1) / selectedRoots
-		if maxEntries < 1 {
-			maxEntries = 1
-		}
-	}
-	return &devArtifactScanBudget{
-		maxDuration:   maxDuration,
-		maxEntries:    maxEntries,
-		tempRootSeen:  map[string]struct{}{},
-		truncatedPath: map[string]string{},
-	}
-}
-
-func (b *devArtifactScanBudget) mergeWorkspaceRootBudget(rootBudget *devArtifactScanBudget) {
-	if b == nil || rootBudget == nil || rootBudget == b {
-		return
-	}
-	b.entries += rootBudget.entries
-	for path, reason := range rootBudget.truncatedPath {
-		b.markTruncated(path, reason)
-	}
-}
-
-// tempPathBudget returns an independent budget for one temp scan path.
-// temp_scan_max_roots applies per path (as documented in config), while the
-// entry and duration budgets are split evenly across the temp scan paths so
-// the total temp-lane work stays bounded by the configured scan budget. Each
-// child budget's root-dedup map is dropped after its path finishes, so memory
-// is bounded by a single path's temp_scan_max_roots rather than the sum.
-func (b *devArtifactScanBudget) tempPathBudget(pathCount int) *devArtifactScanBudget {
-	if b == nil {
-		return nil
-	}
-	child := b.workspaceRootBudget(pathCount)
-	child.tempMaxRoots = b.tempMaxRoots
-	return child
-}
-
-// mergeTempPathBudget folds a finished temp scan path's accounting back into
-// the shared budget. Truncations are kept for reporting only, but the child's
-// entries count against the shared entry budget, so exhausted entry shares
-// still truncate the later lanes.
-func (b *devArtifactScanBudget) mergeTempPathBudget(child *devArtifactScanBudget) {
-	if b == nil || child == nil || child == b {
-		return
-	}
-	b.entries += child.entries
-	b.tempRoots += child.tempRoots
-	if child.exhausted() {
-		b.tempPathsTruncated++
-	}
-	for path, reason := range child.truncatedPath {
-		if len(b.tempTruncatedPath) >= 20 {
-			break
-		}
-		b.tempTruncatedPath[path] = reason
-	}
-}
-
-func optionalDevArtifactScanBudget(budgets []*devArtifactScanBudget) *devArtifactScanBudget {
-	if len(budgets) == 0 {
-		return nil
-	}
-	return budgets[0]
-}
-
-func (b *devArtifactScanBudget) context(ctx context.Context) (context.Context, context.CancelFunc) {
-	if b == nil || b.maxDuration <= 0 {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, b.maxDuration)
-}
-
-func (b *devArtifactScanBudget) checkPath(ctx context.Context, path string) error {
-	if err := ctx.Err(); err != nil {
-		if b != nil && b.maxDuration > 0 && errors.Is(err, context.DeadlineExceeded) {
-			b.markTruncated(path, fmt.Sprintf("scan duration exceeded %s", b.maxDuration))
-			return errDevArtifactScanBudgetExceeded
-		}
-		return err
-	}
-	if b == nil {
-		return nil
-	}
-	if b.maxEntries > 0 && b.entries >= b.maxEntries {
-		b.markTruncated(path, fmt.Sprintf("scan entry budget exceeded %d entries", b.maxEntries))
-		return errDevArtifactScanBudgetExceeded
-	}
-	b.entries++
-	return nil
-}
-
-func (b *devArtifactScanBudget) checkTempRoot(ctx context.Context, path string) error {
-	if err := b.checkPath(ctx, path); err != nil {
-		return err
-	}
-	if b == nil {
-		return nil
-	}
-	cleanPath := filepath.Clean(path)
-	if _, ok := b.tempRootSeen[cleanPath]; ok {
-		return nil
-	}
-	if b.tempMaxRoots > 0 && b.tempRoots >= b.tempMaxRoots {
-		b.markTruncated(path, fmt.Sprintf("temporary root budget exceeded %d roots", b.tempMaxRoots))
-		return errDevArtifactScanBudgetExceeded
-	}
-	b.tempRootSeen[cleanPath] = struct{}{}
-	b.tempRoots++
-	return nil
-}
-
-func (b *devArtifactScanBudget) markContextError(ctx context.Context, path string) {
-	if b == nil || b.maxDuration <= 0 || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return
-	}
-	b.markTruncated(path, fmt.Sprintf("scan duration exceeded %s", b.maxDuration))
-}
-
-func (b *devArtifactScanBudget) markTruncated(path, reason string) {
-	if b == nil {
-		return
-	}
-	if len(b.truncatedPath) >= 20 {
-		return
-	}
-	b.truncatedPath[path] = reason
-}
-
-// exhausted reports whether the shared budget was exhausted. It gates later
-// lanes; per-temp-path truncations do not (see partial).
-func (b *devArtifactScanBudget) exhausted() bool {
-	return b != nil && len(b.truncatedPath) > 0
-}
-
-// partial reports whether any scan evidence is incomplete, including
-// truncations confined to a single temp scan path.
-func (b *devArtifactScanBudget) partial() bool {
-	return b != nil && (len(b.truncatedPath) > 0 || len(b.tempTruncatedPath) > 0)
-}
-
-func (b *devArtifactScanBudget) truncatedDetails() []string {
-	if b == nil || !b.partial() {
-		return nil
-	}
-	details := make([]string, 0, len(b.truncatedPath)+len(b.tempTruncatedPath))
-	for path, reason := range b.truncatedPath {
-		details = append(details, path+" ("+reason+")")
-	}
-	for path, reason := range b.tempTruncatedPath {
-		details = append(details, path+" ("+reason+")")
-	}
-	sort.Strings(details)
-	return details
-}
-
-func (b *devArtifactScanBudget) annotatePlan(plan *CleanupPlan) {
-	if b == nil {
-		return
-	}
-	plan.Metadata["scan_max_duration"] = b.maxDuration.String()
-	plan.Metadata["scan_max_entries"] = strconv.Itoa(b.maxEntries)
-	plan.Metadata["workspace_scan_max_roots"] = strconv.Itoa(b.workspaceMaxRoots)
-	plan.Metadata["workspace_roots_visited"] = strconv.Itoa(b.workspaceRootsVisited)
-	plan.Metadata["workspace_roots_skipped"] = strconv.Itoa(b.workspaceRootsSkipped)
-	plan.Metadata["temp_scan_max_roots"] = strconv.Itoa(b.tempMaxRoots)
-	plan.Metadata["scan_entries_visited"] = strconv.Itoa(b.entries)
-	plan.Metadata["temp_roots_visited"] = strconv.Itoa(b.tempRoots)
-	plan.Metadata["temp_scan_max_roots_scope"] = "per_temp_scan_path"
-	plan.Metadata["temp_scan_paths_truncated"] = strconv.Itoa(b.tempPathsTruncated)
-	plan.Metadata["scan_budget_exhausted"] = strconv.FormatBool(b.partial())
-	if !b.partial() {
-		return
-	}
-	details := b.truncatedDetails()
-	plan.Metadata["scan_truncated_paths"] = strings.Join(details, "; ")
-	plan.Warnings = append(plan.Warnings,
-		"dev-artifacts scan budget was exhausted; dry-run evidence is partial and omitted paths are not cleanup candidates",
-		"dev-artifacts scan truncated at: "+strings.Join(details, "; "),
-	)
 }
 
 // DevArtifactsPlugin handles stale development artifact cleanup.
@@ -568,10 +219,12 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 		tempMinBytes := tempArtifactMinBytes(daCfg)
 		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
 		tempPaths := existingTempScanPaths(daCfg.TempScanPaths, home)
+		tempPool := scanBudget.rootPool(len(tempPaths))
 		for _, expanded := range tempPaths {
 			// Each temp scan path gets its own root budget so one huge path
 			// (e.g. /tmp full of nix-shell.*) cannot starve the next one.
-			pathBudget := scanBudget.tempPathBudget(len(tempPaths))
+			// Unused shares carry over to the paths after it.
+			pathBudget := tempPool.child(scanBudget.tempMaxRoots)
 			pathCtx, cancelPath := pathBudget.context(scanCtx)
 			// Known-heavy harness scratch first: it is the payload the scan
 			// budget must never starve (TIN-2690).
@@ -587,6 +240,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 			p.planTemporaryArtifacts(pathCtx, expanded, tempMinBytes, tempStaleAfter, daCfg, activeTempRoots, &targets, pathBudget)
 			p.planTemporaryGeneratedArtifacts(pathCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets, pathBudget)
 			cancelPath()
+			tempPool.done(pathBudget)
 			scanBudget.mergeTempPathBudget(pathBudget)
 		}
 	}
@@ -700,10 +354,12 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		nixTempRootMinBytes := nixTempRootMinBytes(daCfg)
 		nixTempRootStaleAfter := parseNixPolicyDuration(daCfg.NixTempRootStaleAfter, 24*time.Hour)
 		tempPaths := existingTempScanPaths(daCfg.TempScanPaths, home)
+		tempPool := scanBudget.rootPool(len(tempPaths))
 		for _, expanded := range tempPaths {
 			// Each temp scan path gets its own root budget so one huge path
 			// (e.g. /tmp full of nix-shell.*) cannot starve the next one.
-			pathBudget := scanBudget.tempPathBudget(len(tempPaths))
+			// Unused shares carry over to the paths after it.
+			pathBudget := tempPool.child(scanBudget.tempMaxRoots)
 			pathCtx, cancelPath := pathBudget.context(scanCtx)
 			p.cleanTemporaryScanPath(pathCtx, expanded, home, level, daCfg, active, activeTempRoots, activeScratchSessions, tracker, logger, pathBudget,
 				tempMinBytes, tempStaleAfter, nixTempRootMinBytes, nixTempRootStaleAfter, nodeAge, venvAge, rustAge, zigAge, &result)
@@ -711,6 +367,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			if pathBudget.exhausted() {
 				logger.Warn("temp scan path budget exhausted; continuing with next temp scan path", "path", expanded, "truncated_paths", strings.Join(pathBudget.truncatedDetails(), "; "))
 			}
+			tempPool.done(pathBudget)
 			scanBudget.mergeTempPathBudget(pathBudget)
 		}
 	}
@@ -729,7 +386,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 	}
 	if scanBudget.exhausted() {
-		logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+		logger.Warn("stopping dev artifact walks because the shared scan budget was exhausted; global cache lanes still run", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+		p.cleanGlobalDevCaches(ctx, level, home, daCfg, active, logger, &result)
 		return result
 	}
 
@@ -748,7 +406,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			}
 		}
 		if scanBudget.exhausted() {
-			logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+			logger.Warn("stopping dev artifact walks because the shared scan budget was exhausted; global cache lanes still run", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+			p.cleanGlobalDevCaches(ctx, level, home, daCfg, active, logger, &result)
 			return result
 		}
 
@@ -760,7 +419,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			}
 		}
 		if scanBudget.exhausted() {
-			logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+			logger.Warn("stopping dev artifact walks because the shared scan budget was exhausted; global cache lanes still run", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+			p.cleanGlobalDevCaches(ctx, level, home, daCfg, active, logger, &result)
 			return result
 		}
 
@@ -772,7 +432,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			}
 		}
 		if scanBudget.exhausted() {
-			logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+			logger.Warn("stopping dev artifact walks because the shared scan budget was exhausted; global cache lanes still run", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+			p.cleanGlobalDevCaches(ctx, level, home, daCfg, active, logger, &result)
 			return result
 		}
 
@@ -784,7 +445,8 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 			}
 		}
 		if scanBudget.exhausted() {
-			logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+			logger.Warn("stopping dev artifact walks because the shared scan budget was exhausted; global cache lanes still run", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+			p.cleanGlobalDevCaches(ctx, level, home, daCfg, active, logger, &result)
 			return result
 		}
 	}
@@ -803,10 +465,20 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 	}
 	if scanBudget.exhausted() {
-		logger.Warn("stopping dev artifact cleanup because scan budget was exhausted", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+		logger.Warn("stopping dev artifact walks because the shared scan budget was exhausted; global cache lanes still run", "truncated_paths", strings.Join(scanBudget.truncatedDetails(), "; "))
+		p.cleanGlobalDevCaches(ctx, level, home, daCfg, active, logger, &result)
 		return result
 	}
 
+	p.cleanGlobalDevCaches(ctx, level, home, daCfg, active, logger, &result)
+	return result
+}
+
+// cleanGlobalDevCaches runs the global cache lanes (Go build cache, pnpm
+// store, Haskell caches, LM Studio models). They do not walk the configured
+// roots and do not depend on scan evidence, so an exhausted walk budget does
+// not skip them (TIN-3342 PR4).
+func (p *DevArtifactsPlugin) cleanGlobalDevCaches(ctx context.Context, level CleanupLevel, home string, daCfg config.DevArtifactsConfig, active devArtifactActivity, logger *slog.Logger, result *CleanupResult) {
 	// Go build cache (not path-dependent - it's a global cache)
 	if daCfg.GoBuildCache && !active.GlobalFamilyActive("go-build-cache") {
 		freed := p.cleanGoBuildCache(ctx, level, logger)
@@ -842,7 +514,6 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 		}
 	}
 
-	return result
 }
 
 // existingTempScanPaths expands the configured temp scan paths and keeps the
@@ -3991,15 +3662,27 @@ func (p *DevArtifactsPlugin) findArtifactDirs(ctx context.Context, scanPath stri
 	if budget != nil {
 		selectedRoots = budget.selectWorkspaceRoots(key, roots)
 	}
+	// Each root walks against its own share of the family's budget. A root
+	// that uses its whole share is truncated on its own (partial evidence)
+	// and the walk continues with the next root, which inherits whatever the
+	// earlier roots left unused. Only the caller's own context ending stops
+	// the remaining roots; the family lanes pass the outer context, so that
+	// is a cancel, not the shared scan deadline.
+	pool := budget.rootPool(len(selectedRoots))
 	for _, root := range selectedRoots {
+		if ctx.Err() != nil {
+			budget.markContextError(ctx, root)
+			return
+		}
 		rootBudget := budget
 		if budget != nil {
-			rootBudget = budget.workspaceRootBudget(len(selectedRoots))
+			rootBudget = pool.child(0)
 		}
 		rootCtx, cancel := rootBudget.context(ctx)
 		p.findArtifactDirsInRoot(rootCtx, scanPath, root, targetName, markerFile, callback, rootBudget)
 		cancel()
 		if budget != nil {
+			pool.done(rootBudget)
 			budget.mergeWorkspaceRootBudget(rootBudget)
 			budget.recordWorkspaceCursor(key, root)
 		}
@@ -4096,7 +3779,7 @@ func (p *DevArtifactsPlugin) findArtifactDirsInRoot(ctx context.Context, scanPat
 			}
 		}
 
-		size, err := getDirSizeContext(ctx, path)
+		size, err := budget.sizeDir(ctx, path)
 		if err != nil {
 			budget.markContextError(ctx, path)
 			return err
