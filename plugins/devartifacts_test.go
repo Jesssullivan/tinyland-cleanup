@@ -1152,6 +1152,12 @@ func TestPlanCleanupReportsGeneratedArtifactsInsideStaleTemporaryRoots(t *testin
 	}
 
 	cfg := tempGeneratedArtifactConfig(tmpDir)
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, oldTime, oldTime)
+	})
 	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, logger)
 
 	rootTarget := findDevArtifactTarget(t, plan.Targets, "temporary-dev-artifact", root)

@@ -1634,6 +1634,9 @@ func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(ctx context.Context, scan
 				continue
 			}
 		}
+		if reason := temporaryRootIdleReason(ctx, root, staleAfter); reason != "" {
+			continue
+		}
 		callback(root)
 	}
 }

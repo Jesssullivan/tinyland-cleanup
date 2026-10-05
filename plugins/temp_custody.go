@@ -191,6 +191,16 @@ func temporaryRootCustodyReason(ctx context.Context, root string) string {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "temporary root identity is unavailable or not a real directory"
 	}
+	for ancestor := root; ; ancestor = filepath.Dir(ancestor) {
+		if _, err := os.Lstat(filepath.Join(ancestor, ".git")); err == nil {
+			return "temporary root is inside Git-owner custody"
+		} else if !os.IsNotExist(err) {
+			return "ancestor Git custody unavailable"
+		}
+		if filepath.Dir(ancestor) == ancestor {
+			break
+		}
+	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || int(st.Uid) != os.Geteuid() {
 		return "temporary root belongs to a different or unknown user"
@@ -264,13 +274,22 @@ func (p *DevArtifactsPlugin) recheckTemporaryRoot(ctx context.Context, root stri
 	if reason := temporaryRootActivityReason(p.activeTemporaryRoots(ctx, cfg.TempScanPaths, home), root); reason != "" {
 		return reason
 	}
-	newest := staleModTime(current)
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	return temporaryRootIdleReason(ctx, root, age)
+}
+
+func temporaryRootIdleReason(ctx context.Context, root string, age time.Duration) string {
+	newest := time.Time{}
+	count := 0
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		count++
+		if count > 100000 {
+			return fmt.Errorf("idle scan bound exceeded")
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -287,6 +306,7 @@ func (p *DevArtifactsPlugin) recheckTemporaryRoot(ctx context.Context, root stri
 	if age <= 0 || newest.After(time.Now().Add(-age)) {
 		return "temporary root contains recent activity"
 	}
+
 	return ""
 }
 
