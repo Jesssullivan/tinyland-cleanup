@@ -248,6 +248,10 @@ func releasedTemporaryRootReason(root string) string {
 	if err != nil {
 		return "disposable root custody receipt unreadable"
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil || fields["owner_uid"] == nil {
+		return "disposable root custody receipt has no explicit owner"
+	}
 	var receipt temporaryCustodyReceipt
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

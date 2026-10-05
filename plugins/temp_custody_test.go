@@ -67,7 +67,7 @@ func TestConfiguredTempActivityPaths(t *testing.T) {
 	}
 }
 func TestDisposableTempRootSafeguards(t *testing.T) {
-	cases := []string{"released", "missing receipt", "unreleased", "foreign receipt", "git clean", "git ignored", "nested git", "recent child", "protected child", "unknown activity", "active cwd", "replaced identity", "disabled"}
+	cases := []string{"released", "missing receipt", "unreleased", "foreign receipt", "missing uid", "git clean", "git ignored", "nested git", "recent child", "protected child", "unknown activity", "active cwd", "replaced identity", "disabled"}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
 			scan, root, cfg := releasedRootFixture(t)
@@ -78,6 +78,8 @@ func TestDisposableTempRootSafeguards(t *testing.T) {
 				os.Remove(filepath.Join(root, disposableTempReceipt))
 			case "unreleased":
 				os.WriteFile(filepath.Join(root, disposableTempReceipt), []byte(fmt.Sprintf(`{"path":%q,"owner_uid":%d,"state":"active","receipt":"fixture"}`, canonicalTempArtifactPath(root), os.Geteuid())), 0600)
+			case "missing uid":
+				os.WriteFile(filepath.Join(root, disposableTempReceipt), []byte(fmt.Sprintf(`{"path":%q,"state":"released","receipt":"fixture"}`, canonicalTempArtifactPath(root))), 0600)
 			case "foreign receipt":
 				os.WriteFile(filepath.Join(root, disposableTempReceipt), []byte(fmt.Sprintf(`{"path":%q,"owner_uid":%d,"state":"released","receipt":"fixture"}`, canonicalTempArtifactPath(root), os.Geteuid()+1)), 0600)
 			case "git clean", "git ignored":
