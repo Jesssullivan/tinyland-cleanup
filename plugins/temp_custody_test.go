@@ -151,3 +151,36 @@ func TestDisposableTempRootDeletesOwnedIdleFixture(t *testing.T) {
 		t.Fatalf("owned fixture not reaped: freed %d", freed)
 	}
 }
+
+func TestTemporaryProcActivityCustody(t *testing.T) {
+	proc := t.TempDir()
+	scan := t.TempDir()
+	root := filepath.Join(scan, "job")
+	process := filepath.Join(proc, "123")
+	if err := os.MkdirAll(filepath.Join(process, "fd"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	status := fmt.Sprintf("Uid: %d %d %d %d\n", os.Geteuid(), os.Geteuid(), os.Geteuid(), os.Geteuid())
+	if err := os.WriteFile(filepath.Join(process, "status"), []byte(status), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, filepath.Join(process, "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "has spaces"), filepath.Join(process, "fd", "7")); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, "")
+	if err != nil || temporaryRootActivityReason(roots, root) == "" {
+		t.Fatalf("own cwd/fd reference missed: %#v %v", roots, err)
+	}
+	os.WriteFile(filepath.Join(process, "status"), []byte("ownership unreadable"), 0600)
+	if _, err := temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, ""); err == nil {
+		t.Fatal("unknown process ownership accepted")
+	}
+	os.WriteFile(filepath.Join(process, "status"), []byte(fmt.Sprintf("Uid: %d %d %d %d\n", os.Geteuid()+1, os.Geteuid()+1, os.Geteuid()+1, os.Geteuid()+1)), 0600)
+	roots, err = temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, "")
+	if err != nil || len(roots) != 0 {
+		t.Fatalf("foreign process treated as own: %#v %v", roots, err)
+	}
+}

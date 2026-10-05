@@ -370,8 +370,10 @@ never a release. The configured `temp_artifact_stale_after` applies to the
 newest entry in the whole tree, including the receipt. Git worktrees (including
 nested repositories), foreign ownership, mount boundaries, protected subtrees,
 recent writes and incomplete process/cwd/open-file inspection protect the root.
-The process inventory requires `lsof`; unavailable or incomplete inventory
-protects all ordinary temporary roots. Activity, custody, identity and age are
+Linux inventories same-user process cwd and open files through `/proc`;
+Darwin uses `lsof`. Unavailable or incomplete inventory protects all ordinary
+temporary roots. Unrelated inaccessible cluster mounts do not poison Linux's
+same-user `/proc` inventory. Activity, custody, identity and age are
 checked again immediately before deletion. The final check narrows races but
 is not an exclusive lease: writers must honor the owner's release.
 

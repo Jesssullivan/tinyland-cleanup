@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -65,6 +66,13 @@ func inspectTemporaryRootActivity(ctx context.Context, paths []string, home stri
 	roots = tempArtifactRootsFromProcessOutput(string(output), paths, home)
 	// NUL-delimited fields preserve spaces and newlines in paths; cwd records
 	// are included by default alongside regular file descriptors.
+	if runtime.GOOS == "linux" {
+		files, err := linuxTemporaryRootActivity(probeCtx, paths, home)
+		for path, reason := range files {
+			roots[path] = reason
+		}
+		return roots, err
+	}
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(probeCtx, "lsof", "-nP", "-a", "-u", strconv.Itoa(os.Geteuid()), "-F0pn")
 	cmd.Stderr = &stderr
@@ -74,6 +82,83 @@ func inspectTemporaryRootActivity(ctx context.Context, paths []string, home stri
 	}
 	for path, reason := range tempRootsFromOpenFiles(string(output), paths, home) {
 		roots[path] = reason
+	}
+	return roots, nil
+}
+
+// Linux /proc keeps unrelated inaccessible cluster mounts outside this
+// same-user observation. Permission failures for an owned process remain unknown.
+func linuxTemporaryRootActivity(ctx context.Context, paths []string, home string) (map[string]string, error) {
+	return temporaryRootActivityFromProc(ctx, "/proc", paths, home)
+}
+
+func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []string, home string) (map[string]string, error) {
+	roots := map[string]string{}
+	entries, err := os.ReadDir(proc)
+	if err != nil {
+		return roots, err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return roots, err
+		}
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		process := filepath.Join(proc, entry.Name())
+		status, err := os.ReadFile(filepath.Join(process, "status"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return roots, fmt.Errorf("process ownership unavailable")
+		}
+		uid := -1
+		for _, line := range strings.Split(string(status), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[0] == "Uid:" {
+				uid, err = strconv.Atoi(fields[2])
+				break
+			}
+		}
+		if err != nil || uid < 0 {
+			return roots, fmt.Errorf("process ownership unknown")
+		}
+		if uid != os.Geteuid() {
+			continue
+		}
+		record := func(path string) {
+			if root := tempArtifactRootForPath(strings.TrimSuffix(path, " (deleted)"), paths, home); root != "" {
+				roots[root] = "cwd/open file held by pid " + entry.Name()
+			}
+		}
+		cwd, err := os.Readlink(filepath.Join(process, "cwd"))
+		if os.IsNotExist(err) {
+			continue
+		} // exited process or kernel thread
+		if err != nil {
+			return roots, fmt.Errorf("owned process cwd unavailable")
+		}
+		record(cwd)
+		fds, err := os.ReadDir(filepath.Join(process, "fd"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return roots, fmt.Errorf("owned process open files unavailable")
+		}
+		for _, fd := range fds {
+			path, err := os.Readlink(filepath.Join(process, "fd", fd.Name()))
+			if os.IsNotExist(err) {
+				continue
+			} // closed after the fd snapshot
+			if err != nil {
+				return roots, fmt.Errorf("owned process file identity unavailable")
+			}
+			if filepath.IsAbs(path) {
+				record(path)
+			}
+		}
 	}
 	return roots, nil
 }
