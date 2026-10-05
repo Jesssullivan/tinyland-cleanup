@@ -32,7 +32,6 @@ import (
 
 const devArtifactRecentOutputGrace = 2 * time.Hour
 
-var tempArtifactPathPattern = regexp.MustCompile(`(?:/private)?/tmp/[^\s"'<>]+|/var/tmp/[^\s"'<>]+`)
 var absoluteDevArtifactPathPattern = regexp.MustCompile(`(?:~|/)[^\s"'<>]+`)
 var nixTempRootNamePattern = regexp.MustCompile(`^(?:nix-shell\.[A-Za-z0-9]+|nix-develop-\d+-\d+|nix-\d+-\d+|nix-build-[A-Za-z0-9._+@=-]+-\d+)$`)
 var temporaryProofLaneNamePattern = regexp.MustCompile(`^t[0-9]+[A-Za-z]*-[A-Za-z0-9._-]+$`)
@@ -54,6 +53,8 @@ type devArtifactProcessCandidate struct {
 // DevArtifactsPlugin handles stale development artifact cleanup.
 type DevArtifactsPlugin struct {
 	activeProcesses func(context.Context) (map[string]string, error)
+	tempActivity    func(context.Context, []string, string) (map[string]string, error)
+	tempMounts      temporaryMountInventory
 	// removeAll is os.RemoveAll unless a test injects a fake.
 	removeAll func(string) error
 
@@ -214,7 +215,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 
 	var targets []CleanupTarget
 	if daCfg.TempArtifacts {
-		activeTempRoots := activeTempArtifactRoots(ctx, daCfg.TempScanPaths, home)
+		activeTempRoots := p.activeTemporaryRoots(ctx, daCfg.TempScanPaths, home)
 		activeScratchSessions := activeHarnessScratchSessions(ctx, daCfg.TempScanPaths, home, daCfg)
 		tempMinBytes := tempArtifactMinBytes(daCfg)
 		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
@@ -238,6 +239,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 				p.planNixTemporaryRoots(pathCtx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, nixTempRootDeletes, daCfg, activeTempRoots, &targets, pathBudget)
 			}
 			p.planTemporaryArtifacts(pathCtx, expanded, tempMinBytes, tempStaleAfter, daCfg, activeTempRoots, &targets, pathBudget)
+			p.planDisposableTemporaryRoots(pathCtx, expanded, home, level, daCfg, activeTempRoots, &targets, pathBudget)
 			p.planTemporaryGeneratedArtifacts(pathCtx, expanded, tempMinBytes, tempStaleAfter, nodeAge, venvAge, rustAge, zigAge, mutates, daCfg, active, activeTempRoots, tracker, &targets, pathBudget)
 			cancelPath()
 			tempPool.done(pathBudget)
@@ -347,7 +349,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	// Incident-oriented temp roots are cheap to classify and should run before
 	// deep workspace walks so a large ~/git tree cannot starve /private/tmp cleanup.
 	if daCfg.TempArtifacts {
-		activeTempRoots := activeTempArtifactRoots(ctx, daCfg.TempScanPaths, home)
+		activeTempRoots := p.activeTemporaryRoots(ctx, daCfg.TempScanPaths, home)
 		activeScratchSessions := activeHarnessScratchSessions(ctx, daCfg.TempScanPaths, home, daCfg)
 		tempMinBytes := tempArtifactMinBytes(daCfg)
 		tempStaleAfter := parseNixPolicyDuration(daCfg.TempArtifactStaleAfter, 6*time.Hour)
@@ -535,11 +537,18 @@ func existingTempScanPaths(scanPaths []string, home string) []string {
 // path only.
 func (p *DevArtifactsPlugin) cleanTemporaryScanPath(ctx context.Context, expanded, home string, level CleanupLevel, daCfg config.DevArtifactsConfig, active devArtifactActivity, activeTempRoots, activeScratchSessions map[string]string, tracker *devArtifactGitTracker, logger *slog.Logger, budget *devArtifactScanBudget,
 	tempMinBytes int64, tempStaleAfter time.Duration, nixTempRootMinBytes int64, nixTempRootStaleAfter time.Duration, nodeAge, venvAge, rustAge, zigAge time.Duration, result *CleanupResult) {
+	if reason := activeTempRoots["*"]; reason != "" {
+		logger.Warn("preserving temporary scan path because activity inventory is incomplete", "path", expanded, "reason", reason)
+		return
+	}
 	record := func(freed int64) {
 		result.BytesFreed += freed
 		if freed > 0 {
 			result.ItemsCleaned++
 		}
+	}
+	if daCfg.TempRootCleanup && level >= LevelAggressive {
+		record(p.cleanDisposableTemporaryRoots(ctx, expanded, home, level, daCfg, activeTempRoots, logger, budget))
 	}
 	// Known-heavy harness scratch first: it is the payload the scan
 	// budget must never starve (TIN-2690).
@@ -1021,7 +1030,7 @@ func (p *DevArtifactsPlugin) planTemporaryArtifacts(ctx context.Context, scanPat
 			// exhausted the scan budget (TIN-2690).
 			continue
 		}
-		activeReason := activeRoots[canonicalTempArtifactPath(path)]
+		activeReason := temporaryRootActivityReason(activeRoots, path)
 		protected := p.isProtected(path, daCfg.ProtectPaths)
 		if activeReason != "" {
 			*targets = append(*targets, p.temporaryArtifactTarget(path, 0, staleModTime(info), staleAfter, now, protected, activeReason))
@@ -1382,7 +1391,7 @@ func harnessScratchSessionsFromProcessOutput(output string, scanPaths []string, 
 		if len(fields) > 1 {
 			command = filepath.Base(fields[1])
 		}
-		for _, rawPath := range tempArtifactPathPattern.FindAllString(line, -1) {
+		for _, rawPath := range absoluteDevArtifactPathPattern.FindAllString(line, -1) {
 			if session := harnessScratchSessionForPath(rawPath, scanPaths, home, daCfg); session != "" {
 				if _, ok := sessions[session]; !ok {
 					sessions[session] = command
@@ -1435,7 +1444,7 @@ func (p *DevArtifactsPlugin) planNixTemporaryRoots(ctx context.Context, scanPath
 		if !canManageDevTempRoot(info) {
 			continue
 		}
-		activeReason := activeRoots[canonicalTempArtifactPath(path)]
+		activeReason := temporaryRootActivityReason(activeRoots, path)
 		protected := p.isProtected(path, daCfg.ProtectPaths)
 		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, protected, activeReason, canDelete)
 		if target.Action != "delete" {
@@ -1487,7 +1496,7 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 		if p.knownUndeletable(path) {
 			continue
 		}
-		activeReason := activeRoots[canonicalTempArtifactPath(path)]
+		activeReason := temporaryRootActivityReason(activeRoots, path)
 		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, p.isProtected(path, protectPaths), activeReason, true)
 		if target.Action != "delete" {
 			if err := budget.checkTempRoot(ctx, path); err != nil {
@@ -1543,18 +1552,43 @@ func (p *DevArtifactsPlugin) cleanTemporaryGeneratedArtifacts(ctx context.Contex
 	var totalFreed int64
 	budget := optionalDevArtifactScanBudget(budgets)
 	p.forEachStaleTemporaryRoot(ctx, scanPath, minBytes, staleAfter, daCfg.ProtectPaths, activeRoots, func(root string) {
-		logger.Debug("scanning stale temporary root for generated artifacts", "path", root)
+		rootInfo, err := os.Lstat(root)
+		if err != nil {
+			return
+		}
+		var targets []CleanupTarget
 		if daCfg.NodeModules && !active.GlobalFamilyActive("node_modules") {
-			totalFreed += p.cleanNodeModules(ctx, root, nodeAge, daCfg.ProtectPaths, active, tracker, logger, budget)
+			p.planNodeModules(ctx, root, nodeAge, true, daCfg.ProtectPaths, active, tracker, &targets, budget)
 		}
 		if daCfg.PythonVenvs && !active.GlobalFamilyActive("python-venv") {
-			totalFreed += p.cleanPythonVenvs(ctx, root, venvAge, daCfg.ProtectPaths, active, tracker, logger, budget)
+			p.planPythonVenvs(ctx, root, venvAge, true, daCfg.ProtectPaths, active, tracker, &targets, budget)
 		}
 		if daCfg.RustTargets && !active.GlobalFamilyActive("rust-target") {
-			totalFreed += p.cleanRustTargets(ctx, root, rustAge, daCfg.ProtectPaths, active, tracker, logger, budget)
+			p.planRustTargets(ctx, root, rustAge, true, daCfg.ProtectPaths, active, tracker, &targets, budget)
 		}
 		if daCfg.ZigArtifacts && !active.GlobalFamilyActive("zig-artifact") {
-			totalFreed += p.cleanZigArtifacts(ctx, root, zigAge, daCfg.ProtectPaths, active, tracker, logger, budget)
+			p.planZigArtifacts(ctx, root, zigAge, true, daCfg.ProtectPaths, active, tracker, &targets, budget)
+		}
+		for _, target := range targets {
+			if target.Action != "delete" || !pathWithin(target.Path, root) {
+				continue
+			}
+			// Recheck activity, Git custody, root identity and idle age after the walk.
+			if reason := p.recheckTemporaryRoot(ctx, root, rootInfo, staleAfter, daCfg); reason != "" {
+				logger.Debug("preserving temporary root after final check", "path", root, "reason", reason)
+				return
+			}
+			targetInfo, err := os.Lstat(target.Path)
+			if err != nil || targetInfo.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			if newDevArtifactGitTracker().ContainsTrackedFiles(target.Path) {
+				continue
+			}
+			if err := p.removeDevArtifactPath(target.Path, logger); err != nil {
+				continue
+			}
+			totalFreed += target.Bytes
 		}
 	}, budget)
 	return totalFreed
@@ -1582,10 +1616,10 @@ func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(ctx context.Context, scan
 		if err != nil {
 			continue
 		}
-		if p.isProtected(root, protectPaths) {
+		if harnessSessionProtected(p, root, protectPaths) || pathExists(filepath.Join(root, disposableTempReceipt)) || temporaryRootCustodyReason(ctx, root, p.tempMounts) != "" {
 			continue
 		}
-		if activeRoots[canonicalTempArtifactPath(root)] != "" {
+		if temporaryRootActivityReason(activeRoots, root) != "" {
 			continue
 		}
 		if staleAfter > 0 && staleModTime(info).After(now.Add(-staleAfter)) {
@@ -1600,6 +1634,9 @@ func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(ctx context.Context, scan
 			if size < minBytes {
 				continue
 			}
+		}
+		if reason := temporaryRootIdleReason(ctx, root, staleAfter); reason != "" {
+			continue
 		}
 		callback(root)
 	}
@@ -2846,18 +2883,11 @@ func parseDevArtifactProcessCWDs(output string) map[string]string {
 }
 
 func activeTempArtifactRoots(ctx context.Context, scanPaths []string, home string) map[string]string {
-	if len(scanPaths) == 0 {
-		return nil
-	}
-	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
-	output, err := cmd.Output()
+	roots, err := inspectTemporaryRootActivity(ctx, scanPaths, home)
 	if err != nil {
-		return nil
+		roots["*"] = "temporary process activity could not be verified: " + err.Error()
 	}
-	return tempArtifactRootsFromProcessOutput(string(output), scanPaths, home)
+	return roots
 }
 
 func tempArtifactRootsFromProcessOutput(output string, scanPaths []string, home string) map[string]string {
@@ -2871,8 +2901,8 @@ func tempArtifactRootsFromProcessOutput(output string, scanPaths []string, home 
 		if len(fields) > 1 {
 			command = filepath.Base(fields[1])
 		}
-		for _, rawPath := range tempArtifactPathPattern.FindAllString(line, -1) {
-			if root := tempArtifactRootForPath(rawPath, scanPaths, home); root != "" {
+		for _, rawPath := range absoluteDevArtifactPathPattern.FindAllString(line, -1) {
+			if root := tempArtifactRootForPath(expandHome(rawPath, home), scanPaths, home); root != "" {
 				if _, ok := roots[root]; !ok {
 					roots[root] = command
 				}

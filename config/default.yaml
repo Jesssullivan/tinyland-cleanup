@@ -260,6 +260,8 @@ dev_artifacts:
   # Review-only: surface large top-level temp proof/output trees without
   # deleting them automatically. Darwin compiled defaults use /private/tmp.
   temp_artifacts: true
+  # Only released roots with .tinyland-cleanup-disposable.json receipts; never Git trees.
+  temp_root_cleanup: false
   temp_scan_paths:
     - /private/tmp
   temp_scan_max_roots: 128
