@@ -353,3 +353,29 @@ with recurring aggressive pressure can set `cooldown_bypass_level: aggressive`
 so the daemon keeps attempting eligible cleanup while still below the critical
 threshold. Treat broader active-use evidence and CLI target-free overrides as
 the next policy layer.
+
+### Released disposable temporary roots
+
+`dev_artifacts.temp_root_cleanup` defaults to false. When enabled, ordinary
+roots under `temp_scan_paths` are eligible only with an explicit same-user
+`.tinyland-cleanup-disposable.json` receipt, for example:
+
+```json
+{"path":"/srv/scratch/jess/tmp/owned-job","owner_uid":1000,"state":"released","receipt":"TIN-5128 owner release and live-session identity check"}
+```
+
+The path must be the root's canonical path and the UID must match the daemon.
+Create a receipt only after the owner releases the whole tree; age alone is
+never a release. The configured `temp_artifact_stale_after` applies to the
+newest entry in the whole tree, including the receipt. Git worktrees (including
+nested repositories), foreign ownership, mount boundaries, protected subtrees,
+recent writes and incomplete process/cwd/open-file inspection protect the root.
+The process inventory requires `lsof`; unavailable or incomplete inventory
+protects all ordinary temporary roots. Activity, custody, identity and age are
+checked again immediately before deletion. The final check narrows races but
+is not an exclusive lease: writers must honor the owner's release.
+
+Unreceipted top-level roots remain review-only. Nested generated-artifact
+cleanup now checks temporary-root custody and repeats activity/identity/idle
+checks before each deletion. Agent indexes and transcripts have no new deletion
+policy. Nix and harness scratch retain their separate policies.

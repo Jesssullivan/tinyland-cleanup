@@ -266,6 +266,7 @@ go_library(
         "plugins/rke2.go",
         "plugins/scan_budget.go",
         "plugins/sudo.go",
+        "plugins/temp_custody.go",
     ] + select({
         "@platforms//os:macos": [
             "plugins/apfs_darwin.go",
@@ -313,6 +314,7 @@ go_test(
         "plugins/podman_compaction_test.go",
         "plugins/scan_budget_test.go",
         "plugins/sudo_test.go",
+        "plugins/temp_custody_test.go",
     ] + select({
         "@platforms//os:macos": [
             "plugins/apfs_darwin_test.go",

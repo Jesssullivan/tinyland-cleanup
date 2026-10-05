@@ -1191,6 +1191,12 @@ func TestCleanupPrunesGeneratedArtifactsInsideStaleTemporaryRoots(t *testing.T) 
 		t.Fatal(err)
 	}
 
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chtimes(path, oldTime, oldTime)
+	})
 	result := p.Cleanup(context.Background(), LevelCritical, tempGeneratedArtifactConfig(tmpDir), logger)
 	if pathExists(filepath.Join(root, "target")) {
 		t.Fatal("expected generated Rust target inside stale temporary root to be removed")
@@ -2211,6 +2217,7 @@ func findDevArtifactTargetMaybe(targets []CleanupTarget, targetType, path string
 
 func newDevArtifactsPluginWithActive(active map[string]string) *DevArtifactsPlugin {
 	return &DevArtifactsPlugin{
+		tempActivity: func(context.Context, []string, string) (map[string]string, error) { return map[string]string{}, nil },
 		activeProcesses: func(context.Context) (map[string]string, error) {
 			return active, nil
 		},

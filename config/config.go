@@ -449,6 +449,8 @@ type DevArtifactsConfig struct {
 	WorkspaceScanMaxRoots int `yaml:"workspace_scan_max_roots"`
 	// TempArtifacts enables review-only reporting for large top-level temp artifacts
 	TempArtifacts bool `yaml:"temp_artifacts"`
+	// TempRootCleanup reaps only released, same-user roots with explicit custody receipts.
+	TempRootCleanup bool `yaml:"temp_root_cleanup"`
 	// TempScanPaths are top-level temporary directories scanned for large generated artifacts
 	TempScanPaths []string `yaml:"temp_scan_paths"`
 	// TempScanMaxRoots bounds top-level temp roots inspected per temp scan path
