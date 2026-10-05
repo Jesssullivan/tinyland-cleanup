@@ -54,6 +54,7 @@ type devArtifactProcessCandidate struct {
 type DevArtifactsPlugin struct {
 	activeProcesses func(context.Context) (map[string]string, error)
 	tempActivity    func(context.Context, []string, string) (map[string]string, error)
+	tempMounts      temporaryMountInventory
 	// removeAll is os.RemoveAll unless a test injects a fake.
 	removeAll func(string) error
 
@@ -1615,7 +1616,7 @@ func (p *DevArtifactsPlugin) forEachStaleTemporaryRoot(ctx context.Context, scan
 		if err != nil {
 			continue
 		}
-		if harnessSessionProtected(p, root, protectPaths) || pathExists(filepath.Join(root, disposableTempReceipt)) || temporaryRootCustodyReason(ctx, root) != "" {
+		if harnessSessionProtected(p, root, protectPaths) || pathExists(filepath.Join(root, disposableTempReceipt)) || temporaryRootCustodyReason(ctx, root, p.tempMounts) != "" {
 			continue
 		}
 		if temporaryRootActivityReason(activeRoots, root) != "" {

@@ -267,22 +267,26 @@ go_library(
         "plugins/scan_budget.go",
         "plugins/sudo.go",
         "plugins/temp_custody.go",
+        "plugins/temp_mounts.go",
     ] + select({
         "@platforms//os:macos": [
             "plugins/apfs_darwin.go",
             "plugins/darwin.go",
             "plugins/fs_ctime_darwin.go",
+            "plugins/temp_mounts_darwin.go",
             "plugins/lima.go",
             "plugins/nix_process_argv_darwin.go",
         ],
         "@platforms//os:linux": [
             "plugins/fs_ctime_linux.go",
+            "plugins/temp_mounts_linux.go",
             "plugins/github_runner.go",
             "plugins/nix_process_argv_linux.go",
             "plugins/yum.go",
         ],
         "//conditions:default": [
             "plugins/fs_ctime_other.go",
+            "plugins/temp_mounts_other.go",
             "plugins/github_runner.go",
             "plugins/nix_process_argv_other.go",
             "plugins/yum.go",
@@ -315,6 +319,7 @@ go_test(
         "plugins/scan_budget_test.go",
         "plugins/sudo_test.go",
         "plugins/temp_custody_test.go",
+        "plugins/temp_mounts_test.go",
     ] + select({
         "@platforms//os:macos": [
             "plugins/apfs_darwin_test.go",

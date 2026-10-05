@@ -186,7 +186,14 @@ func tempRootsFromOpenFiles(output string, paths []string, home string) map[stri
 
 // Never claim a Git tree is disposable, even when it is clean and pushed.
 // Dirty/untracked/ignored content and nested worktrees remain Git-owner custody.
-func temporaryRootCustodyReason(ctx context.Context, root string) string {
+func temporaryRootCustodyReason(ctx context.Context, root string, inventories ...temporaryMountInventory) string {
+	var inventory temporaryMountInventory
+	if len(inventories) > 0 {
+		inventory = inventories[0]
+	}
+	if reason := temporaryMountProtectReason(ctx, root, inventory); reason != "" {
+		return reason
+	}
 	info, err := os.Lstat(root)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "temporary root identity is unavailable or not a real directory"
@@ -271,14 +278,18 @@ func (p *DevArtifactsPlugin) recheckTemporaryRoot(ctx context.Context, root stri
 	if harnessSessionProtected(p, root, cfg.ProtectPaths) {
 		return "root contains a protected path"
 	}
-	if reason := temporaryRootCustodyReason(ctx, root); reason != "" {
+	if reason := temporaryRootCustodyReason(ctx, root, p.tempMounts); reason != "" {
 		return reason
 	}
 	home, _ := os.UserHomeDir()
 	if reason := temporaryRootActivityReason(p.activeTemporaryRoots(ctx, cfg.TempScanPaths, home), root); reason != "" {
 		return reason
 	}
-	return temporaryRootIdleReason(ctx, root, age)
+	if reason := temporaryRootIdleReason(ctx, root, age); reason != "" {
+		return reason
+	}
+	// The walk/process checks do not hold a mount lease: observe again last.
+	return temporaryMountProtectReason(ctx, root, p.tempMounts)
 }
 
 func temporaryRootIdleReason(ctx context.Context, root string, age time.Duration) string {
