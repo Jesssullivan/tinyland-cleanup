@@ -3822,10 +3822,10 @@ func (p *DevArtifactsPlugin) findArtifactDirsInRoot(ctx context.Context, scanPat
 	})
 }
 
-// getGoCacheDir returns the Go build cache directory.
+// getGoCacheDir returns the Go build cache directory, or "" when the bounded
+// `go env` probe fails or times out.
 func (p *DevArtifactsPlugin) getGoCacheDir(ctx context.Context) string {
-	cmd := exec.CommandContext(ctx, "go", "env", "GOCACHE")
-	output, err := cmd.Output()
+	output, err := goEnvOutput(ctx, "GOCACHE")
 	if err != nil {
 		return ""
 	}

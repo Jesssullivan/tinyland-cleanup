@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- cache, darwin, dev-artifacts: every `go env GOCACHE` probe now runs under its
+  own 15 s deadline (`goEnvOutput`). On 2026-10-07 a launchd daemon on a lab
+  Mac hung for hours on one such child, held on a pending macOS privacy (TCC)
+  prompt because its Go toolchain lives on an external volume; the probe only
+  had the cycle context, which has no deadline. A probe that does not answer
+  in time is now treated like a missing toolchain and the Go cache is skipped
+  for that cycle.
+
 ## [0.4.2] - 2026-10-04
 
 ### Added

@@ -74,7 +74,7 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	// Go build cache (moderate+, separate from module cache)
 	if level >= LevelModerate {
 		if _, err := exec.LookPath("go"); err == nil {
-			if output, err := exec.CommandContext(ctx, "go", "env", "GOCACHE").Output(); err == nil {
+			if output, err := goEnvOutput(ctx, "GOCACHE"); err == nil {
 				goCacheDir := strings.TrimSpace(string(output))
 				if goCacheDir != "" && goCacheDir != "off" {
 					sizeBefore := getDirSize(goCacheDir)
