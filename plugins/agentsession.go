@@ -69,6 +69,12 @@ type agentSessionDeny struct {
 	roots         []string // existing matches and their resolved targets
 	carveouts     []string // expanded bazel_bases carve-out directories (literal and resolved)
 	resolveErrors []string
+
+	// Indexes for the walk's per-directory checks, built once per cycle.
+	patternsByDir map[string][]string // pattern parent directory -> patterns
+	slowPatterns  []string            // patterns with a glob above their last element
+	rootSet       map[string]bool
+	carveSet      map[string]bool
 }
 
 // newAgentSessionDeny builds the deny set for one cycle.
@@ -141,7 +147,36 @@ func newAgentSessionDeny(home string, uid int, tmpdir string, extra []string, ca
 			}
 		}
 	}
+	d.index()
 	return d
+}
+
+func (d *agentSessionDeny) index() {
+	d.patternsByDir = map[string][]string{}
+	d.rootSet = map[string]bool{}
+	d.carveSet = map[string]bool{}
+	for _, pattern := range d.patterns {
+		dir := filepath.Dir(pattern)
+		if strings.ContainsAny(dir, "*?[") {
+			d.slowPatterns = append(d.slowPatterns, pattern)
+			continue
+		}
+		d.patternsByDir[dir] = append(d.patternsByDir[dir], pattern)
+	}
+	for _, r := range d.roots {
+		d.rootSet[r] = true
+	}
+	for _, c := range d.carveouts {
+		d.carveSet[c] = true
+	}
+}
+
+// bbUnder is a lexical "path is root or below it" for cleaned absolute paths.
+func bbUnder(path, root string) bool {
+	if path == root || root == "/" {
+		return true
+	}
+	return strings.HasPrefix(path, root) && len(path) > len(root) && path[len(root)] == '/'
 }
 
 // defaultAgentSessionDeny is the compiled-in set for the current user with no
@@ -214,35 +249,68 @@ func (d *agentSessionDeny) deniedBelow(path, boundary string) (string, bool) {
 }
 
 func (d *agentSessionDeny) deniedPath(p, boundary string) (string, bool) {
-	below := func(q string) bool {
-		return boundary == "" || (pathInsideRoot(q, boundary) && filepath.Clean(q) != filepath.Clean(boundary))
+	if d.rootSet == nil {
+		d.index()
 	}
+	p = filepath.Clean(p)
 	for q := p; ; q = filepath.Dir(q) {
-		if !below(q) {
+		if boundary != "" && (q == boundary || !bbUnder(q, boundary)) {
 			break
 		}
-		for _, pattern := range d.patterns {
+		for _, pattern := range d.patternsByDir[filepath.Dir(q)] {
 			if ok, _ := filepath.Match(pattern, q); ok {
 				return "agent-session store " + pattern + " (TIN-5268)", true
 			}
 		}
-		if name := filepath.Base(q); name != "" {
-			for _, glob := range agentSessionDirNames {
-				if ok, _ := filepath.Match(glob, name); ok {
-					return "agent-session directory " + q + " (TIN-5268)", true
-				}
+		for _, pattern := range d.slowPatterns {
+			if ok, _ := filepath.Match(pattern, q); ok {
+				return "agent-session store " + pattern + " (TIN-5268)", true
 			}
+		}
+		if isAgentSessionDirName(filepath.Base(q)) {
+			return "agent-session directory " + q + " (TIN-5268)", true
+		}
+		if d.rootSet[q] {
+			return "inside agent-session store " + q + " (TIN-5268)", true
 		}
 		if q == "/" || q == "." || filepath.Dir(q) == q {
 			break
 		}
 	}
-	for _, r := range d.roots {
-		if pathInsideRoot(p, r) && below(r) {
-			return "inside agent-session store " + r + " (TIN-5268)", true
+	return "", false
+}
+
+// carveoutForLiteral is carveoutFor without symlink resolution, for physical
+// walk paths.
+func (d *agentSessionDeny) carveoutForLiteral(p string) string {
+	if d == nil || len(d.carveouts) == 0 {
+		return ""
+	}
+	if d.carveSet == nil {
+		d.index()
+	}
+	for q := filepath.Clean(p); ; q = filepath.Dir(q) {
+		if d.carveSet[q] {
+			return q
+		}
+		if q == "/" || q == "." || filepath.Dir(q) == q {
+			return ""
 		}
 	}
-	return "", false
+}
+
+// leadsToCarveoutLiteral is leadsToCarveout without symlink resolution.
+func (d *agentSessionDeny) leadsToCarveoutLiteral(p string) bool {
+	if d == nil {
+		return false
+	}
+	p = filepath.Clean(p)
+	for _, c := range d.carveouts {
+		if c != p && bbUnder(c, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // containsDenied reports a denied store that lies inside path (or is path):

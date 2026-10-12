@@ -666,3 +666,31 @@ func TestBBCmdlineNamesIsPathBounded(t *testing.T) {
 		t.Fatal("a sibling base with a longer name matched")
 	}
 }
+
+func TestBazelBasesDueHonoursIntervalAndPressure(t *testing.T) {
+	f := newBBFixture(t)
+	pol, err := f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	f.plugin.env.now = func() time.Time { return now }
+	if !f.plugin.due(pol, true) {
+		t.Fatal("the first cycle is not due")
+	}
+	f.plugin.lastDiscovery = now.Add(-10 * time.Minute)
+	if f.plugin.due(pol, true) {
+		t.Fatal("due inside the discovery interval with no pressure")
+	}
+	f.usage = func(string) (bbUsage, error) { return bbUsage{BytesTotal: 100, BytesUsed: 80}, nil }
+	if !f.plugin.due(pol, true) {
+		t.Fatal("apply mode under pressure is not due after 5 minutes")
+	}
+	if f.plugin.due(pol, false) {
+		t.Fatal("report mode walked again under pressure inside its interval")
+	}
+	f.plugin.lastDiscovery = now.Add(-2 * time.Minute)
+	if f.plugin.due(pol, true) {
+		t.Fatal("apply mode under pressure walked again within 5 minutes")
+	}
+}

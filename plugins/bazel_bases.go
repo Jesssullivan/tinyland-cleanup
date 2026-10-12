@@ -154,7 +154,7 @@ func (a *bbActivity) index(path, why string, within []string) {
 	if len(within) > 0 {
 		in := false
 		for _, w := range within {
-			if pathInsideRoot(p, w) {
+			if bbUnder(p, w) {
 				in = true
 				break
 			}
@@ -489,12 +489,21 @@ func (pol *bbPolicy) windows(kind string) (time.Duration, time.Duration) {
 	return idle, pressure
 }
 
+// bbPressureMinInterval bounds how often an apply-mode cycle walks again
+// while a root's mount stays under pressure.
+const bbPressureMinInterval = 5 * time.Minute
+
 // due reports whether a cycle should run now: the discovery interval has
-// passed, or a root's mount is under pressure.
-func (p *BazelBasesPlugin) due(pol *bbPolicy) bool {
+// passed, or (apply mode only) a root's mount is under pressure and the last
+// walk is at least bbPressureMinInterval old. Report mode keeps the interval:
+// it relieves nothing, so walking every poll would only cost IO.
+func (p *BazelBasesPlugin) due(pol *bbPolicy, apply bool) bool {
 	now := p.env.now()
 	if p.lastDiscovery.IsZero() || now.Sub(p.lastDiscovery) >= pol.interval {
 		return true
+	}
+	if !apply || now.Sub(p.lastDiscovery) < bbPressureMinInterval {
+		return false
 	}
 	for _, r := range pol.roots {
 		dev, err := deviceID(r)
@@ -585,10 +594,10 @@ func (p *BazelBasesPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg 
 		result.Error = err
 		return result
 	}
-	if !p.due(pol) {
+	apply := pol.cfg.Mode == config.BazelBasesModeApply
+	if !p.due(pol, apply) {
 		return result
 	}
-	apply := pol.cfg.Mode == config.BazelBasesModeApply
 	cycle := p.run(ctx, pol, apply, logger)
 	p.lastDiscovery = p.env.now()
 	if err := p.writeReceipts(pol, cycle); err != nil {
@@ -1174,7 +1183,9 @@ func bbMeasureTree(ctx context.Context, root string, deadline time.Time) (int64,
 	return bytes, inodes, "", err
 }
 
-// discover walks the roots and returns every structural output base.
+// discover walks the roots and returns every structural output base. Each
+// directory is read once; a symlink is never followed (a DirEntry for a
+// symlink is not a directory) and no file system boundary is crossed.
 func (p *BazelBasesPlugin) discover(ctx context.Context, pol *bbPolicy, cycle *bbCycle) []*bbRow {
 	var rows []*bbRow
 	limit := time.Duration(pol.cfg.MaxDiscoverySeconds) * time.Second
@@ -1183,6 +1194,89 @@ func (p *BazelBasesPlugin) discover(ctx context.Context, pol *bbPolicy, cycle *b
 	skip := func(path, reason string) {
 		if len(cycle.Skipped) < 50 {
 			cycle.Skipped = append(cycle.Skipped, bbSkip{Path: path, Reason: reason})
+		}
+	}
+	deny := pol.deny
+	stopped := false
+	var walk func(root string, rootDev uint64, dir string, depth int)
+	walk = func(root string, rootDev uint64, dir string, depth int) {
+		if stopped {
+			return
+		}
+		if ctx.Err() != nil || (limit > 0 && time.Since(started) > limit) {
+			cycle.Partial, stopped = true, true
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if dir != root && len(cycle.Errors) < 50 {
+				cycle.Errors = append(cycle.Errors, fmt.Sprintf("%s: %v", dir, err))
+			}
+			return
+		}
+		names := make(map[string]bool, len(entries))
+		for _, e := range entries {
+			names[e.Name()] = true
+		}
+		if names["A-server.jar"] && (names["build-label.txt"] || names["install_base_key"]) {
+			return
+		}
+		if bbIsOutputBase(dir, names) {
+			rows = append(rows, &bbRow{
+				Path:      dir,
+				Root:      root,
+				BasesOnly: pol.basesOnlyRoot(dir),
+				Carveout:  deny.carveoutForLiteral(dir),
+				Decision:  "keep",
+				hasLock:   names["lock"],
+			})
+			return
+		}
+		if depth >= pol.cfg.MaxDepth {
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			path := filepath.Join(dir, name)
+			if pol.skipNames[name] {
+				continue
+			}
+			if h := pol.heldBy(path); h != "" {
+				skip(path, "held copy (R-C606): "+h)
+				continue
+			}
+			if c := deny.carveoutForLiteral(path); c != "" {
+				if why, denied := deny.deniedPath(path, c); denied {
+					skip(path, why)
+					continue
+				}
+			} else if why, denied := deny.deniedPath(path, ""); denied {
+				if !deny.leadsToCarveoutLiteral(path) {
+					skip(path, why+"; not walked")
+					continue
+				}
+			}
+			if strings.HasPrefix(name, ".") && (strings.Contains(name, bbAsideTag) || strings.Contains(name, bbLabAsideTag)) {
+				cycle.asides = append(cycle.asides, bbAside{root: root, path: path})
+				continue
+			}
+			if strings.HasPrefix(name, ".") && strings.Contains(name, bbLabPruneAsideTag) {
+				continue
+			}
+			if pol.basesOnlyRoot(path) == "" && pol.skipGlobbed(name) {
+				named++
+				if named <= 20 {
+					skip(path, "evidence/backup/transfer/archive/custody name; not walked")
+				}
+				continue
+			}
+			if dev, err := deviceID(path); err != nil || dev != rootDev {
+				continue
+			}
+			walk(root, rootDev, path, depth+1)
 		}
 	}
 	for _, root := range pol.roots {
@@ -1199,88 +1293,7 @@ func (p *BazelBasesPlugin) discover(ctx context.Context, pol *bbPolicy, cycle *b
 		if err != nil {
 			continue
 		}
-		baseDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
-		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				if path != root && len(cycle.Errors) < 50 {
-					cycle.Errors = append(cycle.Errors, fmt.Sprintf("%s: %v", path, err))
-				}
-				if d != nil && d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if limit > 0 && time.Since(started) > limit {
-				cycle.Partial = true
-				return filepath.SkipAll
-			}
-			if !d.IsDir() {
-				return nil
-			}
-			name := d.Name()
-			if path != root {
-				if pol.skipNames[name] {
-					return filepath.SkipDir
-				}
-				if h := pol.heldBy(path); h != "" {
-					skip(path, "held copy (R-C606): "+h)
-					return filepath.SkipDir
-				}
-				if c := pol.deny.carveoutFor(path); c != "" {
-					if why, denied := pol.deny.deniedPath(path, c); denied {
-						skip(path, why)
-						return filepath.SkipDir
-					}
-				} else if why, denied := pol.deny.deniedPath(path, ""); denied {
-					if !pol.deny.leadsToCarveout(path) {
-						skip(path, why+"; not walked")
-						return filepath.SkipDir
-					}
-				}
-				if strings.HasPrefix(name, ".") && (strings.Contains(name, bbAsideTag) || strings.Contains(name, bbLabAsideTag)) {
-					cycle.asides = append(cycle.asides, bbAside{root: root, path: path})
-					return filepath.SkipDir
-				}
-				if strings.HasPrefix(name, ".") && strings.Contains(name, bbLabPruneAsideTag) {
-					return filepath.SkipDir
-				}
-				if pol.basesOnlyRoot(path) == "" && pol.skipGlobbed(name) {
-					named++
-					if named <= 20 {
-						skip(path, "evidence/backup/transfer/archive/custody name; not walked")
-					}
-					return filepath.SkipDir
-				}
-				if dev, err := deviceID(path); err == nil && dev != rootDev {
-					return filepath.SkipDir
-				}
-			}
-			names, err := bbReadNames(path)
-			if err != nil {
-				return filepath.SkipDir
-			}
-			if names["A-server.jar"] && (names["build-label.txt"] || names["install_base_key"]) {
-				return filepath.SkipDir
-			}
-			if bbIsOutputBase(path, names) {
-				rows = append(rows, &bbRow{
-					Path:      path,
-					Root:      root,
-					BasesOnly: pol.basesOnlyRoot(path),
-					Carveout:  pol.deny.carveoutFor(path),
-					Decision:  "keep",
-					hasLock:   names["lock"],
-				})
-				return filepath.SkipDir
-			}
-			if strings.Count(filepath.Clean(path), string(filepath.Separator))-baseDepth >= pol.cfg.MaxDepth {
-				return filepath.SkipDir
-			}
-			return nil
-		})
+		walk(root, rootDev, root, 0)
 	}
 	if named > 20 {
 		skip("", fmt.Sprintf("%d more directories skipped by name", named-20))
