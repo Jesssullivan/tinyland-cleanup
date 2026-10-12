@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `bazel_bases`: structural Bazel/omux output-base reaper (R-C644, R-C645;
+  a port of the lab R-C622/R-C632 seat reaper). Finds output bases by
+  structure under its roots, keeps any base with a live server, a process
+  naming or holding anything under it, a held lock (Linux `/proc/locks`;
+  Darwin `F_GETLK` plus an `flock` probe), a `.git` entry, a git-tracked
+  file or a mount point inside, and removes the rest by fresh re-check,
+  Bazel's own lock, rename aside, re-check and delete. Eligible after 12h
+  idle; on a mount at or above 70% bytes or inodes after 2h, largest first,
+  until both are below 60%. Level independent: it runs at every cleanup
+  level and is never held back by cooldown, byte backoff, zero yield or a
+  met free-space target. `mode: report` writes `last-cycle.json` and
+  `candidates.tsv` and removes nothing. In `apply` mode the `bazel` plugin
+  keeps every output base it finds, so there is one owner.
+- TIN-5268 agent-session deny set, compiled in (`plugins/agentsession.go`):
+  Claude, Codex, gstack, Pi, Kimi, Junie, OpenCode, crush, fuzzybot, cmux
+  and tmux stores, per-repository session directories, and the host
+  harness/tmux temp stores. Symlinked stores are denied at their physical
+  path too, and removing an ancestor of a store is refused.
+  `agent_session.extra_paths` only adds; `agent_session.bazel_base_carveouts`
+  lets `bazel_bases` alone remove structural bases under a named carve-out
+  (the oauth-mux output roots under CODEX_HOME). The bazel plugin and the
+  shared temp sweeps (`deleteOldFilesSameDevice`,
+  `deleteOldFilesOwnedByUserSameDevice`) now honour the set.
+- `LevelIndependent` plugin interface: the daemon runs such plugins at
+  cleanup level none and outside the cooldown, zero-yield and target-free
+  gates.
+
 ## [0.4.2] - 2026-10-04
 
 ### Added

@@ -74,6 +74,12 @@ func deleteOldFilesSameDevice(dir string, maxAge time.Duration) int64 {
 		return 0
 	}
 
+	// TIN-5268: agent-session stores (for example /tmp/claude-<uid> and
+	// /tmp/tmux-<uid>) are never aged out, wherever a temp sweep finds them.
+	deny := defaultAgentSessionDeny()
+	if _, denied := deny.denied(resolved); denied {
+		return 0
+	}
 	filepath.Walk(resolved, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -84,6 +90,11 @@ func deleteOldFilesSameDevice(dir string, maxAge time.Duration) int64 {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if info.IsDir() {
+			if _, denied := deny.deniedPath(path, ""); denied {
+				return filepath.SkipDir
+			}
 		}
 		if !info.IsDir() && staleModTime(info).Before(cutoff) {
 			size := info.Size()
@@ -113,6 +124,12 @@ func deleteOldFilesOwnedByUserSameDevice(dir string, maxAge time.Duration) int64
 		return 0
 	}
 
+	// TIN-5268: agent-session stores (for example /tmp/claude-<uid> and
+	// /tmp/tmux-<uid>) are never aged out, wherever a temp sweep finds them.
+	deny := defaultAgentSessionDeny()
+	if _, denied := deny.denied(resolved); denied {
+		return 0
+	}
 	filepath.Walk(resolved, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -123,6 +140,11 @@ func deleteOldFilesOwnedByUserSameDevice(dir string, maxAge time.Duration) int64
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if info.IsDir() {
+			if _, denied := deny.deniedPath(path, ""); denied {
+				return filepath.SkipDir
+			}
 		}
 		if !info.IsDir() && staleModTime(info).Before(cutoff) && info.Mode().IsRegular() {
 			// Check file ownership via syscall

@@ -3,9 +3,13 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -52,6 +56,15 @@ type Config struct {
 
 	// Bazel-specific cache settings
 	Bazel BazelConfig `yaml:"bazel"`
+
+	// BazelBases configures the structural Bazel output-base reaper
+	// (R-C644/R-C645): idle bases anywhere under its roots, ruled by
+	// per-mount pressure instead of the host cleanup level.
+	BazelBases BazelBasesConfig `yaml:"bazel_bases"`
+
+	// AgentSession extends the compiled-in TIN-5268 agent-session deny set.
+	// Configuration can only add to it; nothing can remove a compiled entry.
+	AgentSession AgentSessionConfig `yaml:"agent_session"`
 
 	// Nix-specific cleanup settings
 	Nix NixConfig `yaml:"nix"`
@@ -185,6 +198,10 @@ type EnableFlags struct {
 	DevArtifacts bool `yaml:"dev_artifacts"`
 	// Bazel for Bazel output base and cache cleanup planning
 	Bazel bool `yaml:"bazel"`
+	// BazelBases for the structural output-base reaper (R-C644/R-C645).
+	// When it is enabled in apply mode it owns output-base deletion and the
+	// bazel plugin keeps every output base it finds.
+	BazelBases bool `yaml:"bazel_bases"`
 	// APFSSnapshots for APFS snapshot thinning (Darwin)
 	APFSSnapshots bool `yaml:"apfs_snapshots"`
 	// ArchiveLifecycle for retiring verified archive staging pre-images
@@ -389,6 +406,254 @@ type BazelConfig struct {
 	// is treated as unreachable rather than deleted, so an unmounted volume never
 	// makes every workspace on it look orphaned.
 	OrphanWorkspaceMountRoots []string `yaml:"orphan_workspace_mount_roots"`
+}
+
+// Bazel output-base reaper modes.
+const (
+	// BazelBasesModeReport discovers and classifies output bases and writes a
+	// plan, but removes nothing.
+	BazelBasesModeReport = "report"
+	// BazelBasesModeApply removes eligible output bases.
+	BazelBasesModeApply = "apply"
+)
+
+// R-C645 floors: a configured idle window may be longer, never shorter.
+const (
+	// BazelBasesMinIdleAfter is the R-C645 idle floor outside pressure.
+	BazelBasesMinIdleAfter = 12 * time.Hour
+	// BazelBasesMinPressureIdleAfter is the R-C645 idle floor under pressure.
+	BazelBasesMinPressureIdleAfter = 2 * time.Hour
+)
+
+// BazelBasesConfig configures the structural Bazel output-base reaper
+// (R-C644, R-C645; a port of the lab R-C622/R-C632 seat reaper).
+//
+// An output base is recognised by structure, never by path: an execroot/
+// directory, external/ or server/, and one of Bazel's own top-level files
+// (lock, DO_NOT_BUILD_HERE, javalog.properties). A live server, a process that
+// names or holds anything under the base, or a held lock always keeps it.
+type BazelBasesConfig struct {
+	// Mode is "report" (plan only) or "apply" (remove eligible bases).
+	Mode string `yaml:"mode"`
+	// Roots are walked by structure for output bases. The walk never follows
+	// a symlink, never leaves the root's file system, and stops at each base.
+	Roots []string `yaml:"roots"`
+	// RootMounts optionally maps a root to the mount point it must sit on. A
+	// root whose mount is not mounted is skipped, never walked.
+	RootMounts map[string]string `yaml:"root_mounts"`
+	// BasesOnlyRoots are copy trees (R-C632) walked despite SkipNameGlobs;
+	// inside them only the output base itself is ever removed.
+	BasesOnlyRoots []string `yaml:"bases_only_roots"`
+	// HeldPaths are never walked and never removed (R-C606 held copies).
+	HeldPaths []string `yaml:"held_paths"`
+	// SkipDirNames are directory names never descended into. ".git" is required.
+	SkipDirNames []string `yaml:"skip_dir_names"`
+	// SkipNameGlobs are base-name globs (backup, transfer, evidence, archive,
+	// custody, held-*) never descended into outside BasesOnlyRoots.
+	SkipNameGlobs []string `yaml:"skip_name_globs"`
+	// MaxDepth bounds the walk below each root.
+	MaxDepth int `yaml:"max_depth"`
+	// IdleAfter is the R-C645 idle window outside pressure (at least 12h).
+	IdleAfter string `yaml:"idle_after"`
+	// PressureIdleAfter is the idle window on a mount under pressure (at least 2h).
+	PressureIdleAfter string `yaml:"pressure_idle_after"`
+	// BasesOnlyIdleAfter is the idle window inside BasesOnlyRoots, pressure or
+	// not (R-C632 kept 48h for copy trees). Never shorter than IdleAfter.
+	BasesOnlyIdleAfter string `yaml:"bases_only_idle_after"`
+	// PressureStartPercent puts a mount under pressure when its byte or inode
+	// use reaches it (R-C645: 70).
+	PressureStartPercent int `yaml:"pressure_start_percent"`
+	// PressureStopPercent releases pressure once both byte and inode use are
+	// below it (R-C645: 60).
+	PressureStopPercent int `yaml:"pressure_stop_percent"`
+	// SiblingUserRoot names a run's own output user root beside a base; it is
+	// removed with the base only when it holds nothing but that base's install.
+	SiblingUserRoot string `yaml:"sibling_user_root"`
+	// MaxSecondsPerCycle bounds a cycle with no pressured mount.
+	MaxSecondsPerCycle int `yaml:"max_seconds_per_cycle"`
+	// PressureMaxSeconds bounds a cycle with a pressured mount.
+	PressureMaxSeconds int `yaml:"pressure_max_seconds"`
+	// DiscoveryInterval is the minimum time between full walks while no root
+	// mount is under pressure. Under pressure the walk runs every cycle.
+	DiscoveryInterval string `yaml:"discovery_interval"`
+	// MaxDiscoverySeconds bounds one walk; a partial walk only finds fewer bases.
+	MaxDiscoverySeconds int `yaml:"max_discovery_seconds"`
+	// UninspectableOKComms are process names of this user whose fd tables may
+	// be unreadable without making the activity inventory incomplete.
+	UninspectableOKComms []string `yaml:"uninspectable_ok_comms"`
+	// Git is the git binary used for the tracked-files guard (empty: PATH).
+	Git string `yaml:"git"`
+	// Lsof is the lsof binary used as the second open-file witness. Required on
+	// Darwin, where it is the open-file inventory; optional on Linux.
+	Lsof string `yaml:"lsof"`
+	// LsofTimeoutSeconds bounds one lsof listing.
+	LsofTimeoutSeconds int `yaml:"lsof_timeout_seconds"`
+	// ReceiptDir receives the latest plan, the candidates TSV and the
+	// append-only removal receipts.
+	ReceiptDir string `yaml:"receipt_dir"`
+	// OnlyListed names a reviewed candidates TSV; when set, only its rows
+	// marked decision=eligible may be removed.
+	OnlyListed string `yaml:"only_listed"`
+	// Owners label bases by path glob; the label drives reporting and the
+	// per-kind idle overrides, never eligibility.
+	Owners []BazelBasesOwner `yaml:"owners"`
+	// Kinds carries per-kind idle overrides. They may lengthen a window, never
+	// shorten it below the R-C645 floors.
+	Kinds map[string]BazelBasesKind `yaml:"kinds"`
+}
+
+// BazelBasesOwner labels output bases by path glob.
+type BazelBasesOwner struct {
+	Glob  string `yaml:"glob"`
+	Owner string `yaml:"owner"`
+	Kind  string `yaml:"kind"`
+}
+
+// BazelBasesKind is a per-kind idle override.
+type BazelBasesKind struct {
+	IdleAfter         string `yaml:"idle_after"`
+	PressureIdleAfter string `yaml:"pressure_idle_after"`
+}
+
+// AgentSessionConfig extends the compiled-in TIN-5268 agent-session deny set.
+type AgentSessionConfig struct {
+	// ExtraPaths are absolute paths or one-element globs added to the deny set
+	// (for example the physical stores a host links ~/.codex to).
+	ExtraPaths []string `yaml:"extra_paths"`
+	// BazelBaseCarveouts are absolute globs under a denied tree whose
+	// structural Bazel output bases bazel_bases alone may remove (the oauth-mux
+	// output roots under CODEX_HOME, R-C620). Nothing else under them is ever
+	// touched, and no other plugin honours them.
+	BazelBaseCarveouts []string `yaml:"bazel_base_carveouts"`
+}
+
+// ParseDuration parses Go durations plus a trailing "d" for days.
+func ParseDuration(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasSuffix(value, "d") {
+		days, err := strconv.ParseFloat(strings.TrimSuffix(value, "d"), 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration %q", value)
+		}
+		return time.Duration(days * float64(24*time.Hour)), nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q", value)
+	}
+	return d, nil
+}
+
+// Validate checks the bazel_bases section. It is called by LoadConfig when
+// the plugin is enabled, so a malformed policy refuses to load rather than
+// reaping on a guess.
+func (c BazelBasesConfig) Validate() error {
+	switch c.Mode {
+	case BazelBasesModeReport, BazelBasesModeApply:
+	default:
+		return fmt.Errorf("bazel_bases.mode must be %q or %q, got %q", BazelBasesModeReport, BazelBasesModeApply, c.Mode)
+	}
+	if len(c.Roots) == 0 {
+		return fmt.Errorf("bazel_bases.roots must name at least one root")
+	}
+	idle, err := ParseDuration(c.IdleAfter)
+	if err != nil {
+		return fmt.Errorf("bazel_bases.idle_after: %w", err)
+	}
+	if idle < BazelBasesMinIdleAfter {
+		return fmt.Errorf("bazel_bases.idle_after %s is below the R-C645 floor %s", idle, BazelBasesMinIdleAfter)
+	}
+	pidle, err := ParseDuration(c.PressureIdleAfter)
+	if err != nil {
+		return fmt.Errorf("bazel_bases.pressure_idle_after: %w", err)
+	}
+	if pidle < BazelBasesMinPressureIdleAfter || pidle > idle {
+		return fmt.Errorf("bazel_bases.pressure_idle_after %s must be between %s (R-C645) and idle_after %s", pidle, BazelBasesMinPressureIdleAfter, idle)
+	}
+	bidle, err := ParseDuration(c.BasesOnlyIdleAfter)
+	if err != nil {
+		return fmt.Errorf("bazel_bases.bases_only_idle_after: %w", err)
+	}
+	if bidle < idle {
+		return fmt.Errorf("bazel_bases.bases_only_idle_after %s must not be shorter than idle_after %s", bidle, idle)
+	}
+	if c.PressureStopPercent <= 0 || c.PressureStartPercent <= c.PressureStopPercent || c.PressureStartPercent > 100 {
+		return fmt.Errorf("bazel_bases needs 0 < pressure_stop_percent (%d) < pressure_start_percent (%d) <= 100", c.PressureStopPercent, c.PressureStartPercent)
+	}
+	hasGit := false
+	for _, name := range c.SkipDirNames {
+		if name == ".git" {
+			hasGit = true
+		}
+	}
+	if !hasGit {
+		return fmt.Errorf("bazel_bases.skip_dir_names must name .git")
+	}
+	if _, err := ParseDuration(c.DiscoveryInterval); err != nil {
+		return fmt.Errorf("bazel_bases.discovery_interval: %w", err)
+	}
+	for kind, override := range c.Kinds {
+		if override.IdleAfter != "" {
+			d, err := ParseDuration(override.IdleAfter)
+			if err != nil || d < BazelBasesMinIdleAfter {
+				return fmt.Errorf("bazel_bases.kinds.%s.idle_after must be a duration of at least %s", kind, BazelBasesMinIdleAfter)
+			}
+		}
+		if override.PressureIdleAfter != "" {
+			d, err := ParseDuration(override.PressureIdleAfter)
+			if err != nil || d < BazelBasesMinPressureIdleAfter {
+				return fmt.Errorf("bazel_bases.kinds.%s.pressure_idle_after must be a duration of at least %s", kind, BazelBasesMinPressureIdleAfter)
+			}
+		}
+	}
+	for _, root := range c.Roots {
+		if !filepath.IsAbs(expandConfigHome(root)) {
+			return fmt.Errorf("bazel_bases root %q must be absolute", root)
+		}
+		for _, held := range c.HeldPaths {
+			if pathWithin(expandConfigHome(root), expandConfigHome(held)) {
+				return fmt.Errorf("bazel_bases root %s lies inside held path %s (R-C606)", root, held)
+			}
+		}
+	}
+	for _, b := range c.BasesOnlyRoots {
+		b = expandConfigHome(b)
+		inside := false
+		for _, root := range c.Roots {
+			root = expandConfigHome(root)
+			if pathWithin(b, root) && filepath.Clean(b) != filepath.Clean(root) {
+				inside = true
+			}
+		}
+		if !inside {
+			return fmt.Errorf("bazel_bases bases-only root %s is not strictly inside a root (R-C632)", b)
+		}
+		for _, held := range c.HeldPaths {
+			held = expandConfigHome(held)
+			if pathWithin(b, held) || pathWithin(held, b) {
+				return fmt.Errorf("bazel_bases bases-only root %s overlaps held path %s (R-C606, R-C632)", b, held)
+			}
+		}
+	}
+	return nil
+}
+
+func expandConfigHome(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~"))
+		}
+	}
+	return path
+}
+
+func pathWithin(path, parent string) bool {
+	path = filepath.Clean(path)
+	parent = filepath.Clean(parent)
+	if path == parent || parent == "/" {
+		return true
+	}
+	return strings.HasPrefix(path, parent+string(filepath.Separator))
 }
 
 // NixConfig holds Nix store and profile generation cleanup settings.
@@ -699,6 +964,26 @@ func DefaultConfig() *Config {
 			OrphanStaleAfter:             "7d",
 			OrphanWorkspaceMountRoots:    defaultOrphanWorkspaceMountRoots(),
 		},
+		BazelBases: BazelBasesConfig{
+			Mode:                 BazelBasesModeReport,
+			Roots:                defaultBazelRoots(home),
+			SkipDirNames:         []string{".git", "node_modules"},
+			SkipNameGlobs:        []string{"*backup*", "*transfer*", "*evidence*", "*-relocated", "*archive*", "*custody*", "held-*"},
+			MaxDepth:             8,
+			IdleAfter:            "12h",
+			PressureIdleAfter:    "2h",
+			BasesOnlyIdleAfter:   "48h",
+			PressureStartPercent: 70,
+			PressureStopPercent:  60,
+			SiblingUserRoot:      "bazel-user-root",
+			MaxSecondsPerCycle:   900,
+			PressureMaxSeconds:   5400,
+			DiscoveryInterval:    "30m",
+			MaxDiscoverySeconds:  600,
+			UninspectableOKComms: []string{"tailscaled", "(sd-pam)", "sd-pam"},
+			LsofTimeoutSeconds:   120,
+			ReceiptDir:           filepath.Join(home, ".local", "state", "tinyland-cleanup", "bazel-bases"),
+		},
 		Nix: NixConfig{
 			MinUserGenerations:                            5,
 			MinHomeManagerGenerations:                     5,
@@ -907,6 +1192,11 @@ func LoadConfig(path string) (*Config, error) {
 	decoder.KnownFields(true)
 	if err := decoder.Decode(config); err != nil {
 		return nil, err
+	}
+	if config.Enable.BazelBases {
+		if err := config.BazelBases.Validate(); err != nil {
+			return nil, err
+		}
 	}
 
 	return config, nil
