@@ -694,3 +694,91 @@ func TestBazelBasesDueHonoursIntervalAndPressure(t *testing.T) {
 		t.Fatal("apply mode under pressure walked again within 5 minutes")
 	}
 }
+
+// Adversarial review 2026-10-13: a base whose measuring was deferred by the
+// discovery pass's budget was measured again at removal time, but the
+// TIN-5268 answer of that late measure was dropped, so a base holding a
+// per-repository agent-session directory was removed. The late answer binds.
+func TestBazelBasesLateMeasureKeepsAgentSessionDirectory(t *testing.T) {
+	f := newBBFixture(t)
+	f.cfg.BazelBases.MaxSecondsPerCycle = 2
+	base := filepath.Join(f.root, "late", "out")
+	bbMakeBase(t, base, 4096, 13*time.Hour)
+	session := filepath.Join(base, "execroot", "_main", ".claude", "projects", "s.jsonl")
+	bbWrite(t, session, 16)
+	bbAge(t, base, 13*time.Hour)
+	calls := 0
+	f.plugin.env.activity = func(context.Context, bbActivityOptions) *bbActivity {
+		calls++
+		if calls == 1 {
+			// The discovery inventory spends the measuring half of the
+			// cycle budget, so the pass leaves the base unmeasured.
+			time.Sleep(1200 * time.Millisecond)
+		}
+		return newBBActivity()
+	}
+	cycle := f.run()
+	if !bbExists(session) {
+		t.Fatalf("a late-measured base holding .claude was removed (TIN-5268): %v", bbRowPaths(cycle))
+	}
+	if r := bbRowFor(t, cycle, base); r.Decision != "keep" || !strings.Contains(r.Reason, "agent-session") {
+		t.Fatalf("late-measured base: %q (%s)", r.Decision, r.Reason)
+	}
+}
+
+// A directory the measuring walk cannot read was never checked for
+// agent-session data; the base is kept rather than made writable and
+// deleted unseen.
+func TestBazelBasesUnreadableDirectoryKeepsBase(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads every directory")
+	}
+	f := newBBFixture(t)
+	base := filepath.Join(f.root, "sealed", "out")
+	bbMakeBase(t, base, 4096, 13*time.Hour)
+	sealed := filepath.Join(base, "external", "sealed")
+	bbWrite(t, filepath.Join(sealed, ".codex", "history.jsonl"), 16)
+	if err := os.Chmod(sealed, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sealed, 0o755) })
+	bbAge(t, base, 13*time.Hour)
+	cycle := f.run()
+	_ = os.Chmod(sealed, 0o755)
+	if !bbExists(filepath.Join(sealed, ".codex", "history.jsonl")) {
+		t.Fatalf("a base with an unreadable directory was removed: %v", bbRowPaths(cycle))
+	}
+	if r := bbRowFor(t, cycle, base); r.Decision != "keep" || !strings.Contains(r.Reason, "unreadable") {
+		t.Fatalf("unreadable base: %q (%s)", r.Decision, r.Reason)
+	}
+}
+
+// A server started through a symlinked spelling of its base still names it.
+func TestBBCmdlineOutputBasesResolveAliases(t *testing.T) {
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	real := filepath.Join(dir, "real")
+	bbMkdir(t, filepath.Join(real, "ob"))
+	if err := os.Symlink(real, filepath.Join(dir, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	cmd := "bazel(ws) -XX:+UseParallelGC -jar A-server.jar --output_base=" + filepath.Join(dir, "alias", "ob") + " --workspace_directory=/w"
+	obs := bbCmdlineOutputBases(cmd)
+	if len(obs) != 1 || resolvedOrSelf(obs[0]) != filepath.Join(real, "ob") {
+		t.Fatalf("output bases %v", obs)
+	}
+	a := newBBActivity()
+	a.procs = []bbProc{{pid: 4242, cmdline: cmd}}
+	if b := a.blockers(filepath.Join(real, "ob")); len(b) == 0 {
+		t.Fatal("a process naming the base through an alias does not block it")
+	}
+	if b := a.blockers(filepath.Join(real, "ob2")); len(b) != 0 {
+		t.Fatalf("an unrelated base is blocked: %v", b)
+	}
+}
+
+func TestAgentSessionDenyCoversRuntimeDirTmux(t *testing.T) {
+	d := newAgentSessionDeny("/home/u", 1000, "", nil, nil)
+	if _, denied := d.denied("/run/user/1000/tmux-1000/default"); !denied {
+		t.Fatal("tmux under /run/user is not denied")
+	}
+}

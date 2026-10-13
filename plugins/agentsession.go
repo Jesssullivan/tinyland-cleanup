@@ -53,6 +53,8 @@ var agentSessionDirNames = []string{
 // the user's uid.
 var agentSessionUIDPatterns = []string{
 	"/tmp/tmux-%d", "/private/tmp/tmux-%d",
+	// tmux under TMUX_TMPDIR=$XDG_RUNTIME_DIR (sting's live sockets, 2026-10-13).
+	"/run/user/%d/tmux-%d",
 	"/tmp/claude-%d", "/private/tmp/claude-%d",
 	"/srv/fast-local/tmp-agents/claude-%d",
 }
@@ -92,7 +94,7 @@ func newAgentSessionDeny(home string, uid int, tmpdir string, extra []string, ca
 		}
 	}
 	for _, p := range agentSessionUIDPatterns {
-		add(fmt.Sprintf(p, uid))
+		add(strings.ReplaceAll(p, "%d", strconv.Itoa(uid)))
 	}
 	if tmpdir != "" {
 		add(filepath.Join(tmpdir, "tmux-"+strconv.Itoa(uid)))

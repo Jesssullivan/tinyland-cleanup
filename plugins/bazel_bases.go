@@ -187,6 +187,17 @@ func (a *bbActivity) blockers(target string) []string {
 			found = append(found, fmt.Sprintf("pid %d names it on its command line", p.pid))
 			break
 		}
+		named := false
+		for _, ob := range bbCmdlineOutputBases(p.cmdline) {
+			if r := resolvedOrSelf(ob); r == real || bbUnder(r, real) {
+				named = true
+				break
+			}
+		}
+		if named {
+			found = append(found, fmt.Sprintf("pid %d names it as --output_base through another path", p.pid))
+			break
+		}
 	}
 	return found
 }
@@ -948,7 +959,18 @@ func (p *BazelBasesPlugin) apply(ctx context.Context, pol *bbPolicy, cycle *bbCy
 			continue
 		}
 		if !row.Measured {
-			p.measure(ctx, row, time.Time{})
+			// A base measured late (the discovery pass ran out of its
+			// measuring budget) gets the same TIN-5268 scan, and its
+			// answer binds: a base whose scan finds an agent-session
+			// directory, or cannot finish, is kept.
+			if why := p.measure(ctx, row, time.Time{}); why != "" {
+				row.Decision, row.Reason = "keep", "kept: "+why
+				continue
+			}
+			if !row.Measured {
+				row.Decision, row.Reason = "keep", "kept: the base could not be measured, so its agent-session scan is incomplete (TIN-5268)"
+				continue
+			}
 		}
 		removed, why := p.removeTree(ctx, pol, row.Path, row.Root, row.Carveout, true, stamp, removalOpts)
 		if !removed {
@@ -1123,14 +1145,20 @@ func (p *BazelBasesPlugin) measure(ctx context.Context, row *bbRow, deadline tim
 	if denied != "" {
 		return "holds agent-session directory " + denied + " (TIN-5268)"
 	}
+	var unread *bbUnreadableDir
+	if errors.As(err, &unread) {
+		return "directory " + unread.path + " is unreadable, so the agent-session scan is incomplete (TIN-5268)"
+	}
 	if err != nil {
 		return ""
 	}
 	row.Bytes, row.Inodes, row.Measured = b, i, true
 	if row.Sibling != "" {
-		sb, si, sdenied, _ := bbMeasureTree(ctx, row.Sibling, deadline)
+		sb, si, sdenied, serr := bbMeasureTree(ctx, row.Sibling, deadline)
 		if sdenied != "" {
 			row.Sibling, row.SiblingNote = "", "sibling holds agent-session directory "+sdenied+"; kept"
+		} else if serr != nil {
+			row.Sibling, row.SiblingNote = "", "sibling user root could not be scanned in full ("+serr.Error()+"); kept"
 		} else {
 			row.SiblingBytes, row.SiblingInodes = sb, si
 		}
@@ -1147,6 +1175,12 @@ func bbMeasureTree(ctx context.Context, root string, deadline time.Time) (int64,
 	denied := ""
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// A directory that cannot be read is a directory whose
+			// contents were never checked for agent-session data: the
+			// removal path would make it writable and delete it unseen.
+			if d == nil || d.IsDir() {
+				return &bbUnreadableDir{path: path, err: err}
+			}
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -1181,6 +1215,16 @@ func bbMeasureTree(ctx context.Context, root string, deadline time.Time) (int64,
 		return bytes, inodes, denied, nil
 	}
 	return bytes, inodes, "", err
+}
+
+// bbUnreadableDir is a directory a measuring walk could not read.
+type bbUnreadableDir struct {
+	path string
+	err  error
+}
+
+func (e *bbUnreadableDir) Error() string {
+	return "unreadable directory " + e.path + ": " + e.err.Error()
 }
 
 // discover walks the roots and returns every structural output base. Each
@@ -1409,7 +1453,31 @@ func bbPidfileServer(base string, activity *bbActivity) string {
 	if cmdline == "" || bbCmdlineNames(cmdline, base) || bbCmdlineNames(cmdline, resolvedOrSelf(base)) {
 		return fmt.Sprintf("server pid %d from server.pid.txt is running", pid)
 	}
+	// The server may have been started through another spelling of the
+	// base (a symlinked parent): compare every --output_base it names at
+	// its physical path.
+	real := resolvedOrSelf(base)
+	for _, ob := range bbCmdlineOutputBases(cmdline) {
+		if resolvedOrSelf(ob) == real {
+			return fmt.Sprintf("server pid %d from server.pid.txt is running (as %s)", pid, ob)
+		}
+	}
 	return ""
+}
+
+// bbCmdlineOutputBases returns every --output_base value on a command line.
+func bbCmdlineOutputBases(cmdline string) []string {
+	var out []string
+	fields := strings.Fields(cmdline)
+	for i, f := range fields {
+		switch {
+		case strings.HasPrefix(f, "--output_base="):
+			out = append(out, strings.Trim(strings.TrimPrefix(f, "--output_base="), "\"'"))
+		case f == "--output_base" && i+1 < len(fields):
+			out = append(out, strings.Trim(fields[i+1], "\"'"))
+		}
+	}
+	return out
 }
 
 func bbPidAlive(pid int) bool {

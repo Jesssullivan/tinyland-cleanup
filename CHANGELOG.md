@@ -18,11 +18,15 @@ All notable changes to this project will be documented in this file.
   level and is never held back by cooldown, byte backoff, zero yield or a
   met free-space target. `mode: report` writes `last-cycle.json` and
   `candidates.tsv` and removes nothing. In `apply` mode the `bazel` plugin
-  keeps every output base it finds, so there is one owner.
+  keeps every output base it finds, so there is one owner. A base is also
+  kept when its measuring walk finds an agent-session directory, cannot read
+  a directory, or cannot finish, including a base first measured at removal
+  time. A server or client that names the base through a symlinked
+  `--output_base` spelling still keeps it.
 - TIN-5268 agent-session deny set, compiled in (`plugins/agentsession.go`):
   Claude, Codex, gstack, Pi, Kimi, Junie, OpenCode, crush, fuzzybot, cmux
   and tmux stores, per-repository session directories, and the host
-  harness/tmux temp stores. Symlinked stores are denied at their physical
+  harness/tmux temp stores (including `/run/user/<uid>/tmux-<uid>`). Symlinked stores are denied at their physical
   path too, and removing an ancestor of a store is refused.
   `agent_session.extra_paths` only adds; `agent_session.bazel_base_carveouts`
   lets `bazel_bases` alone remove structural bases under a named carve-out
