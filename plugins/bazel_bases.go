@@ -792,8 +792,12 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 	if anyPressure {
 		budget = time.Duration(pol.cfg.PressureMaxSeconds) * time.Second
 	}
-	deadline := wallStart.Add(budget)
-	measureDeadline := wallStart.Add(budget / 2)
+	// The work budget starts after discovery and the process inventory,
+	// which max_discovery_seconds bounds on its own: a slow walk must not
+	// leave every eligible base unmeasured.
+	workStart := time.Now()
+	deadline := workStart.Add(budget)
+	measureDeadline := workStart.Add(budget / 2)
 
 	for _, row := range eligible {
 		if budget > 0 && time.Now().After(measureDeadline) {
@@ -1141,7 +1145,7 @@ func (p *BazelBasesPlugin) removeAside(ctx context.Context, pol *bbPolicy, aside
 // inodes on its own file system. A per-repository agent-session directory
 // inside it keeps the base.
 func (p *BazelBasesPlugin) measure(ctx context.Context, row *bbRow, deadline time.Time) string {
-	b, i, denied, err := bbMeasureTree(ctx, row.Path, deadline)
+	b, i, denied, err := bbMeasureTree(ctx, row.Path, deadline, p.env.uid)
 	if denied != "" {
 		return "holds agent-session directory " + denied + " (TIN-5268)"
 	}
@@ -1149,12 +1153,16 @@ func (p *BazelBasesPlugin) measure(ctx context.Context, row *bbRow, deadline tim
 	if errors.As(err, &unread) {
 		return "directory " + unread.path + " is unreadable, so the agent-session scan is incomplete (TIN-5268)"
 	}
+	var foreign *bbForeignOwner
+	if errors.As(err, &foreign) {
+		return foreign.Error() + "; the reaper cannot remove the base whole"
+	}
 	if err != nil {
 		return ""
 	}
 	row.Bytes, row.Inodes, row.Measured = b, i, true
 	if row.Sibling != "" {
-		sb, si, sdenied, serr := bbMeasureTree(ctx, row.Sibling, deadline)
+		sb, si, sdenied, serr := bbMeasureTree(ctx, row.Sibling, deadline, p.env.uid)
 		if sdenied != "" {
 			row.Sibling, row.SiblingNote = "", "sibling holds agent-session directory "+sdenied+"; kept"
 		} else if serr != nil {
@@ -1166,7 +1174,7 @@ func (p *BazelBasesPlugin) measure(ctx context.Context, row *bbRow, deadline tim
 	return ""
 }
 
-func bbMeasureTree(ctx context.Context, root string, deadline time.Time) (int64, int64, string, error) {
+func bbMeasureTree(ctx context.Context, root string, deadline time.Time, uid int) (int64, int64, string, error) {
 	rootDev, err := deviceID(root)
 	if err != nil {
 		return 0, 0, "", err
@@ -1204,6 +1212,12 @@ func bbMeasureTree(ctx context.Context, root string, deadline time.Time) (int64,
 				}
 				return nil
 			}
+			// An entry another user owns would stop the removal half way
+			// and strand a renamed aside (a non-root daemon cannot chmod
+			// or empty it), so such a base is kept whole.
+			if uid > 0 && int(st.Uid) != uid {
+				return &bbForeignOwner{path: path, uid: int(st.Uid)}
+			}
 			bytes += int64(st.Blocks) * 512
 		} else {
 			bytes += info.Size()
@@ -1215,6 +1229,16 @@ func bbMeasureTree(ctx context.Context, root string, deadline time.Time) (int64,
 		return bytes, inodes, denied, nil
 	}
 	return bytes, inodes, "", err
+}
+
+// bbForeignOwner is an entry, inside a base, that another user owns.
+type bbForeignOwner struct {
+	path string
+	uid  int
+}
+
+func (e *bbForeignOwner) Error() string {
+	return "holds " + e.path + " owned by uid " + strconv.Itoa(e.uid)
 }
 
 // bbUnreadableDir is a directory a measuring walk could not read.

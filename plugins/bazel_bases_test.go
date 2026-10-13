@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -799,5 +800,44 @@ func TestBazelBasesWalkSkipsMountPointsWithoutStat(t *testing.T) {
 	}
 	if !bbExists(inside) {
 		t.Fatal("a base below a mount point was removed")
+	}
+}
+
+// The removal pass itself honours a late measure: a row that reaches apply
+// unmeasured is scanned there, and an agent-session directory keeps it.
+func TestBazelBasesApplyMeasuresUnmeasuredRowAndKeepsSessionData(t *testing.T) {
+	f := newBBFixture(t)
+	base := filepath.Join(f.root, "unmeasured", "out")
+	bbMakeBase(t, base, 4096, 13*time.Hour)
+	session := filepath.Join(base, "external", "repo", ".pi", "session.jsonl")
+	bbWrite(t, session, 16)
+	bbAge(t, base, 13*time.Hour)
+	pol, err := f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := &bbRow{Path: base, Root: f.root, Decision: "eligible", window: 12 * time.Hour, normal: 12 * time.Hour}
+	cycle := &bbCycle{}
+	f.plugin.apply(context.Background(), pol, cycle, []*bbRow{row}, newBBActivity(), map[uint64]bbUsage{},
+		map[uint64]bool{}, time.Now().Add(time.Minute), bbActivityOptions{}, bbDiscardLogger())
+	if !bbExists(session) {
+		t.Fatal("apply removed an unmeasured base holding .pi data (TIN-5268)")
+	}
+	if row.Decision != "keep" || !strings.Contains(row.Reason, "agent-session") {
+		t.Fatalf("unmeasured row: %q (%s)", row.Decision, row.Reason)
+	}
+}
+
+// An entry owned by another user keeps the base whole.
+func TestBBMeasureTreeRefusesForeignOwnedEntries(t *testing.T) {
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	bbWrite(t, filepath.Join(dir, "base", "f"), 8)
+	_, _, _, err := bbMeasureTree(context.Background(), filepath.Join(dir, "base"), time.Time{}, os.Getuid()+1)
+	var foreign *bbForeignOwner
+	if os.Getuid() > 0 && !errors.As(err, &foreign) {
+		t.Fatalf("a tree owned by another uid measured cleanly: %v", err)
+	}
+	if _, _, _, err := bbMeasureTree(context.Background(), filepath.Join(dir, "base"), time.Time{}, os.Getuid()); err != nil {
+		t.Fatalf("own tree: %v", err)
 	}
 }
