@@ -176,7 +176,8 @@ policy:
 
 The daemon sets this as its Go soft memory limit and returns freed heap to
 the OS after every cycle. `GOMEMLIMIT` in the environment takes precedence;
-a negative value sets no limit. The process itself stays in the tens of MiB.
+a negative value sets no limit. The process itself peaks at roughly 60 to
+110 MiB on a large developer host.
 A service manager's memory figure for the daemon is usually much larger,
 because the kernel charges the directory-entry and inode cache built by the
 scans to the service's cgroup. That cache is reclaimable. Size a service

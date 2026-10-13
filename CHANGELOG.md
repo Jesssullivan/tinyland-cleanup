@@ -47,7 +47,7 @@ moved the wedge to the next command with no deadline, `limactl list`.
 
 ### Changed
 
-- **Lower memory.** The daemon sets a Go soft memory limit of 256 MiB
+- **Bounded memory.** The daemon sets a Go soft memory limit of 256 MiB
   (`policy.memory_limit_mb`; `GOMEMLIMIT` wins; negative for none) and
   returns freed heap to the OS after each cycle. Directory sizing reads a
   directory in batches of 1024 entries instead of all at once, unsorted
@@ -57,11 +57,14 @@ moved the wedge to the next command with no deadline, `limactl list`.
   `git ls-files` output is read as a stream, and dev-artifacts keeps the
   tracked-file lists of the 8 most recent repositories instead of every
   repository a scan visits.
-- Measured on a host whose service was pinned at a 512M cap: the process
-  itself peaked at 65 MiB resident over a full dry-run cycle. The rest of
-  the cap was reclaimable kernel directory-entry and inode cache charged to
-  the service's cgroup by the scans, which the kernel drops under pressure.
-  A service memory cap on this daemon measures that cache, not its heap.
+- These are bounds, not a measured saving on the host they were tested on.
+  Run side by side on one host with its live config, a full dry-run cycle
+  peaked at 68 MiB resident on 0.4.2 and 70 MiB on 0.4.3; single runs of
+  either ranged from 56 to 112 MiB with host activity. That host's service
+  was pinned at a 512M cap, and the process was never the cause: the rest
+  was reclaimable kernel directory-entry and inode cache charged to the
+  service's cgroup by the scans, which the kernel drops under pressure. A
+  service memory cap on this daemon measures that cache, not its heap.
 
 ### Added
 
