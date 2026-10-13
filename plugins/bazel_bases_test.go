@@ -782,3 +782,22 @@ func TestAgentSessionDenyCoversRuntimeDirTmux(t *testing.T) {
 		t.Fatal("tmux under /run/user is not denied")
 	}
 }
+
+// The walk skips a mount point below a root by the mount table alone, so a
+// hung FUSE or network mount (honey's ~/tcfs) cannot block discovery.
+func TestBazelBasesWalkSkipsMountPointsWithoutStat(t *testing.T) {
+	f := newBBFixture(t)
+	fuse := filepath.Join(f.root, "tcfs")
+	inside := filepath.Join(fuse, "proj", "out")
+	bbMakeBase(t, inside, 4096, 48*time.Hour)
+	f.plugin.env.mountPoints = func() ([]string, error) { return []string{"/", fuse}, nil }
+	cycle := f.run()
+	for _, r := range cycle.Rows {
+		if strings.HasPrefix(r.Path, fuse) {
+			t.Fatalf("the walk entered mount point %s: %v", fuse, bbRowPaths(cycle))
+		}
+	}
+	if !bbExists(inside) {
+		t.Fatal("a base below a mount point was removed")
+	}
+}

@@ -1241,6 +1241,15 @@ func (p *BazelBasesPlugin) discover(ctx context.Context, pol *bbPolicy, cycle *b
 		}
 	}
 	deny := pol.deny
+	// A mount point below a root is another file system: skip it from the
+	// mount table, without a stat that a hung network or FUSE file system
+	// (honey's ~/tcfs) could block on forever.
+	mountSet := map[string]bool{}
+	if mounts, err := p.env.mountPoints(); err == nil {
+		for _, m := range mounts {
+			mountSet[filepath.Clean(m)] = true
+		}
+	}
 	stopped := false
 	var walk func(root string, rootDev uint64, dir string, depth int)
 	walk = func(root string, rootDev uint64, dir string, depth int) {
@@ -1315,6 +1324,9 @@ func (p *BazelBasesPlugin) discover(ctx context.Context, pol *bbPolicy, cycle *b
 				if named <= 20 {
 					skip(path, "evidence/backup/transfer/archive/custody name; not walked")
 				}
+				continue
+			}
+			if mountSet[path] {
 				continue
 			}
 			if dev, err := deviceID(path); err != nil || dev != rootDev {
