@@ -321,6 +321,9 @@ dev_artifacts:
   # process attribution at session level) so one huge or active container can
   # no longer exhaust the scan budget or shield expired siblings (TIN-2690).
   # Stale sessions are deleted at aggressive/critical levels.
+  # TIN-5268: claude-*, codex*, .tmp* and pi-* trees are agent-session data
+  # and are always protected, so the default pattern deletes nothing. The lane
+  # acts only on a pattern outside those names.
   harness_scratch: true
   harness_scratch_dir_patterns:
     - "claude-*"

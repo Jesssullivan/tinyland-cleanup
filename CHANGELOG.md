@@ -44,6 +44,17 @@ moved the wedge to the next command with no deadline, `limactl list`.
 - A VM start that follows a stop by this daemon now runs even when the
   plugin's context has ended, so a compaction cut short does not leave the
   VM down.
+- Agent-session temp trees are kept by every lane (TIN-5268, R-W17 item 4).
+  The compiled deny set now names `claude-*`, `codex*`, `.tmp*` and `pi-*`
+  directly under `/tmp`, `/private/tmp`, `/var/tmp`, `/private/var/tmp` and
+  `$TMPDIR`; before, it named `claude-<uid>` and `tmux-<uid>` only, and the
+  cache plugin's temp sweep aged out files in the others at every level.
+  `dev_artifacts` did not consult the set at all: at aggressive or critical
+  its harness-scratch lane deleted an idle `claude-<uid>/<project>/<session>`
+  directory, and its generated-artifact lanes deleted `node_modules`,
+  `.venv`, `target` and zig trees inside a session tree. It now adds the same
+  names under every temp scan path to `protect_paths` for the cycle, so the
+  default `harness_scratch` pattern (`claude-*`) no longer deletes anything.
 
 ### Changed
 

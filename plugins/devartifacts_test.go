@@ -2250,6 +2250,9 @@ func harnessScratchTestConfig(scanPath string) *config.Config {
 	cfg.DevArtifacts.TempScanPaths = []string{scanPath}
 	cfg.DevArtifacts.TempArtifactStaleAfter = "2h"
 	cfg.DevArtifacts.HarnessScratchStaleAfter = "2h"
+	// claude-* containers are agent-session data and are always kept
+	// (TIN-5268), so the lane's mechanics are tested on another pattern.
+	cfg.DevArtifacts.HarnessScratchDirPatterns = []string{"harness-*"}
 	cfg.DevArtifacts.TempArtifactMinMB = 1
 	cfg.DevArtifacts.ScanPaths = nil
 	cfg.DevArtifacts.NixTempRoots = false
@@ -2265,7 +2268,7 @@ func harnessScratchTestConfig(scanPath string) *config.Config {
 
 func makeHarnessSession(t *testing.T, scanPath, project, session string, age time.Duration) string {
 	t.Helper()
-	dir := filepath.Join(scanPath, "claude-501", project, session)
+	dir := filepath.Join(scanPath, "harness-501", project, session)
 	tasks := filepath.Join(dir, "tasks")
 	if err := os.MkdirAll(tasks, 0o755); err != nil {
 		t.Fatal(err)
@@ -2359,7 +2362,7 @@ func TestHarnessScratchCleanupDeletesStaleKeepsFreshAndActive(t *testing.T) {
 	if _, err := os.Stat(filepath.Dir(stale)); err != nil {
 		t.Fatalf("emptied project dir is retained (pruning races harness session creation), stat err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(scanPath, "claude-501")); err != nil {
+	if _, err := os.Stat(filepath.Join(scanPath, "harness-501")); err != nil {
 		t.Fatalf("container must survive, stat err=%v", err)
 	}
 	if _, err := os.Stat(fresh); err != nil {
@@ -2431,7 +2434,7 @@ func TestPlanTemporaryArtifactsSkipsFreshAndContainerRoots(t *testing.T) {
 		if target.Path == freshBig {
 			t.Fatalf("fresh temp root must not be sized or surfaced, got %#v", target)
 		}
-		if filepath.Base(target.Path) == "claude-501" {
+		if filepath.Base(target.Path) == "harness-501" {
 			t.Fatalf("harness container must be excluded from the generic temp lane, got %#v", target)
 		}
 	}

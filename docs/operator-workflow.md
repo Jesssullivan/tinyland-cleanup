@@ -290,6 +290,12 @@ the lane. Containers and per-project directories are always retained.
 `protect_paths` entries pointing at OR INSIDE a session protect that whole
 session. Only add dir patterns whose layout really is
 `<container>/<project>/<session>`; the transcript probe is Claude-specific.
+Since TIN-5268 the trees named `claude-*`, `codex*`, `.tmp*` and `pi-*`
+directly under a temp scan path, a host temp directory or `$TMPDIR` are
+agent-session data: they are always protected, in this lane and in every
+other `dev_artifacts` lane, and the cache plugin's temp sweep skips them. The
+default pattern `claude-*` therefore deletes nothing; the lane acts only on a
+configured pattern outside those names.
 Generic temp roots are now sized only when already stale: fresh or protected
 roots are skipped without the recursive walk, so a young multi-gigabyte tree
 can no longer exhaust the shared scan budget before deletable families run.
