@@ -696,6 +696,63 @@ func TestBazelBasesDueHonoursIntervalAndPressure(t *testing.T) {
 	}
 }
 
+// A root whose mount stays above the pressure line with no output base on it
+// (sting's /srv/data: 82% full of data this plugin cannot reap) must not be
+// walked on every poll. The early pressure walk is for mounts where the last
+// walk found a base or a leftover aside.
+func TestBazelBasesPressureWithNoBaseOnTheMountKeepsTheInterval(t *testing.T) {
+	f := newBBFixture(t)
+	f.usage = func(string) (bbUsage, error) { return bbUsage{BytesTotal: 100, BytesUsed: 82}, nil }
+	pol, err := f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	f.plugin.env.now = func() time.Time { return now }
+	cleanup := func() {
+		t.Helper()
+		if res := f.plugin.Cleanup(context.Background(), LevelNone, f.cfg, bbDiscardLogger()); res.Error != nil {
+			t.Fatal(res.Error)
+		}
+	}
+
+	// An empty root on a pressured mount: one walk, then the interval.
+	cleanup()
+	if f.plugin.lastWork == nil || len(f.plugin.lastWork) != 0 || f.plugin.lastPartial {
+		t.Fatalf("a completed walk of an empty root recorded work=%v partial=%v", f.plugin.lastWork, f.plugin.lastPartial)
+	}
+	now = now.Add(10 * time.Minute)
+	if f.plugin.due(pol, true) {
+		t.Fatal("a pressured mount with no output base on it was due again inside the discovery interval")
+	}
+	f.plugin.lastDiscovery = now.Add(-3 * time.Hour)
+	if !f.plugin.due(pol, true) {
+		t.Fatal("the discovery interval no longer makes a cycle due")
+	}
+
+	// A base on the mount, used an hour ago: kept, and the early walk is back,
+	// so it goes within minutes of passing the pressure window.
+	base := filepath.Join(f.root, "a", "out")
+	bbMakeBase(t, base, 64*1024, 1*time.Hour)
+	cleanup()
+	if !bbExists(base) {
+		t.Fatal("a base used 1h ago was reaped under pressure (2h floor)")
+	}
+	now = now.Add(10 * time.Minute)
+	if !f.plugin.due(pol, true) {
+		t.Fatal("a pressured mount with a base on it was not due after 5 minutes")
+	}
+	if f.plugin.due(pol, false) {
+		t.Fatal("report mode walked again under pressure inside its interval")
+	}
+
+	// A walk that was cut short knows too little to skip the early walk.
+	f.plugin.lastWork, f.plugin.lastPartial = map[uint64]bool{}, true
+	if !f.plugin.due(pol, true) {
+		t.Fatal("a partial walk suppressed the early pressure walk")
+	}
+}
+
 // Adversarial review 2026-10-13: a base whose measuring was deferred by the
 // discovery pass's budget was measured again at removal time, but the
 // TIN-5268 answer of that late measure was dropped, so a base holding a

@@ -268,6 +268,12 @@ type BazelBasesPlugin struct {
 	env           bbEnv
 	lastDiscovery time.Time
 	pressured     map[uint64]bool
+	// lastWork holds the devices on which the last walk found an output base
+	// or a leftover aside. It is nil until a cycle has completed.
+	lastWork map[uint64]bool
+	// lastPartial is set when the last walk was cut short or a base's device
+	// could not be read, so lastWork may be missing a device.
+	lastPartial bool
 }
 
 // NewBazelBasesPlugin creates the plugin with the host environment.
@@ -505,9 +511,18 @@ func (pol *bbPolicy) windows(kind string) (time.Duration, time.Duration) {
 const bbPressureMinInterval = 5 * time.Minute
 
 // due reports whether a cycle should run now: the discovery interval has
-// passed, or (apply mode only) a root's mount is under pressure and the last
-// walk is at least bbPressureMinInterval old. Report mode keeps the interval:
-// it relieves nothing, so walking every poll would only cost IO.
+// passed, or (apply mode only) a root's mount is under pressure, the last walk
+// found an output base or a leftover aside on that mount, and that walk is at
+// least bbPressureMinInterval old. Report mode keeps the interval: it relieves
+// nothing, so walking every poll would only cost IO.
+//
+// A pressured mount with no base on it gives an early walk nothing to do: a
+// base created since the last walk cannot be eligible before
+// pressure_idle_after, and the discovery interval finds it. Without this a
+// root whose mount stays above the pressure line for reasons this plugin
+// cannot relieve (data that is not output bases) would be walked on every
+// poll, forever. A walk that was cut short, or that has not run yet, keeps the
+// early walk, because its picture of the mount is incomplete.
 func (p *BazelBasesPlugin) due(pol *bbPolicy, apply bool) bool {
 	now := p.env.now()
 	if p.lastDiscovery.IsZero() || now.Sub(p.lastDiscovery) >= pol.interval {
@@ -525,11 +540,38 @@ func (p *BazelBasesPlugin) due(pol *bbPolicy, apply bool) bool {
 		if err != nil {
 			continue
 		}
-		if p.pressureState(dev, u, pol) {
+		if !p.pressureState(dev, u, pol) {
+			continue
+		}
+		if p.lastWork == nil || p.lastPartial || p.lastWork[dev] {
 			return true
 		}
 	}
 	return false
+}
+
+// noteWork records where the cycle found output bases or leftover asides, for
+// due's pressure rule.
+func (p *BazelBasesPlugin) noteWork(cycle *bbCycle) {
+	work := map[uint64]bool{}
+	partial := cycle.Partial
+	for _, row := range cycle.Rows {
+		if row.dev == 0 {
+			partial = true
+			continue
+		}
+		work[row.dev] = true
+	}
+	for _, aside := range cycle.asides {
+		dev, err := deviceID(filepath.Dir(aside.path))
+		if err != nil {
+			partial = true
+			continue
+		}
+		work[dev] = true
+	}
+	p.lastWork = work
+	p.lastPartial = partial
 }
 
 func (p *BazelBasesPlugin) pressureState(dev uint64, u bbUsage, pol *bbPolicy) bool {
@@ -611,6 +653,7 @@ func (p *BazelBasesPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg 
 	}
 	cycle := p.run(ctx, pol, apply, logger)
 	p.lastDiscovery = p.env.now()
+	p.noteWork(cycle)
 	if err := p.writeReceipts(pol, cycle); err != nil {
 		logger.Warn("bazel_bases: receipt write failed", "error", err)
 	}

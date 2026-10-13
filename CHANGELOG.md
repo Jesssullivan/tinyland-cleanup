@@ -110,6 +110,15 @@ moved the wedge to the next command with no deadline, `limactl list`.
   cleanup level none and outside the cooldown, zero-yield and target-free
   gates.
 
+### Fixed
+
+- `bazel_bases`: in apply mode a root whose mount stayed at or above the
+  pressure line was walked again on every poll, even when the mount held no
+  output base and the plugin could relieve nothing (a data volume full of
+  other things). The early pressure walk now needs the last walk to have
+  found an output base or a leftover aside on that mount; otherwise the
+  discovery interval applies. A walk that was cut short keeps the early walk.
+
 ## [0.4.2] - 2026-10-04
 
 ### Added
