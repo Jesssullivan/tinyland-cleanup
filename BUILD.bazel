@@ -171,6 +171,7 @@ go_test(
         "byte_backoff_test.go",
         "diskstats_default_test.go",
         "diskstats_sim_test.go",
+        "level_independent_test.go",
         "logthrottle_test.go",
         "main_test.go",
         "state_test.go",
@@ -194,6 +195,7 @@ go_test(
         "byte_backoff_test.go",
         "diskstats_default_test.go",
         "diskstats_sim_test.go",
+        "level_independent_test.go",
         "logthrottle_test.go",
         "main_test.go",
         "state_test.go",
@@ -252,8 +254,10 @@ go_test(
 go_library(
     name = "plugins",
     srcs = [
+        "plugins/agentsession.go",
         "plugins/archive_lifecycle.go",
         "plugins/bazel.go",
+        "plugins/bazel_bases.go",
         "plugins/cache.go",
         "plugins/debris_report.go",
         "plugins/devartifacts.go",
@@ -271,6 +275,8 @@ go_library(
     ] + select({
         "@platforms//os:macos": [
             "plugins/apfs_darwin.go",
+            "plugins/bazel_bases_darwin.go",
+            "plugins/bazel_bases_unix.go",
             "plugins/darwin.go",
             "plugins/fs_ctime_darwin.go",
             "plugins/temp_mounts_darwin.go",
@@ -278,6 +284,8 @@ go_library(
             "plugins/nix_process_argv_darwin.go",
         ],
         "@platforms//os:linux": [
+            "plugins/bazel_bases_linux.go",
+            "plugins/bazel_bases_unix.go",
             "plugins/fs_ctime_linux.go",
             "plugins/temp_mounts_linux.go",
             "plugins/github_runner.go",
@@ -285,6 +293,7 @@ go_library(
             "plugins/yum.go",
         ],
         "//conditions:default": [
+            "plugins/bazel_bases_other.go",
             "plugins/fs_ctime_other.go",
             "plugins/temp_mounts_other.go",
             "plugins/github_runner.go",
@@ -307,6 +316,7 @@ go_test(
     name = "plugins_test",
     srcs = [
         "plugins/archive_lifecycle_test.go",
+        "plugins/bazel_bases_test.go",
         "plugins/bazel_test.go",
         "plugins/debris_report_test.go",
         "plugins/devartifacts_test.go",
@@ -327,6 +337,7 @@ go_test(
             "plugins/nix_process_argv_darwin_test.go",
         ],
         "@platforms//os:linux": [
+            "plugins/bazel_bases_linux_test.go",
             "plugins/github_runner_linux_test.go",
             "plugins/nix_process_argv_linux_test.go",
         ],

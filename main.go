@@ -356,6 +356,51 @@ func (d *daemon) run(ctx context.Context) error {
 
 // pollInterval returns the configured poll interval, never less than one
 // second, so a zero or negative value cannot spin the loop.
+// levelIndependent reports a plugin that runs outside the level ladder.
+func levelIndependent(p plugins.Plugin) bool {
+	li, ok := p.(plugins.LevelIndependent)
+	return ok && li.LevelIndependent()
+}
+
+// runLevelIndependentPlugin plans (dry run) or runs one level-independent
+// plugin and appends its report. It returns bytes freed and items cleaned.
+func (d *daemon) runLevelIndependentPlugin(ctx context.Context, report *cycleReport, p plugins.Plugin, level plugins.CleanupLevel) (int64, int) {
+	pluginReport := pluginCycleReport{
+		Name:        p.Name(),
+		Description: p.Description(),
+		Level:       level.String(),
+		DryRun:      d.dryRun,
+		WouldRun:    true,
+	}
+	if d.dryRun {
+		if planner, ok := p.(plugins.Planner); ok {
+			plan := planner.PlanCleanup(ctx, level, d.config, d.logger)
+			pluginReport.Plan = &plan
+			report.PlannedEstimatedBytesFreed += plan.EstimatedBytesFreed
+			report.PlannedTargets += len(plan.Targets)
+		}
+		pluginReport.SkipReason = "dry_run"
+		report.Plugins = append(report.Plugins, pluginReport)
+		return 0, 0
+	}
+	result := p.Cleanup(ctx, level, d.config, d.logger)
+	pluginReport.Ran = true
+	pluginReport.BytesFreed = result.BytesFreed
+	pluginReport.EstimatedBytesFreed = result.EstimatedBytesFreed
+	pluginReport.ItemsCleaned = result.ItemsCleaned
+	if result.Error != nil {
+		pluginReport.Error = result.Error.Error()
+		d.logger.Error("plugin failed", "plugin", p.Name(), "error", result.Error)
+	}
+	report.Plugins = append(report.Plugins, pluginReport)
+	if result.Error == nil && (result.BytesFreed > 0 || result.ItemsCleaned > 0) {
+		report.TotalBytesFreed += result.BytesFreed
+		report.TotalItemsCleaned += result.ItemsCleaned
+		return result.BytesFreed, result.ItemsCleaned
+	}
+	return 0, 0
+}
+
 func (d *daemon) pollInterval() time.Duration {
 	interval := time.Second
 	if d.config != nil && d.config.PollInterval > 0 {
@@ -478,6 +523,13 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 				d.logger.Warn("failed to save cleanup state", "path", report.StateFile, "error", err)
 			}
 		}
+		// Level-independent plugins (R-C645) apply their own per-mount
+		// pressure and idle policy, so they run with no host pressure too.
+		for _, p := range filterEnabledPlugins(d.registry.GetEnabled(d.config), d.pluginFilter) {
+			if levelIndependent(p) {
+				d.runLevelIndependentPlugin(ctx, &report, p, plugins.LevelNone)
+			}
+		}
 		return report, nil
 	}
 
@@ -575,6 +627,14 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 	var totalFreed int64
 	var totalItems int
 	for _, p := range enabledPlugins {
+		if levelIndependent(p) {
+			// Never held back by target_free_met, zero yield or cooldown.
+			freed, items := d.runLevelIndependentPlugin(ctx, &report, p, pluginLevel)
+			totalFreed += freed
+			totalItems += items
+			d.updateHostFreeAfter(&report, beforeStats, beforeErr)
+			continue
+		}
 		pluginReport := pluginCycleReport{
 			Name:        p.Name(),
 			Description: p.Description(),
@@ -1717,6 +1777,7 @@ func registerPlugins(registry *plugins.Registry) {
 	registry.Register(plugins.NewPodmanPlugin())
 	registry.Register(plugins.NewNixPlugin())
 	registry.Register(plugins.NewBazelPlugin())
+	registry.Register(plugins.NewBazelBasesPlugin())
 	registry.Register(plugins.NewCachePlugin())
 
 	// Development artifact cleanup (all platforms)

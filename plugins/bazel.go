@@ -159,6 +159,7 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("Bazel output-base byte refinement was partial: %v", refineErr))
 	}
 	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
+	targets = bazelHandOffTargets(targets, cfg)
 
 	orphanCount, unreachableCount := bazelWorkspaceClaimCounts(candidates)
 	plan.Metadata["orphaned_workspace_output_base_count"] = strconv.Itoa(orphanCount)
@@ -972,6 +973,33 @@ func bazelTargetForCandidate(candidate bazelCandidate, staleAfter time.Duration,
 	}
 	annotateCleanupTargetPolicy(&target, bazelCandidateTier(candidate.Type), hostReclaimForAction(action))
 	return target
+}
+
+// bazelHandOffTargets keeps every target the bazel plugin must not delete:
+// output bases once bazel_bases owns them in apply mode (one owner, never
+// two; R-C644), and anything inside the TIN-5268 agent-session deny set.
+func bazelHandOffTargets(targets []CleanupTarget, cfg *config.Config) []CleanupTarget {
+	owned := cfg.Enable.BazelBases && cfg.BazelBases.Mode == config.BazelBasesModeApply
+	home, _ := os.UserHomeDir()
+	deny := newAgentSessionDeny(home, os.Getuid(), os.Getenv("TMPDIR"), cfg.AgentSession.ExtraPaths, nil)
+	for i := range targets {
+		t := &targets[i]
+		if t.Path == "" {
+			continue
+		}
+		if why, denied := deny.denied(t.Path); denied {
+			t.Action, t.Protected, t.Reason = "keep", true, why
+		} else if why, denied := deny.containsDenied(t.Path); denied {
+			t.Action, t.Protected, t.Reason = "keep", true, why
+		} else if owned && bazelCandidateIsOutputBaseLike(t.Type) {
+			t.Action, t.Protected = "keep", true
+			t.Reason = "output bases are owned by the bazel_bases plugin (R-C644)"
+		} else {
+			continue
+		}
+		annotateCleanupTargetPolicy(t, bazelCandidateTier(t.Type), hostReclaimForAction(t.Action))
+	}
+	return targets
 }
 
 func bazelCandidateTier(candidateType string) string {

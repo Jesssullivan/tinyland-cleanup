@@ -78,6 +78,7 @@ enable:
   yum: true             # DNF/YUM package cache cleanup (Linux only)
   dev_artifacts: true   # Rebuildable workspace artifacts
   bazel: true           # Bazel output base and cache cleanup planning
+  bazel_bases: false    # Structural Bazel/omux output-base reaper (R-C644/R-C645)
   archive_lifecycle: true  # Retire verified archive staging pre-images
 
 # GitHub Actions runner settings (Linux only)
@@ -205,6 +206,40 @@ nix:
   # GC roots so operators can identify what is pinning the store. Set 0 to
   # disable root attribution.
   root_attribution_limit: 20
+
+# Structural Bazel output-base reaper (R-C644, R-C645). Level independent:
+# it runs whatever the host cleanup level and applies its own per-mount
+# pressure. A base idle beyond idle_after is eligible; on a mount at or above
+# pressure_start_percent of bytes or inodes the window drops to
+# pressure_idle_after, bases go largest first, and pressure work stops once
+# both dimensions are below pressure_stop_percent. A live server, a process
+# holding anything under the base, or a held lock always keeps it. In apply
+# mode it owns output-base deletion and the bazel plugin keeps every base.
+# Agent-session stores (TIN-5268) are compiled in and never touched;
+# agent_session.extra_paths can only add to them.
+bazel_bases:
+  mode: report          # report (plan only) | apply
+  roots:
+    - ~/.cache/bazel
+  bases_only_roots: []  # copy trees: only the base itself is ever removed
+  held_paths: []        # never walked, never removed
+  skip_dir_names: [.git, node_modules]
+  skip_name_globs: ["*backup*", "*transfer*", "*evidence*", "*-relocated", "*archive*", "*custody*", "held-*"]
+  max_depth: 8
+  idle_after: 12h           # R-C645 floor: never shorter
+  pressure_idle_after: 2h   # R-C645 floor: never shorter
+  bases_only_idle_after: 48h
+  pressure_start_percent: 70
+  pressure_stop_percent: 60
+  sibling_user_root: bazel-user-root
+  discovery_interval: 30m
+  lsof: ""              # required on Darwin (open-file inventory); optional second witness on Linux
+  git: ""               # empty: git from PATH
+  receipt_dir: ~/.local/state/tinyland-cleanup/bazel-bases
+
+agent_session:
+  extra_paths: []           # added to the compiled TIN-5268 deny set
+  bazel_base_carveouts: []  # globs under a denied tree whose structural bases bazel_bases alone may remove
 
 # Bazel output base and cache review settings
 bazel:
