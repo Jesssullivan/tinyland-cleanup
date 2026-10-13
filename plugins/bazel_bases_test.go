@@ -698,8 +698,8 @@ func TestBazelBasesDueHonoursIntervalAndPressure(t *testing.T) {
 
 // A root whose mount stays above the pressure line with no output base on it
 // (sting's /srv/data: 82% full of data this plugin cannot reap) must not be
-// walked on every poll. The early pressure walk is for mounts where the last
-// walk found a base or a leftover aside.
+// walked on every poll. The early pressure walk is for a mount where a base
+// has passed its pressure window since the last walk, or work was left behind.
 func TestBazelBasesPressureWithNoBaseOnTheMountKeepsTheInterval(t *testing.T) {
 	f := newBBFixture(t)
 	f.usage = func(string) (bbUsage, error) { return bbUsage{BytesTotal: 100, BytesUsed: 82}, nil }
@@ -718,10 +718,10 @@ func TestBazelBasesPressureWithNoBaseOnTheMountKeepsTheInterval(t *testing.T) {
 
 	// An empty root on a pressured mount: one walk, then the interval.
 	cleanup()
-	if f.plugin.lastWork == nil || len(f.plugin.lastWork) != 0 || f.plugin.lastPartial {
-		t.Fatalf("a completed walk of an empty root recorded work=%v partial=%v", f.plugin.lastWork, f.plugin.lastPartial)
+	if f.plugin.earlyAt == nil || len(f.plugin.earlyAt) != 0 || f.plugin.lastPartial {
+		t.Fatalf("a completed walk of an empty root recorded early=%v partial=%v", f.plugin.earlyAt, f.plugin.lastPartial)
 	}
-	now = now.Add(10 * time.Minute)
+	now = now.Add(20 * time.Minute)
 	if f.plugin.due(pol, true) {
 		t.Fatal("a pressured mount with no output base on it was due again inside the discovery interval")
 	}
@@ -730,26 +730,113 @@ func TestBazelBasesPressureWithNoBaseOnTheMountKeepsTheInterval(t *testing.T) {
 		t.Fatal("the discovery interval no longer makes a cycle due")
 	}
 
-	// A base on the mount, used an hour ago: kept, and the early walk is back,
-	// so it goes within minutes of passing the pressure window.
+	// A base on the mount, used 110 minutes ago by the plugin's clock (which
+	// this test has moved 20 minutes ahead): kept. No early walk while it is
+	// inside the 2h pressure window; one as soon as it has left it.
 	base := filepath.Join(f.root, "a", "out")
-	bbMakeBase(t, base, 64*1024, 1*time.Hour)
+	bbMakeBase(t, base, 64*1024, 90*time.Minute)
+	f.plugin.lastDiscovery = time.Time{}
+	f.plugin.emptyWalks = 0
 	cleanup()
 	if !bbExists(base) {
-		t.Fatal("a base used 1h ago was reaped under pressure (2h floor)")
+		t.Fatal("a base used 110 minutes ago was reaped under pressure (2h floor)")
 	}
-	now = now.Add(10 * time.Minute)
+	now = now.Add(6 * time.Minute)
+	if f.plugin.due(pol, true) {
+		t.Fatal("an early walk was due while the only base was still inside its pressure window")
+	}
+	now = now.Add(5 * time.Minute)
 	if !f.plugin.due(pol, true) {
-		t.Fatal("a pressured mount with a base on it was not due after 5 minutes")
+		t.Fatal("no early walk once the base had passed its pressure window")
 	}
 	if f.plugin.due(pol, false) {
 		t.Fatal("report mode walked again under pressure inside its interval")
 	}
+	cleanup()
+	if bbExists(base) {
+		t.Fatal("the early walk did not reap the base that had passed its pressure window")
+	}
+	if f.plugin.emptyWalks != 0 {
+		t.Fatalf("a walk that removed a base left emptyWalks at %d", f.plugin.emptyWalks)
+	}
 
 	// A walk that was cut short knows too little to skip the early walk.
-	f.plugin.lastWork, f.plugin.lastPartial = map[uint64]bool{}, true
+	now = now.Add(6 * time.Minute)
+	f.plugin.earlyAt, f.plugin.lastPartial = map[uint64]time.Time{}, true
 	if !f.plugin.due(pol, true) {
 		t.Fatal("a partial walk suppressed the early pressure walk")
+	}
+}
+
+// Adversarial review 2026-10-13 (lab R-C644 L3): a pressured mount whose only
+// base can never be reaped (it holds an agent-session directory) was walked on
+// every five-minute poll. Nothing an early walk could do there, so the plugin
+// keeps the discovery interval.
+func TestBazelBasesPressureWithOnlyAKeptBaseKeepsTheInterval(t *testing.T) {
+	f := newBBFixture(t)
+	f.usage = func(string) (bbUsage, error) { return bbUsage{BytesTotal: 100, BytesUsed: 75}, nil }
+	pol, err := f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	f.plugin.env.now = func() time.Time { return now }
+	base := filepath.Join(f.root, "a", "out")
+	bbMakeBase(t, base, 64*1024, 100*time.Hour)
+	bbMkdir(t, filepath.Join(base, "execroot", "_main", ".claude"))
+	bbAge(t, base, 100*time.Hour)
+	walks := 0
+	polls := int(2 * time.Hour / (5 * time.Minute))
+	for i := 0; i < polls; i++ {
+		if f.plugin.due(pol, true) {
+			walks++
+			if res := f.plugin.Cleanup(context.Background(), LevelNone, f.cfg, bbDiscardLogger()); res.Error != nil {
+				t.Fatal(res.Error)
+			}
+		}
+		now = now.Add(5*time.Minute + time.Second)
+	}
+	if !bbExists(base) {
+		t.Fatal("the base holding .claude was removed")
+	}
+	// Two hours at a 30m discovery interval is at most 5 walks; the old rule
+	// made 24.
+	if limit := int(2*time.Hour/pol.interval) + 1; walks > limit {
+		t.Fatalf("%d walks in two hours with one permanently kept base on a pressured mount; the interval allows %d", walks, limit)
+	}
+}
+
+// A walk that is always cut short keeps its early walk, but a run of early
+// walks that remove nothing thins out to the discovery interval.
+func TestBazelBasesEmptyEarlyWalksBackOff(t *testing.T) {
+	f := newBBFixture(t)
+	f.usage = func(string) (bbUsage, error) { return bbUsage{BytesTotal: 100, BytesUsed: 75}, nil }
+	pol, err := f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.plugin.earlyGap(pol); got != bbPressureMinInterval {
+		t.Fatalf("first early gap is %s", got)
+	}
+	f.plugin.emptyWalks = 1
+	if got := f.plugin.earlyGap(pol); got != 2*bbPressureMinInterval {
+		t.Fatalf("early gap after one empty walk is %s", got)
+	}
+	f.plugin.emptyWalks = 40
+	if got := f.plugin.earlyGap(pol); got < pol.interval || got >= 2*pol.interval {
+		t.Fatalf("early gap after many empty walks is %s, interval %s", got, pol.interval)
+	}
+	now := time.Now()
+	f.plugin.env.now = func() time.Time { return now }
+	f.plugin.earlyAt, f.plugin.lastPartial = map[uint64]time.Time{}, true
+	f.plugin.emptyWalks = 2
+	f.plugin.lastDiscovery = now.Add(-10 * time.Minute)
+	if f.plugin.due(pol, true) {
+		t.Fatal("an early walk was due 10 minutes after the second empty walk (the gap is 20 minutes)")
+	}
+	f.plugin.lastDiscovery = now.Add(-21 * time.Minute)
+	if !f.plugin.due(pol, true) {
+		t.Fatal("no early walk 21 minutes after the second empty walk")
 	}
 }
 
