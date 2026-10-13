@@ -6,6 +6,7 @@
 package plugins
 
 import (
+	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/xml"
@@ -1352,7 +1353,7 @@ func activeHarnessScratchSessions(ctx context.Context, scanPaths []string, home 
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	cmd := commandContext(psCtx, "ps", "-axo", "comm=,args=")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -1364,7 +1365,7 @@ func activeHarnessScratchSessions(ctx context.Context, scanPaths []string, home 
 	if lsofPath, err := exec.LookPath("lsof"); err == nil {
 		lsofCtx, cancelLsof := context.WithTimeout(ctx, 10*time.Second)
 		defer cancelLsof()
-		if cwdOutput, err := exec.CommandContext(lsofCtx, lsofPath, "-a", "-d", "cwd", "-Fpn").Output(); err == nil {
+		if cwdOutput, err := commandContext(lsofCtx, lsofPath, "-a", "-d", "cwd", "-Fpn").Output(); err == nil {
 			for pid, cwd := range parseDevArtifactProcessCWDs(string(cwdOutput)) {
 				if session := harnessScratchSessionForPath(cwd, scanPaths, home, daCfg); session != "" {
 					if _, ok := sessions[session]; !ok {
@@ -1916,7 +1917,7 @@ func largeLocalMountedDiskImages(ctx context.Context) map[string]string {
 	}
 	infoCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(infoCtx, hdiutil, "info").Output()
+	output, err := commandContext(infoCtx, hdiutil, "info").Output()
 	if err != nil {
 		return nil
 	}
@@ -2199,7 +2200,7 @@ func (p *DevArtifactsPlugin) activeDevArtifactActivity(ctx context.Context, scan
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "pid=,comm=,args=")
+	cmd := commandContext(psCtx, "ps", "-axo", "pid=,comm=,args=")
 	output, err := cmd.Output()
 	if err != nil {
 		return devArtifactActivity{}, err
@@ -2632,7 +2633,7 @@ func activeAgentPathReferences(ctx context.Context, roots []string, home string)
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	cmd := commandContext(psCtx, "ps", "-axo", "comm=,args=")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -2856,7 +2857,7 @@ func devArtifactProcessCWDs(ctx context.Context, candidates []devArtifactProcess
 	lsofCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	args := []string{"-a", "-d", "cwd", "-Fpn", "-p", strings.Join(pids, ",")}
-	output, err := exec.CommandContext(lsofCtx, lsof, args...).CombinedOutput()
+	output, err := commandContext(lsofCtx, lsof, args...).CombinedOutput()
 	if err != nil && len(output) == 0 {
 		return nil
 	}
@@ -2974,6 +2975,8 @@ type devArtifactGitTracker struct {
 	gitPath            string
 	repoRootByDir      map[string]string
 	trackedFilesByRoot map[string][]string
+	// trackedOrder lists the cached repository roots, oldest first.
+	trackedOrder []string
 }
 
 func newDevArtifactGitTracker() *devArtifactGitTracker {
@@ -3000,7 +3003,7 @@ func gitWorktreeProtectReason(ctx context.Context, path string) string {
 
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(checkCtx, gitPath, "-C", path, "rev-parse", "--is-inside-work-tree")
+	cmd := commandContext(checkCtx, gitPath, "-C", path, "rev-parse", "--is-inside-work-tree")
 	output, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(output)) != "true" {
 		return ""
@@ -3008,7 +3011,7 @@ func gitWorktreeProtectReason(ctx context.Context, path string) string {
 
 	statusCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	statusCmd := exec.CommandContext(statusCtx, gitPath, "-C", path, "status", "--porcelain", "--untracked-files=all")
+	statusCmd := commandContext(statusCtx, gitPath, "-C", path, "status", "--porcelain", "--untracked-files=all")
 	statusOutput, err := statusCmd.Output()
 	if err != nil {
 		return "git worktree status could not be verified"
@@ -3019,7 +3022,7 @@ func gitWorktreeProtectReason(ctx context.Context, path string) string {
 
 	upstreamCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	upstreamCmd := exec.CommandContext(upstreamCtx, gitPath, "-C", path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	upstreamCmd := commandContext(upstreamCtx, gitPath, "-C", path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	upstreamOutput, err := upstreamCmd.Output()
 	if err != nil || strings.TrimSpace(string(upstreamOutput)) == "" {
 		return "git worktree has no upstream branch"
@@ -3027,7 +3030,7 @@ func gitWorktreeProtectReason(ctx context.Context, path string) string {
 
 	aheadCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	aheadCmd := exec.CommandContext(aheadCtx, gitPath, "-C", path, "rev-list", "--count", "@{u}..HEAD")
+	aheadCmd := commandContext(aheadCtx, gitPath, "-C", path, "rev-list", "--count", "@{u}..HEAD")
 	aheadOutput, err := aheadCmd.Output()
 	if err != nil {
 		return "git worktree upstream comparison could not be verified"
@@ -3109,22 +3112,70 @@ func (t *devArtifactGitTracker) trackedFiles(repoRoot string) []string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, t.gitPath, "-C", repoRoot, "ls-files", "-z")
-	output, err := cmd.Output()
+	cmd := commandContext(ctx, t.gitPath, "-C", repoRoot, "ls-files", "-z")
+	files, err := readNULRecords(cmd)
 	if err != nil {
-		t.trackedFilesByRoot[repoRoot] = nil
+		t.remember(repoRoot, nil)
 		return nil
 	}
+	sort.Strings(files)
+	t.remember(repoRoot, files)
+	return files
+}
 
-	var files []string
-	for _, file := range strings.Split(string(output), "\x00") {
-		if file != "" {
-			files = append(files, file)
+// devArtifactGitTrackerRepos is how many repositories' tracked-file lists the
+// tracker keeps. A scan visits one repository's artifacts together, so a
+// small window serves every lookup while a scan across hundreds of
+// repositories no longer holds every list until it ends.
+const devArtifactGitTrackerRepos = 8
+
+func (t *devArtifactGitTracker) remember(repoRoot string, files []string) {
+	if _, ok := t.trackedFilesByRoot[repoRoot]; !ok {
+		t.trackedOrder = append(t.trackedOrder, repoRoot)
+	}
+	t.trackedFilesByRoot[repoRoot] = files
+	for len(t.trackedOrder) > devArtifactGitTrackerRepos {
+		delete(t.trackedFilesByRoot, t.trackedOrder[0])
+		t.trackedOrder = t.trackedOrder[1:]
+	}
+}
+
+// readNULRecords runs cmd and returns its NUL-separated stdout records. It
+// reads the output as a stream, so the raw output is never held in full
+// beside the records cut from it.
+func readNULRecords(cmd *exec.Cmd) ([]string, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	var records []string
+	reader := bufio.NewReaderSize(stdout, 64*1024)
+	var readErr error
+	for {
+		record, err := reader.ReadString(0)
+		if len(record) > 0 && record[len(record)-1] == 0 {
+			record = record[:len(record)-1]
+		}
+		if record != "" {
+			records = append(records, record)
+		}
+		if err != nil {
+			if err != io.EOF {
+				readErr = err
+			}
+			break
 		}
 	}
-	sort.Strings(files)
-	t.trackedFilesByRoot[repoRoot] = files
-	return files
+	if err := cmd.Wait(); err != nil {
+		return nil, err
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	return records, nil
 }
 
 func devArtifactTrackedFilesContain(files []string, rel string) bool {
@@ -3158,7 +3209,7 @@ func devArtifactRecentOutputProtectReasonContext(ctx context.Context, path strin
 
 func devArtifactHasRecentContent(ctx context.Context, path string, grace time.Duration) bool {
 	cutoff := time.Now().Add(-grace)
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	err := streamWalk(path, func(_ string, info os.FileInfo, err error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -3537,15 +3588,15 @@ func (p *DevArtifactsPlugin) cleanGoBuildCache(ctx context.Context, level Cleanu
 	case LevelModerate:
 		// Clean test cache only
 		logger.Debug("cleaning Go test cache")
-		exec.CommandContext(ctx, "go", "clean", "-testcache").Run()
+		reclaimCommandContext(ctx, "go", "clean", "-testcache").Run()
 	case LevelAggressive:
 		// Clean full build cache
 		logger.Debug("cleaning Go build cache")
-		exec.CommandContext(ctx, "go", "clean", "-cache").Run()
+		reclaimCommandContext(ctx, "go", "clean", "-cache").Run()
 	case LevelCritical:
 		// Clean everything: build cache + module cache
 		logger.Debug("cleaning Go build cache and module cache")
-		exec.CommandContext(ctx, "go", "clean", "-cache", "-testcache").Run()
+		reclaimCommandContext(ctx, "go", "clean", "-cache", "-testcache").Run()
 	}
 
 	sizeAfter := getDirSize(goCacheDir)
@@ -3571,7 +3622,7 @@ func (p *DevArtifactsPlugin) cleanPnpmStore(ctx context.Context, home string, le
 	}
 
 	logger.Debug("pruning pnpm store", "path", storePath)
-	if output, err := exec.CommandContext(ctx, "pnpm", "store", "prune").CombinedOutput(); err != nil {
+	if output, err := reclaimCommandContext(ctx, "pnpm", "store", "prune").CombinedOutput(); err != nil {
 		logger.Debug("pnpm store prune failed", "error", err, "output", strings.TrimSpace(string(output)))
 		return 0
 	}
@@ -3617,7 +3668,7 @@ func (p *DevArtifactsPlugin) cleanHaskellCache(ctx context.Context, level Cleanu
 	if level >= LevelCritical {
 		if _, err := exec.LookPath("ghcup"); err == nil {
 			logger.Debug("running ghcup gc")
-			exec.CommandContext(ctx, "ghcup", "gc", "--cache").Run()
+			reclaimCommandContext(ctx, "ghcup", "gc", "--cache").Run()
 		}
 
 		// Clean stack cache
@@ -3823,17 +3874,9 @@ func (p *DevArtifactsPlugin) findArtifactDirsInRoot(ctx context.Context, scanPat
 }
 
 // getGoCacheDir returns the Go build cache directory.
+// It never starts `go`; see goBuildCacheDir.
 func (p *DevArtifactsPlugin) getGoCacheDir(ctx context.Context) string {
-	cmd := exec.CommandContext(ctx, "go", "env", "GOCACHE")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	dir := strings.TrimSpace(string(output))
-	if dir == "" || dir == "off" {
-		return ""
-	}
-	return dir
+	return goBuildCacheDir()
 }
 
 // isFileStale returns true if a file's mtime is older than maxAge.

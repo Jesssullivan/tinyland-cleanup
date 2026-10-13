@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"regexp"
 	"runtime"
 	"sort"
@@ -174,7 +173,7 @@ func (p *DockerPlugin) isDockerAvailableContext(ctx context.Context) bool {
 	availableCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(availableCtx, "docker", "info")
+	cmd := commandContext(availableCtx, "docker", "info")
 	if p.socketPath != "" {
 		cmd.Env = append(os.Environ(), "DOCKER_HOST=unix://"+p.socketPath)
 	}
@@ -288,7 +287,7 @@ func (p *DockerPlugin) runDockerCommandWithTimeout(ctx context.Context, timeout 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := reclaimCommandContext(ctx, "docker", args...)
 	if p.socketPath != "" {
 		cmd.Env = append(os.Environ(), "DOCKER_HOST=unix://"+p.socketPath)
 	}
@@ -300,7 +299,7 @@ func (p *DockerPlugin) activeDockerProcesses(ctx context.Context) ([]string, err
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	cmd := commandContext(psCtx, "ps", "-axo", "comm=,args=")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, err

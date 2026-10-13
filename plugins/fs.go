@@ -36,7 +36,7 @@ func getDirSizeSameDevice(path string) int64 {
 	}
 
 	var size int64
-	filepath.Walk(resolved, func(p string, info os.FileInfo, err error) error {
+	streamWalk(resolved, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -227,7 +227,7 @@ func getDirAllocatedBytes(path string) int64 {
 
 func getDirAllocatedBytesContext(ctx context.Context, path string) (int64, error) {
 	var size int64
-	err := filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
+	err := streamWalk(path, func(p string, info os.FileInfo, err error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

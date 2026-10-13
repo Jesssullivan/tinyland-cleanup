@@ -135,6 +135,54 @@ the particular expensive passes that keep finding nothing:
 - `zero_yield_limit: 0` uses the default of 2; a negative value disables
   suppression.
 
+### Deadlines and the plugin watchdog
+
+```yaml
+policy:
+  plugin_timeout: 45m
+  plugin_timeouts: {}        # per plugin, e.g. {nix: 90m}
+  exec_timeout: 60s
+  exec_timeouts: {}          # per plugin, e.g. {cache: 20s}
+  exec_reclaim_timeout: 15m
+```
+
+Nothing the daemon starts can hold it indefinitely:
+
+- **Commands.** A probe or listing that sets no deadline of its own gets
+  `exec_timeout`; a command that deletes or prunes gets
+  `exec_reclaim_timeout`. A VM stop or disk image conversion gets 2h and a VM
+  start 10m; those two are fixed. At the deadline the child is sent SIGTERM,
+  then SIGKILL 5s later. The plugin report lists it under `wedged_commands`
+  as `wedged:<command>`, and the same program is not started again in that
+  plugin run. Deadlines a plugin sets itself (`nix.max_gc_duration`, the
+  Homebrew and Docker limits, the 5-10s process and git probes) are used as
+  they are.
+- **Plugins.** Each plugin run has `plugin_timeout`. At the deadline its
+  context is cancelled, which ends its commands; a plugin that then returns
+  is reported with `wedged: deadline_cancelled`. One that does not return
+  within 30s is reported with `wedged: deadline_abandoned` and the cycle
+  continues with the next plugin. It is skipped with
+  `skip_reason: plugin_wedged` until the stuck run returns.
+- Empty or invalid values use the defaults shown. Set `plugin_timeouts` for a
+  plugin whose healthy run is long on your host, for example `nix` with a
+  `max_gc_duration` above 30m.
+
+### Memory
+
+```yaml
+policy:
+  memory_limit_mb: 256
+```
+
+The daemon sets this as its Go soft memory limit and returns freed heap to
+the OS after every cycle. `GOMEMLIMIT` in the environment takes precedence;
+a negative value sets no limit. The process itself stays in the tens of MiB.
+A service manager's memory figure for the daemon is usually much larger,
+because the kernel charges the directory-entry and inode cache built by the
+scans to the service's cgroup. That cache is reclaimable. Size a service
+memory cap for it (lab uses `MemoryHigh` below `MemoryMax`), not for the
+heap.
+
 ### Bounded repeated logs
 
 ```yaml

@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -59,7 +58,7 @@ func inspectTemporaryRootActivity(ctx context.Context, paths []string, home stri
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(probeCtx, "ps", "-axo", "comm=,args=").Output()
+	output, err := commandContext(probeCtx, "ps", "-axo", "comm=,args=").Output()
 	if err != nil {
 		return roots, fmt.Errorf("ps: %w", err)
 	}
@@ -74,7 +73,7 @@ func inspectTemporaryRootActivity(ctx context.Context, paths []string, home stri
 		return roots, err
 	}
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(probeCtx, "lsof", "-nP", "-a", "-u", strconv.Itoa(os.Geteuid()), "-F0pn")
+	cmd := commandContext(probeCtx, "lsof", "-nP", "-a", "-u", strconv.Itoa(os.Geteuid()), "-F0pn")
 	cmd.Stderr = &stderr
 	output, err = cmd.Output()
 	if err != nil || stderr.Len() != 0 {

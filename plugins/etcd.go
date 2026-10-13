@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -241,7 +240,7 @@ func (p *EtcdPlugin) cleanCritical(ctx context.Context, cfg *config.Config, logg
 func (p *EtcdPlugin) getEtcdDiskUsage() int {
 	// Get the mount point for etcd data dir and check its usage
 	// Use default data dir until cfg.Etcd is implemented
-	cmd := exec.Command("df", defaultEtcdDataDir)
+	cmd := commandContext(context.Background(), "df", defaultEtcdDataDir)
 	output, err := cmd.Output()
 	if err != nil {
 		return 0
@@ -293,7 +292,7 @@ func (p *EtcdPlugin) runDefrag(ctx context.Context, logger *slog.Logger) {
 		"ETCDCTL_KEY=/var/lib/rancher/rke2/server/tls/etcd/server-client.key",
 	}
 
-	cmd := exec.CommandContext(ctx, etcdctl, "defrag", "--endpoints=https://127.0.0.1:2379")
+	cmd := reclaimCommandContext(ctx, etcdctl, "defrag", "--endpoints=https://127.0.0.1:2379")
 	cmd.Env = append(os.Environ(), env...)
 
 	logger.Debug("running etcd defrag")
@@ -332,7 +331,7 @@ func (p *EtcdPlugin) compactDatabase(ctx context.Context, logger *slog.Logger) {
 	}
 
 	// Get current revision
-	cmd := exec.CommandContext(ctx, etcdctl, "endpoint", "status", "--endpoints=https://127.0.0.1:2379", "--write-out=json")
+	cmd := commandContext(ctx, etcdctl, "endpoint", "status", "--endpoints=https://127.0.0.1:2379", "--write-out=json")
 	cmd.Env = append(os.Environ(), env...)
 	output, err := cmd.Output()
 	if err != nil {

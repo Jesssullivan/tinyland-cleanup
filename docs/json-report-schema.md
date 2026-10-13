@@ -71,13 +71,17 @@ are omitted when empty. The source of truth is the `cycleReport`,
 ## pluginCycleReport
 - `name`, `description` (string); `level` (string); `dry_run`, `would_run` (bool)
 - `ran` (bool) — `Cleanup` was actually invoked this cycle (never true in dry-run); `would_run` is eligibility, `ran` is the outcome
-- `skip_reason` (string, optional) — e.g. `dry_run`, `cooldown`, `byte_backoff`, `zero_yield_backoff`, `target_free_met`
+- `skip_reason` (string, optional) — e.g. `dry_run`, `cooldown`, `byte_backoff`, `zero_yield_backoff`, `target_free_met`, `plugin_wedged`
 - `bytes_freed`, `estimated_bytes_freed`, `command_bytes_freed`, `host_bytes_freed` (int64); `items_cleaned` (int)
 - `cooldown_remaining_seconds` (int64, optional); `error` (string, optional)
 - `retry_at` (string, optional) — RFC3339 time a plugin held back by `cooldown`, `byte_backoff` or `zero_yield_backoff` becomes eligible again
 - `zero_yield_count` (int, optional) — consecutive runs that reclaimed less than `policy.byte_progress_min_mb`
 - `suppressed_until` (string, optional) — RFC3339; this run left the plugin suppressed for zero yield until then
 - `zero_yield_lifted` (string, optional) — why a suppressed plugin ran anyway: `level_rose`, `config_changed`, `operator_run`, `below_emergency_floor`, `free_unknown` (`safety_critical` and `exempt_plugin` appear only for a retry time recorded before the plugin became exempt; exempt plugins are otherwise never suppressed)
+- `wedged` (string, optional) — the plugin watchdog intervened: `deadline_cancelled` (the plugin passed `policy.plugin_timeout`, was cancelled and returned; `ran` is true and its counts are what it finished), `deadline_abandoned` (it did not return within the grace period and the cycle continued without it; `ran` is true, `error` says so) or `plugin_wedged` (skipped this cycle because that earlier run is still stuck)
+- `wedged_since` (string, optional) — RFC3339 start of the stuck run
+- `last_command` (string, optional) — the external command the wedged run started last
+- `wedged_commands` (array of string, optional) — `wedged:<command>` for each external command killed at its deadline this run; can appear on a run that otherwise completed
 - `plan` (object, optional) — dry-run plan with `targets`, byte accounting, and warnings
   - `plan.metadata` (object of string to string, optional) — plugin-specific keys. The `dev-artifacts` scan-budget keys include:
     - `temp_scan_max_roots_scope` — always `per_temp_scan_path`: `temp_scan_max_roots` is applied to each entry of `temp_scan_paths` separately

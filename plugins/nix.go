@@ -278,7 +278,7 @@ func (p *NixPlugin) collectGarbageDryRun(ctx context.Context, cfg config.NixConf
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "nix-collect-garbage", "--dry-run")
+	cmd := commandContext(ctx, "nix-collect-garbage", "--dry-run")
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
@@ -292,7 +292,7 @@ func (p *NixPlugin) printGCRoots(ctx context.Context, cfg config.NixConfig) (str
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "nix-store", "--gc", "--print-roots")
+	cmd := commandContext(ctx, "nix-store", "--gc", "--print-roots")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("nix-store --gc --print-roots failed: %w: %s", err, strings.TrimSpace(string(output)))
@@ -340,7 +340,7 @@ func (p *NixPlugin) collectGarbage(ctx context.Context, level CleanupLevel, args
 	ctx, cancel := context.WithTimeout(ctx, nixCommandTimeout(cfg))
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "nix-collect-garbage", args...)
+	cmd := reclaimCommandContext(ctx, "nix-collect-garbage", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if reason, ok := nixContentionReason(string(output)); ok && cfg.SkipWhenDaemonBusy {
@@ -441,7 +441,7 @@ func (p *NixPlugin) collectGarbageCritical(ctx context.Context, cfg config.NixCo
 	optimizeCtx, cancel := context.WithTimeout(ctx, nixCommandTimeout(cfg))
 	defer cancel()
 
-	cmd := exec.CommandContext(optimizeCtx, "nix-store", "--optimize")
+	cmd := reclaimCommandContext(optimizeCtx, "nix-store", "--optimize")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Error("nix-store --optimize failed", "error", err, "output", string(output))
@@ -492,7 +492,7 @@ func (p *NixPlugin) deleteUserGenerationsByPolicy(ctx context.Context, level Cle
 	deleteCtx, cancel := context.WithTimeout(ctx, nixCommandTimeout(cfg))
 	defer cancel()
 
-	cmd := exec.CommandContext(deleteCtx, "nix-env", args...)
+	cmd := reclaimCommandContext(deleteCtx, "nix-env", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if reason, ok := nixContentionReason(string(output)); ok && cfg.SkipWhenDaemonBusy {
@@ -556,7 +556,7 @@ func (p *NixPlugin) deleteHomeManagerGenerationsByPolicy(ctx context.Context, le
 	deleteCtx, cancel := context.WithTimeout(ctx, nixCommandTimeout(cfg))
 	defer cancel()
 
-	cmd := exec.CommandContext(deleteCtx, "home-manager", args...)
+	cmd := reclaimCommandContext(deleteCtx, "home-manager", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if reason, ok := nixContentionReason(string(output)); ok && cfg.SkipWhenDaemonBusy {
@@ -660,7 +660,7 @@ func (p *NixPlugin) listGenerations(ctx context.Context, scope, profile string, 
 	listCtx, cancel := context.WithTimeout(ctx, nixCommandTimeout(cfg))
 	defer cancel()
 
-	cmd := exec.CommandContext(listCtx, "nix-env", args...)
+	cmd := reclaimCommandContext(listCtx, "nix-env", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("nix-env %s failed: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
@@ -722,7 +722,7 @@ func (p *NixPlugin) activeNixProcesses(ctx context.Context) ([]string, error) {
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "pid=,ppid=,uid=,comm=")
+	cmd := commandContext(psCtx, "ps", "-axo", "pid=,ppid=,uid=,comm=")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, err

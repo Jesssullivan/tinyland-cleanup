@@ -214,8 +214,8 @@ func (p *GitHubRunnerPlugin) cleanupTarget(ctx context.Context, level CleanupLev
 
 		// Clean Docker volumes/containers created by runner
 		if _, err := exec.LookPath("docker"); err == nil {
-			exec.CommandContext(ctx, "docker", "container", "prune", "-f", "--filter", "label=com.github.actions.runner").Run()
-			exec.CommandContext(ctx, "docker", "volume", "prune", "-f", "--filter", "label=com.github.actions.runner").Run()
+			reclaimCommandContext(ctx, "docker", "container", "prune", "-f", "--filter", "label=com.github.actions.runner").Run()
+			reclaimCommandContext(ctx, "docker", "volume", "prune", "-f", "--filter", "label=com.github.actions.runner").Run()
 			logger.Debug("cleaned github runner docker resources")
 		}
 	}

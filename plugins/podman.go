@@ -627,7 +627,7 @@ func (p *PodmanPlugin) runPodmanCommand(ctx context.Context, args ...string) (st
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "podman", args...)
+	cmd := reclaimCommandContext(ctx, "podman", args...)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
@@ -932,7 +932,7 @@ func detectPodmanEnvironment() (*PodmanEnvironment, error) {
 	}
 
 	// Verify podman is functional
-	cmd := exec.Command("podman", "info", "--format", "{{.Version.Version}}")
+	cmd := commandContext(context.Background(), "podman", "info", "--format", "{{.Version.Version}}")
 	if err := cmd.Run(); err != nil {
 		return env, nil
 	}
@@ -974,7 +974,7 @@ func detectMachineProvider() string {
 // detectMachine detects the running machine when available, otherwise a default
 // or first machine that can still be inspected while stopped.
 func detectMachine() (bool, string) {
-	cmd := exec.Command("podman", "machine", "list", "--format", "{{.Name}}\t{{.Running}}")
+	cmd := commandContext(context.Background(), "podman", "machine", "list", "--format", "{{.Name}}\t{{.Running}}")
 	output, err := cmd.Output()
 	if err != nil {
 		return false, detectMachineNameFromConfig()
@@ -1123,7 +1123,7 @@ func (p *PodmanPlugin) trimVMDisk(ctx context.Context, logger *slog.Logger) (int
 		return 0, nil
 	}
 
-	cmd := exec.CommandContext(ctx, "podman", "machine", "ssh",
+	cmd := reclaimCommandContext(ctx, "podman", "machine", "ssh",
 		p.environment.MachineName, "--", "sudo", "fstrim", "-av")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1696,7 +1696,7 @@ func restorePodmanDiskBackupCopy(ctx context.Context, qemuImgPath, diskFormat, d
 
 func convertPodmanDiskImage(ctx context.Context, qemuImgPath, diskFormat, sourcePath, destPath string) error {
 	destExisted := pathExists(destPath)
-	convertCmd := exec.CommandContext(ctx, qemuImgPath, "convert",
+	convertCmd := offlineCommandContext(ctx, qemuImgPath, "convert",
 		"-f", diskFormat, "-O", diskFormat, sourcePath, destPath)
 	if output, err := convertCmd.CombinedOutput(); err != nil {
 		if !destExisted {
@@ -1712,7 +1712,7 @@ func verifyPodmanDiskImage(ctx context.Context, qemuImgPath, diskFormat, diskPat
 		return nil
 	}
 
-	checkCmd := exec.CommandContext(ctx, qemuImgPath, "check", diskPath)
+	checkCmd := offlineCommandContext(ctx, qemuImgPath, "check", diskPath)
 	if output, err := checkCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("qemu-img check failed: %w (output: %s)", err, string(output))
 	}
@@ -1745,7 +1745,7 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 		"required_free_gb", fmt.Sprintf("%.1f", float64(plan.RequiredFreeBytes)/float64(podmanCompactionGiB)))
 
 	// 1. Stop machine
-	stopCmd := exec.CommandContext(ctx, "podman", "machine", "stop", p.environment.MachineName)
+	stopCmd := offlineCommandContext(ctx, "podman", "machine", "stop", p.environment.MachineName)
 	if output, err := stopCmd.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("failed to stop machine: %w (output: %s)", err, string(output))
 	}
@@ -1760,7 +1760,7 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 	if err := convertPodmanDiskImage(ctx, qemuImgPath, plan.DiskFormat, plan.DiskPath, plan.TempPath); err != nil {
 		os.Remove(plan.TempPath)
 		// Restart machine before returning
-		exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+		restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 		p.environment.VMRunning = true
 		return 0, err
 	}
@@ -1768,14 +1768,14 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 	// 3. Verify if qcow2 format
 	if err := verifyPodmanDiskImage(ctx, qemuImgPath, plan.DiskFormat, plan.TempPath); err != nil {
 		os.Remove(plan.TempPath)
-		exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+		restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 		p.environment.VMRunning = true
 		return 0, err
 	}
 
 	if _, err := os.Stat(plan.TempPath); err != nil {
 		os.Remove(plan.TempPath)
-		exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+		restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 		p.environment.VMRunning = true
 		return 0, fmt.Errorf("cannot stat compacted disk: %w", err)
 	}
@@ -1784,26 +1784,26 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 	if plan.CrossDeviceReplacement {
 		if !cfg.Podman.CompactKeepBackupUntilRestart {
 			os.Remove(plan.TempPath)
-			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+			restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 			p.environment.VMRunning = true
 			return 0, fmt.Errorf("cross-device disk replacement requires compact_keep_backup_until_restart")
 		}
 		if err := convertPodmanDiskImage(ctx, qemuImgPath, plan.DiskFormat, plan.DiskPath, plan.BackupPath); err != nil {
 			os.Remove(plan.TempPath)
-			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+			restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 			p.environment.VMRunning = true
 			return 0, fmt.Errorf("failed to preserve original disk backup: %w", err)
 		}
 		if err := os.Remove(plan.DiskPath); err != nil {
 			os.Remove(plan.TempPath)
-			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+			restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 			p.environment.VMRunning = true
 			return 0, fmt.Errorf("failed to remove original disk after preserving backup: %w", err)
 		}
 		if err := convertPodmanDiskImage(ctx, qemuImgPath, plan.DiskFormat, plan.TempPath, plan.DiskPath); err != nil {
 			restoreErr := restorePodmanDiskBackupCopy(ctx, qemuImgPath, plan.DiskFormat, plan.DiskPath, plan.BackupPath)
 			os.Remove(plan.TempPath)
-			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+			restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 			p.environment.VMRunning = true
 			if restoreErr != nil {
 				return 0, fmt.Errorf("failed to write compacted disk and restore backup: replace=%w restore=%v", err, restoreErr)
@@ -1813,7 +1813,7 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 		if err := verifyPodmanDiskImage(ctx, qemuImgPath, plan.DiskFormat, plan.DiskPath); err != nil {
 			restoreErr := restorePodmanDiskBackupCopy(ctx, qemuImgPath, plan.DiskFormat, plan.DiskPath, plan.BackupPath)
 			os.Remove(plan.TempPath)
-			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+			restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 			p.environment.VMRunning = true
 			if restoreErr != nil {
 				return 0, fmt.Errorf("failed to verify compacted disk and restore backup: verify=%w restore=%v", err, restoreErr)
@@ -1824,14 +1824,14 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 	} else if cfg.Podman.CompactKeepBackupUntilRestart {
 		if err := os.Rename(plan.DiskPath, plan.BackupPath); err != nil {
 			os.Remove(plan.TempPath)
-			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+			restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 			p.environment.VMRunning = true
 			return 0, fmt.Errorf("failed to preserve original disk backup: %w", err)
 		}
 		if err := os.Rename(plan.TempPath, plan.DiskPath); err != nil {
 			restoreErr := os.Rename(plan.BackupPath, plan.DiskPath)
 			os.Remove(plan.TempPath)
-			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+			restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 			p.environment.VMRunning = true
 			if restoreErr != nil {
 				return 0, fmt.Errorf("failed to replace disk and restore backup: replace=%w restore=%v", err, restoreErr)
@@ -1840,14 +1840,14 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 		}
 	} else if err := os.Rename(plan.TempPath, plan.DiskPath); err != nil {
 		os.Remove(plan.TempPath)
-		exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+		restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 		p.environment.VMRunning = true
 		return 0, fmt.Errorf("failed to replace disk: %w", err)
 	}
 
 	// 5. Restart machine
 	logger.Info("restarting Podman machine after compaction", "machine", p.environment.MachineName)
-	startCmd := exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName)
+	startCmd := restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName)
 	if output, err := startCmd.CombinedOutput(); err != nil {
 		logger.Error("failed to restart machine after compaction",
 			"machine", p.environment.MachineName, "error", err, "output", string(output))
@@ -1861,7 +1861,7 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 			if restoreErr != nil {
 				return 0, fmt.Errorf("failed to restart machine after compaction and restore backup: restart=%w restore=%v", err, restoreErr)
 			}
-			exec.CommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
+			restartCommandContext(ctx, "podman", "machine", "start", p.environment.MachineName).Run()
 		}
 		p.environment.VMRunning = true
 		return 0, fmt.Errorf("failed to restart machine after compaction: %w", err)
@@ -1902,7 +1902,7 @@ func (p *PodmanPlugin) compactRawDisk(ctx context.Context, cfg *config.Config, l
 // getMachineDiskPath extracts the disk image path from podman machine config.
 func (p *PodmanPlugin) getMachineDiskPath(ctx context.Context) (string, error) {
 	// Strategy 1: Try podman machine inspect for ImagePath/DiskPath (older Podman)
-	cmd := exec.CommandContext(ctx, "podman", "machine", "inspect", p.environment.MachineName)
+	cmd := commandContext(ctx, "podman", "machine", "inspect", p.environment.MachineName)
 	if output, err := cmd.Output(); err == nil {
 		outputStr := string(output)
 		// Check for simple string value: "ImagePath": "/path/to/disk"
@@ -2028,7 +2028,7 @@ func (p *PodmanPlugin) cleanInsideVM(ctx context.Context, level CleanupLevel, lo
 	}
 
 	for _, args := range commands {
-		cmd := exec.CommandContext(ctx, "podman",
+		cmd := reclaimCommandContext(ctx, "podman",
 			append([]string{"machine", "ssh", p.environment.MachineName, "--"}, args...)...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {

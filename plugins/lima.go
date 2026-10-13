@@ -137,7 +137,7 @@ func (p *LimaPlugin) isLimaAvailable() bool {
 }
 
 func (p *LimaPlugin) getRunningVMs(ctx context.Context) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "limactl", "list", "--format", "{{.Name}}\t{{.Status}}")
+	cmd := commandContext(ctx, "limactl", "list", "--format", "{{.Name}}\t{{.Status}}")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list VMs: %w", err)
@@ -199,7 +199,7 @@ func (p *LimaPlugin) cleanupVM(ctx context.Context, vmName string, level Cleanup
 	// Execute commands inside VM
 	for _, args := range commands {
 		cmdArgs := append([]string{"shell", vmName, "--"}, args...)
-		cmd := exec.CommandContext(ctx, "limactl", cmdArgs...)
+		cmd := reclaimCommandContext(ctx, "limactl", cmdArgs...)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			logger.Debug("VM command failed", "vm", vmName, "cmd", strings.Join(args, " "), "error", err)
@@ -220,7 +220,7 @@ func (p *LimaPlugin) runFSTrim(ctx context.Context, vmName string, logger *slog.
 	result := CleanupResult{Plugin: p.Name() + "-fstrim"}
 
 	// Run fstrim -av to reclaim all space
-	cmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--", "sudo", "fstrim", "-av")
+	cmd := reclaimCommandContext(ctx, "limactl", "shell", vmName, "--", "sudo", "fstrim", "-av")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Debug("fstrim failed", "vm", vmName, "error", err)
@@ -250,7 +250,7 @@ func (p *LimaPlugin) runFSTrim(ctx context.Context, vmName string, logger *slog.
 
 func (p *LimaPlugin) getVMDiskUsage(ctx context.Context, vmName string, logger *slog.Logger) int64 {
 	// Get disk usage via df command inside VM
-	cmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--", "df", "--output=used", "/")
+	cmd := commandContext(ctx, "limactl", "shell", vmName, "--", "df", "--output=used", "/")
 	output, err := cmd.Output()
 	if err != nil {
 		logger.Debug("failed to get VM disk usage", "vm", vmName, "error", err)
@@ -281,7 +281,7 @@ func (p *LimaPlugin) GetVMDiskInfo(ctx context.Context, vmName string) (*VMDiskI
 	}
 
 	// Get VM status
-	statusCmd := exec.CommandContext(ctx, "limactl", "list", vmName, "--format", "{{.Status}}")
+	statusCmd := commandContext(ctx, "limactl", "list", vmName, "--format", "{{.Status}}")
 	statusOutput, err := statusCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VM status: %w", err)
@@ -293,7 +293,7 @@ func (p *LimaPlugin) GetVMDiskInfo(ctx context.Context, vmName string) (*VMDiskI
 	}
 
 	// Get disk usage from inside VM
-	dfCmd := exec.CommandContext(ctx, "limactl", "shell", vmName, "--",
+	dfCmd := commandContext(ctx, "limactl", "shell", vmName, "--",
 		"df", "--output=size,used,avail,pcent", "/")
 	dfOutput, err := dfCmd.Output()
 	if err != nil {
@@ -441,27 +441,27 @@ func (p *LimaPlugin) compactDisk(ctx context.Context, vm *VMDiskInfo, logger *sl
 	logger.Warn("CRITICAL: stopping Lima VM for disk compaction", "vm", vm.Name)
 
 	// 1. Stop VM
-	stopCmd := exec.CommandContext(ctx, "limactl", "stop", vm.Name)
+	stopCmd := offlineCommandContext(ctx, "limactl", "stop", vm.Name)
 	if output, err := stopCmd.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("failed to stop VM: %w (output: %s)", err, string(output))
 	}
 
 	// 2. Compact: qemu-img convert
 	logger.Info("compacting Lima disk image", "vm", vm.Name, "disk", vm.DiskPath)
-	convertCmd := exec.CommandContext(ctx, "qemu-img", "convert", "-O", "qcow2", vm.DiskPath, compactPath)
+	convertCmd := offlineCommandContext(ctx, "qemu-img", "convert", "-O", "qcow2", vm.DiskPath, compactPath)
 	if output, err := convertCmd.CombinedOutput(); err != nil {
 		// Restart VM before returning error
-		exec.CommandContext(ctx, "limactl", "start", vm.Name).Run()
+		restartCommandContext(ctx, "limactl", "start", vm.Name).Run()
 		os.Remove(compactPath)
 		return 0, fmt.Errorf("qemu-img convert failed: %w (output: %s)", err, string(output))
 	}
 
 	// 3. Verify compacted image
-	checkCmd := exec.CommandContext(ctx, "qemu-img", "check", compactPath)
+	checkCmd := offlineCommandContext(ctx, "qemu-img", "check", compactPath)
 	if output, err := checkCmd.CombinedOutput(); err != nil {
 		// Verification failed - remove compact file and restart
 		os.Remove(compactPath)
-		exec.CommandContext(ctx, "limactl", "start", vm.Name).Run()
+		restartCommandContext(ctx, "limactl", "start", vm.Name).Run()
 		return 0, fmt.Errorf("qemu-img check failed: %w (output: %s)", err, string(output))
 	}
 
@@ -469,20 +469,20 @@ func (p *LimaPlugin) compactDisk(ctx context.Context, vm *VMDiskInfo, logger *sl
 	compactStat, err := os.Stat(compactPath)
 	if err != nil {
 		os.Remove(compactPath)
-		exec.CommandContext(ctx, "limactl", "start", vm.Name).Run()
+		restartCommandContext(ctx, "limactl", "start", vm.Name).Run()
 		return 0, fmt.Errorf("cannot stat compacted disk: %w", err)
 	}
 
 	// 5. Atomic replace
 	if err := os.Rename(compactPath, vm.DiskPath); err != nil {
 		os.Remove(compactPath)
-		exec.CommandContext(ctx, "limactl", "start", vm.Name).Run()
+		restartCommandContext(ctx, "limactl", "start", vm.Name).Run()
 		return 0, fmt.Errorf("failed to replace disk image: %w", err)
 	}
 
 	// 6. Restart VM
 	logger.Info("restarting Lima VM after compaction", "vm", vm.Name)
-	startCmd := exec.CommandContext(ctx, "limactl", "start", vm.Name)
+	startCmd := restartCommandContext(ctx, "limactl", "start", vm.Name)
 	if output, err := startCmd.CombinedOutput(); err != nil {
 		logger.Error("failed to restart VM after compaction", "vm", vm.Name, "error", err, "output", string(output))
 	}

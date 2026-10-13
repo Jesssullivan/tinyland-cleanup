@@ -4,6 +4,65 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-13
+
+A hotfix for a daemon that could stop for good. On one host the cache plugin
+waited sixteen hours on a `go env GOCACHE` child that never returned; plugins
+ran one after another with no deadline, so nothing else ran, and the service
+manager saw a live process and reported it healthy. Ending that child by hand
+moved the wedge to the next command with no deadline, `limactl list`.
+
+### Fixed
+
+- **Every external command has a deadline.** All commands a plugin starts go
+  through `commandContext`, `reclaimCommandContext`, `offlineCommandContext`
+  or `restartCommandContext` (`plugins/exec_deadline.go`). A command whose
+  caller set no deadline gets one by class: 60s for probes and listings
+  (`policy.exec_timeout`, per plugin in `policy.exec_timeouts`), 15m for
+  commands that delete or prune (`policy.exec_reclaim_timeout`), 2h for a VM
+  stop or a disk image conversion, 10m for a VM start. At the deadline the
+  child gets SIGTERM, then SIGKILL after 5s, and a grandchild left holding
+  the output pipe no longer keeps the caller waiting. The kill is logged and
+  reported as `wedged:<command>` in the plugin's `wedged_commands`. Once a
+  program has hung in a plugin run, that run does not start it again (a VM
+  start is always attempted). A deadline the caller chose is used as given.
+  A test fails the build if a bare `exec.Command` or `exec.CommandContext`
+  returns to the plugins package.
+- **Plugin watchdog.** Each plugin runs under a deadline
+  (`policy.plugin_timeout`, default 45m; per plugin in
+  `policy.plugin_timeouts`). At the deadline its context ends, which
+  terminates its commands, and the report carries
+  `wedged: deadline_cancelled`. A plugin that still does not return within
+  30s is left behind: the cycle goes on to the next plugin and reports
+  `wedged: deadline_abandoned`. Until that run returns the plugin is skipped
+  with `skip_reason: plugin_wedged`, so it never runs twice at once. Dry-run
+  planning is covered the same way.
+- **The Go build cache is located without starting `go`.** `GOCACHE` comes
+  from the environment, then the go/env file (`go env -w`, `GOENV`), then the
+  default `go-build` directory under the user cache directory, which is the
+  rule `go` applies itself. `go env` is no longer run anywhere.
+- A VM start that follows a stop by this daemon now runs even when the
+  plugin's context has ended, so a compaction cut short does not leave the
+  VM down.
+
+### Changed
+
+- **Lower memory.** The daemon sets a Go soft memory limit of 256 MiB
+  (`policy.memory_limit_mb`; `GOMEMLIMIT` wins; negative for none) and
+  returns freed heap to the OS after each cycle. Directory sizing reads a
+  directory in batches of 1024 entries instead of all at once, unsorted
+  (`plugins/streamwalk.go`): sizing 40,000 entries holds about 150 KiB live
+  where `filepath.Walk` held 2.6 MiB, and the gap grows with the directory.
+  Walks that delete as they go, or resume from a cursor, are unchanged.
+  `git ls-files` output is read as a stream, and dev-artifacts keeps the
+  tracked-file lists of the 8 most recent repositories instead of every
+  repository a scan visits.
+- Measured on a host whose service was pinned at a 512M cap: the process
+  itself peaked at 65 MiB resident over a full dry-run cycle. The rest of
+  the cap was reclaimable kernel directory-entry and inode cache charged to
+  the service's cgroup by the scans, which the kernel drops under pressure.
+  A service memory cap on this daemon measures that cache, not its heap.
+
 ### Added
 
 - `bazel_bases`: structural Bazel/omux output-base reaper (R-C644, R-C645;

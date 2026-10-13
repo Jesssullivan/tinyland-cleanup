@@ -1,6 +1,20 @@
 # Validation status
 
-Updated: 2026-10-04
+Updated: 2026-10-13
+
+## v0.4.3 (TIN-5770)
+
+- **Scope:** per-command deadlines, the plugin watchdog, the Go build cache
+  located without starting `go`, the soft memory limit and batched directory
+  sizing. It also releases `bazel_bases` and the TIN-5268 deny set (#143).
+- **Validated** on sting (Linux x86_64, Go 1.27.1): `go vet ./...`,
+  `go test ./...` in the default and `tinyland_sim` builds, `-race` on the
+  new tests, and a Darwin arm64 cross build. The fixtures cover a child that
+  hangs forever, one that ignores SIGTERM, one that stops itself, a
+  grandchild holding the output pipe, and a plugin that never returns.
+- **Not validated here:** a run on a Darwin host. The failure this release
+  fixes was on Darwin; the fix was exercised there only through the cross
+  build.
 
 ## v0.4.2 (TIN-3342)
 

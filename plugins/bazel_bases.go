@@ -1544,7 +1544,7 @@ func bbGuard(ctx context.Context, path, root string, mounts []string, mountErr e
 			}
 			rel, _ := filepath.Rel(d, path)
 			cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
-			cmd := exec.CommandContext(cctx, git, "-C", d, "ls-files", "-z", "--", rel)
+			cmd := commandContext(cctx, git, "-C", d, "ls-files", "-z", "--", rel)
 			cmd.Env = bbGitEnv()
 			out, err := cmd.Output()
 			cancel()
