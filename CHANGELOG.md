@@ -55,6 +55,16 @@ moved the wedge to the next command with no deadline, `limactl list`.
   `.venv`, `target` and zig trees inside a session tree. It now adds the same
   names under every temp scan path to `protect_paths` for the cycle, so the
   default `harness_scratch` pattern (`claude-*`) no longer deletes anything.
+- `bazel_bases`: in apply mode a root whose mount stayed at or above the
+  pressure line was walked again five minutes after every walk, even when the
+  plugin could relieve nothing there: a data volume full of other things, or
+  a mount whose only bases are live or kept for what is inside them. The
+  early pressure walk now needs a reason to expect a removal on that mount:
+  the last cycle deferred a base there, or a base it kept as recently used
+  has since passed its pressure window. Otherwise the discovery interval
+  applies. A walk that was cut short keeps the early walk, and every
+  consecutive apply cycle that removes nothing doubles the wait before the
+  next early walk, up to the discovery interval.
 
 ### Changed
 

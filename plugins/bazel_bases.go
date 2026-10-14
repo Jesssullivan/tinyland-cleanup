@@ -268,6 +268,18 @@ type BazelBasesPlugin struct {
 	env           bbEnv
 	lastDiscovery time.Time
 	pressured     map[uint64]bool
+	// earlyAt holds, per device, the earliest time a walk before the
+	// discovery interval could remove something there: the zero time when
+	// the last cycle left work behind, else when the first base kept as
+	// recently used passes its pressure window. A device with no entry has
+	// nothing an early walk could take. Nil until a cycle has completed.
+	earlyAt map[uint64]time.Time
+	// lastPartial is set when the last walk was cut short or a base's device
+	// could not be read, so earlyAt may be missing a device.
+	lastPartial bool
+	// emptyWalks counts consecutive apply cycles that removed nothing. Each
+	// one doubles the wait before the next early walk.
+	emptyWalks int
 }
 
 // NewBazelBasesPlugin creates the plugin with the host environment.
@@ -326,6 +338,12 @@ type bbRow struct {
 	window  time.Duration
 	normal  time.Duration
 	hasLock bool
+	// pressureWindow is the window the base would have on a mount under
+	// pressure. recent marks a base kept only because it was used inside its
+	// window, and again a base that must be looked at on the next walk.
+	pressureWindow time.Duration
+	recent         bool
+	again          bool
 }
 
 // bbCycle is one discovery-and-decision pass.
@@ -504,16 +522,43 @@ func (pol *bbPolicy) windows(kind string) (time.Duration, time.Duration) {
 // while a root's mount stays under pressure.
 const bbPressureMinInterval = 5 * time.Minute
 
+// earlyGap is the least time between the last walk and an early pressure
+// walk: bbPressureMinInterval, doubled for every consecutive apply cycle that
+// removed nothing.
+func (p *BazelBasesPlugin) earlyGap(pol *bbPolicy) time.Duration {
+	gap := bbPressureMinInterval
+	for i := 0; i < p.emptyWalks && gap < pol.interval; i++ {
+		gap *= 2
+	}
+	return gap
+}
+
 // due reports whether a cycle should run now: the discovery interval has
-// passed, or (apply mode only) a root's mount is under pressure and the last
-// walk is at least bbPressureMinInterval old. Report mode keeps the interval:
-// it relieves nothing, so walking every poll would only cost IO.
+// passed, or (apply mode only) an early pressure walk has something to do.
+// Report mode keeps the interval: it relieves nothing, so walking every poll
+// would only cost IO.
+//
+// An early walk needs a root's mount under pressure and a reason to expect a
+// removal there: the last cycle left work behind (a base deferred by the time
+// budget), or a base it kept as recently used has now passed its pressure
+// window. A pressured mount whose bases are all live, held, or kept for what
+// is inside them gives an early walk nothing to do, and so does a mount with
+// no base at all: a base created since cannot be eligible before
+// pressure_idle_after, and the discovery interval finds it. Without this a
+// mount that stays above the pressure line for reasons this plugin cannot
+// relieve would be walked every five minutes, forever, and each walk covers
+// every root.
+//
+// A walk that was cut short, or that has not run yet, keeps the early walk,
+// because its picture of the mounts is incomplete. Every early walk waits
+// earlyGap, so a run of walks that remove nothing, whatever the cause, thins
+// out to the discovery interval.
 func (p *BazelBasesPlugin) due(pol *bbPolicy, apply bool) bool {
 	now := p.env.now()
 	if p.lastDiscovery.IsZero() || now.Sub(p.lastDiscovery) >= pol.interval {
 		return true
 	}
-	if !apply || now.Sub(p.lastDiscovery) < bbPressureMinInterval {
+	if !apply || now.Sub(p.lastDiscovery) < p.earlyGap(pol) {
 		return false
 	}
 	for _, r := range pol.roots {
@@ -525,11 +570,48 @@ func (p *BazelBasesPlugin) due(pol *bbPolicy, apply bool) bool {
 		if err != nil {
 			continue
 		}
-		if p.pressureState(dev, u, pol) {
+		if !p.pressureState(dev, u, pol) {
+			continue
+		}
+		if p.earlyAt == nil || p.lastPartial {
+			return true
+		}
+		if at, ok := p.earlyAt[dev]; ok && !now.Before(at) {
 			return true
 		}
 	}
 	return false
+}
+
+// noteWork records, for due's pressure rule, when an early walk could next
+// remove something on each device, and whether this cycle removed anything.
+func (p *BazelBasesPlugin) noteWork(cycle *bbCycle) {
+	early := map[uint64]time.Time{}
+	partial := cycle.Partial
+	sooner := func(dev uint64, at time.Time) {
+		if cur, ok := early[dev]; !ok || at.Before(cur) {
+			early[dev] = at
+		}
+	}
+	for _, row := range cycle.Rows {
+		if row.dev == 0 {
+			partial = true
+			continue
+		}
+		switch {
+		case row.Decision == "deferred" || row.again:
+			sooner(row.dev, time.Time{})
+		case row.recent && !row.lastUse.IsZero() && row.pressureWindow > 0:
+			sooner(row.dev, row.lastUse.Add(row.pressureWindow))
+		}
+	}
+	p.earlyAt = early
+	p.lastPartial = partial
+	if cycle.Apply && cycle.Removed == 0 {
+		p.emptyWalks++
+	} else {
+		p.emptyWalks = 0
+	}
 }
 
 func (p *BazelBasesPlugin) pressureState(dev uint64, u bbUsage, pol *bbPolicy) bool {
@@ -611,6 +693,7 @@ func (p *BazelBasesPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg 
 	}
 	cycle := p.run(ctx, pol, apply, logger)
 	p.lastDiscovery = p.env.now()
+	p.noteWork(cycle)
 	if err := p.writeReceipts(pol, cycle); err != nil {
 		logger.Warn("bazel_bases: receipt write failed", "error", err)
 	}
@@ -706,6 +789,10 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 		row.idle = now.Sub(use)
 		row.IdleHours = round2(row.idle.Hours())
 		normal, pressured := pol.windows(row.Kind)
+		if row.BasesOnly != "" && pressured < pol.basesOnlyIdle {
+			pressured = pol.basesOnlyIdle
+		}
+		row.pressureWindow = pressured
 		window := normal
 		if row.Pressure {
 			window = pressured
@@ -719,7 +806,7 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 		row.window, row.normal = window, normal
 		row.WindowHours = round2(window.Hours())
 		if row.idle <= window {
-			row.Decision, row.Reason = "keep", fmt.Sprintf("used within %s", window)
+			row.Decision, row.Reason, row.recent = "keep", fmt.Sprintf("used within %s", window), true
 			cycle.KeptRecent++
 			continue
 		}
@@ -960,6 +1047,8 @@ func (p *BazelBasesPlugin) apply(ctx context.Context, pol *bbPolicy, cycle *bbCy
 		}
 		if use.IsZero() || p.env.now().Sub(use) <= limit {
 			row.Decision, row.Reason = "keep", "used again since discovery"
+			// The pressure rule counts from the new use.
+			row.lastUse, row.recent = use, !use.IsZero()
 			continue
 		}
 		if !row.Measured {
