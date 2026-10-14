@@ -272,7 +272,11 @@ func TestGoBuildCacheCleanSurvivesHangingGo(t *testing.T) {
 	}
 	t.Setenv("GOCACHE", cache)
 
-	scope := NewRunScope("dev-artifacts", time.Time{}, 200*time.Millisecond, 200*time.Millisecond)
+	// The stub must get far enough to record its arguments before the
+	// deadline fires. On Darwin the first exec of a freshly written script
+	// can spend well over 200ms in code-signing and XProtect checks; the
+	// 0.4.3 Nix build on PZM failed here. Give it 2s; elapsed stays under 10s.
+	scope := NewRunScope("dev-artifacts", time.Time{}, 2*time.Second, 2*time.Second)
 	ctx := WithRunScope(context.Background(), scope)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
