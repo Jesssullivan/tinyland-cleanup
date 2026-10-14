@@ -140,7 +140,7 @@ func (p *HomebrewPlugin) cleanCache(ctx context.Context, logger *slog.Logger) Cl
 	sizeBefore := getDirSize(cachePath)
 
 	logger.Debug("cleaning Homebrew cache")
-	cmd := exec.CommandContext(ctx, "brew", "cleanup", "-s")
+	cmd := reclaimCommandContext(ctx, "brew", "cleanup", "-s")
 	cmd.Run() // Ignore errors
 
 	sizeAfter := getDirSize(cachePath)
@@ -155,7 +155,7 @@ func (p *HomebrewPlugin) cleanupPrune(ctx context.Context, logger *slog.Logger) 
 	ctx, cancel := context.WithTimeout(ctx, homebrewPruneTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "brew", "cleanup", "--prune=0")
+	cmd := reclaimCommandContext(ctx, "brew", "cleanup", "--prune=0")
 	output, _ := cmd.CombinedOutput()
 
 	// Parse "Removing: /path/to/file... (X.X MB)"
@@ -169,7 +169,7 @@ func (p *HomebrewPlugin) cleanupCritical(ctx context.Context, logger *slog.Logge
 	// First autoremove unused dependencies
 	logger.Warn("CRITICAL: running brew autoremove")
 	autoremoveCtx, autoremoveCancel := context.WithTimeout(ctx, homebrewCriticalTimeout)
-	autoremoveCmd := exec.CommandContext(autoremoveCtx, "brew", "autoremove")
+	autoremoveCmd := reclaimCommandContext(autoremoveCtx, "brew", "autoremove")
 	if err := autoremoveCmd.Run(); err != nil {
 		logger.Warn("brew autoremove failed or timed out", "error", err)
 	}
@@ -178,7 +178,7 @@ func (p *HomebrewPlugin) cleanupCritical(ctx context.Context, logger *slog.Logge
 	// Then full cleanup
 	logger.Warn("CRITICAL: running brew cleanup --prune=0")
 	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, homebrewCriticalTimeout)
-	cleanupCmd := exec.CommandContext(cleanupCtx, "brew", "cleanup", "--prune=0")
+	cleanupCmd := reclaimCommandContext(cleanupCtx, "brew", "cleanup", "--prune=0")
 	output, err := cleanupCmd.CombinedOutput()
 	if err != nil {
 		logger.Warn("brew cleanup --prune=0 failed or timed out", "error", err)
@@ -193,7 +193,7 @@ func (p *HomebrewPlugin) cleanupDryRunEstimate(ctx context.Context) (int64, erro
 	dryRunCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(dryRunCtx, "brew", "cleanup", "--dry-run", "--prune=0")
+	cmd := reclaimCommandContext(dryRunCtx, "brew", "cleanup", "--dry-run", "--prune=0")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("brew cleanup --dry-run --prune=0 failed: %w", err)
@@ -317,7 +317,7 @@ func (p *IOSSimulatorPlugin) deleteUnavailable(ctx context.Context, logger *slog
 	result := CleanupResult{Plugin: p.Name(), Level: LevelWarning}
 
 	logger.Debug("deleting unavailable iOS Simulators")
-	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "delete", "unavailable")
+	cmd := reclaimCommandContext(ctx, "xcrun", "simctl", "delete", "unavailable")
 	if err := cmd.Run(); err != nil {
 		// Not a hard error - may have no unavailable devices
 		logger.Debug("xcrun simctl delete unavailable completed", "error", err)
@@ -831,7 +831,7 @@ func xcodeDeviceSupportPlanTargets(dir string, keepCount int, active bool, level
 func oldFilesSize(dir string, maxAge time.Duration, now time.Time) int64 {
 	cutoff := now.Add(-maxAge)
 	var size int64
-	filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+	streamWalk(dir, func(_ string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
@@ -1002,22 +1002,21 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	// Go build cache (moderate+, separate from module cache)
 	if level >= LevelModerate {
 		if _, err := exec.LookPath("go"); err == nil {
-			if output, err := exec.CommandContext(ctx, "go", "env", "GOCACHE").Output(); err == nil {
-				goCacheDir := strings.TrimSpace(string(output))
-				if goCacheDir != "" && goCacheDir != "off" {
-					sizeBefore := getDirSize(goCacheDir)
-					if sizeBefore > 0 {
-						if level >= LevelAggressive {
-							exec.CommandContext(ctx, "go", "clean", "-cache").Run()
-						} else {
-							exec.CommandContext(ctx, "go", "clean", "-testcache").Run()
-						}
-						sizeAfter := getDirSize(goCacheDir)
-						freed := safeBytesDiff(sizeBefore, sizeAfter)
-						result.BytesFreed += freed
-						if freed > 0 {
-							logger.Debug("cleaned go build cache", "freed_mb", freed/(1024*1024))
-						}
+			// The cache directory is resolved without starting `go`: a hung
+			// `go env GOCACHE` once held the whole daemon for sixteen hours.
+			if goCacheDir := goBuildCacheDir(); goCacheDir != "" {
+				sizeBefore := getDirSize(goCacheDir)
+				if sizeBefore > 0 {
+					if level >= LevelAggressive {
+						reclaimCommandContext(ctx, "go", "clean", "-cache").Run()
+					} else {
+						reclaimCommandContext(ctx, "go", "clean", "-testcache").Run()
+					}
+					sizeAfter := getDirSize(goCacheDir)
+					freed := safeBytesDiff(sizeBefore, sizeAfter)
+					result.BytesFreed += freed
+					if freed > 0 {
+						logger.Debug("cleaned go build cache", "freed_mb", freed/(1024*1024))
 					}
 				}
 			}
@@ -1028,7 +1027,7 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	if level >= LevelAggressive {
 		goModCache := filepath.Join(home, "go", "pkg", "mod", "cache")
 		if size := getDirSize(goModCache); size > 0 {
-			exec.CommandContext(ctx, "go", "clean", "-modcache").Run()
+			reclaimCommandContext(ctx, "go", "clean", "-modcache").Run()
 			result.BytesFreed += size
 			logger.Debug("cleaned go mod cache", "freed_mb", size/(1024*1024))
 		}
@@ -1046,14 +1045,14 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 
 		// cargo clean gc (Rust 1.82+ automatic garbage collection)
 		if _, err := exec.LookPath("cargo"); err == nil {
-			exec.CommandContext(ctx, "cargo", "cache", "--autoclean").Run()
+			reclaimCommandContext(ctx, "cargo", "cache", "--autoclean").Run()
 		}
 	}
 
 	// Rustup toolchain cleanup (critical only - keep default toolchain)
 	if level >= LevelCritical {
 		if _, err := exec.LookPath("rustup"); err == nil {
-			output, err := exec.CommandContext(ctx, "rustup", "toolchain", "list").Output()
+			output, err := commandContext(ctx, "rustup", "toolchain", "list").Output()
 			if err == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 					line = strings.TrimSpace(line)
@@ -1062,7 +1061,7 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 					}
 					toolchain := strings.Fields(line)[0]
 					logger.Debug("removing non-default rustup toolchain", "toolchain", toolchain)
-					exec.CommandContext(ctx, "rustup", "toolchain", "uninstall", toolchain).Run()
+					reclaimCommandContext(ctx, "rustup", "toolchain", "uninstall", toolchain).Run()
 					result.ItemsCleaned++
 				}
 			}
@@ -1571,7 +1570,7 @@ func dirModTimeStale(path string, staleAfterDays int) bool {
 
 func darwinActiveProcessNames(ctx context.Context) map[string]bool {
 	active := map[string]bool{}
-	output, err := exec.CommandContext(ctx, "ps", "-axo", "comm=").Output()
+	output, err := commandContext(ctx, "ps", "-axo", "comm=").Output()
 	if err != nil {
 		return active
 	}
@@ -1604,7 +1603,7 @@ func getDirSize(path string) int64 {
 
 func getDirSizeContext(ctx context.Context, path string) (int64, error) {
 	var size int64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	err := streamWalk(path, func(_ string, info os.FileInfo, err error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1748,7 +1747,7 @@ func (p *ICloudPlugin) preflightChecks(logger *slog.Logger) error {
 	// brctl can hang indefinitely if CloudKit is unresponsive, so use a timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "brctl", "status")
+	cmd := commandContext(ctx, "brctl", "status")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("brctl status failed: %w", err)
@@ -1867,7 +1866,7 @@ func (p *ICloudPlugin) evictFiles(ctx context.Context, iCloudPath string, maxAge
 
 // evictFile evicts a single iCloud file.
 func (p *ICloudPlugin) evictFile(ctx context.Context, path string) error {
-	cmd := exec.CommandContext(ctx, "brctl", "evict", path)
+	cmd := commandContext(ctx, "brctl", "evict", path)
 	return cmd.Run()
 }
 

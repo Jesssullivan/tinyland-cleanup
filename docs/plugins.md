@@ -51,3 +51,21 @@ control-plane or node hosts that need them.
 
 Plugin behavior at each level and the protection rules are described in the
 [operator workflow](operator-workflow.md) and the per-plugin policy docs.
+
+## Deadlines
+
+Every plugin run is watched, and every command a plugin starts has a deadline
+(see "Deadlines and the plugin watchdog" in
+[configuration.md](configuration.md)). When writing plugin code:
+
+- Start commands with `commandContext` (probes and listings),
+  `reclaimCommandContext` (anything that deletes or prunes),
+  `offlineCommandContext` (VM stop, disk image conversion) or
+  `restartCommandContext` (VM start after a stop). Never call `exec.Command`
+  or `exec.CommandContext` directly; a test fails the build if you do.
+- Pass the `ctx` you were given. Wrap it in `context.WithTimeout` when a
+  command needs a specific deadline; that deadline is used as given.
+- Check `ctx.Err()` in long loops. A plugin that ignores its context is
+  abandoned at its deadline and skipped until the stuck run returns.
+- Size directories with `getDirSize` or `streamWalk`. Use `filepath.Walk`
+  only when the walk deletes as it goes or depends on sorted order.

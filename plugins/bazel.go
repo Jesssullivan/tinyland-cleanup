@@ -213,7 +213,7 @@ func (p *BazelPlugin) activeBazelProcessInfo(ctx context.Context) (bazelProcessI
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "comm=,args=")
+	cmd := commandContext(psCtx, "ps", "-axo", "comm=,args=")
 	output, err := cmd.Output()
 	if err != nil {
 		return bazelProcessInfo{}, err
@@ -1252,7 +1252,7 @@ func bazelServerPIDsForOutputBase(ctx context.Context, path string) ([]int, erro
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(psCtx, "ps", "-axo", "pid=,comm=,args=")
+	cmd := commandContext(psCtx, "ps", "-axo", "pid=,comm=,args=")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -1354,7 +1354,7 @@ func bazelProcessPIDIsActive(pid int) bool {
 		return false
 	}
 
-	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=")
+	cmd := commandContext(context.Background(), "ps", "-p", strconv.Itoa(pid), "-o", "stat=")
 	output, psErr := cmd.Output()
 	if psErr != nil {
 		return err == nil || err == syscall.EPERM
@@ -1532,7 +1532,7 @@ func bazelOutputUserRootRepositoryCachePathAllowed(path string) bool {
 func normalizeBazelDeletionPermissions(root string, logger *slog.Logger) error {
 	if runtime.GOOS == "darwin" {
 		if _, err := exec.LookPath("chflags"); err == nil {
-			cmd := exec.Command("chflags", "-R", "nouchg", root)
+			cmd := reclaimCommandContext(context.Background(), "chflags", "-R", "nouchg", root)
 			if output, err := cmd.CombinedOutput(); err != nil {
 				logger.Warn("failed to clear Darwin file flags before Bazel deletion", "path", root, "error", err, "output", strings.TrimSpace(string(output)))
 			}

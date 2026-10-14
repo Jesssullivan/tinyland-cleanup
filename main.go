@@ -33,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"syscall"
@@ -54,7 +56,7 @@ import (
 // version mirrors the VERSION file; it is the dev default and is overridden at
 // release time by -ldflags "-X main.version=<tag>". CI checks it matches VERSION.
 var (
-	version = "0.4.2"
+	version = "0.4.3"
 	commit  = "dev"
 	date    = "unknown"
 )
@@ -201,6 +203,9 @@ func main() {
 		handler = newDedupeHandler(handler, newLogThrottle(repeatWindow, time.Now))
 	}
 	logger := slog.New(handler)
+	if limit := applyMemoryLimit(cfg, os.Getenv); limit > 0 {
+		logger.Debug("Go soft memory limit set", "limit_mb", limit/(1024*1024))
+	}
 	if simulationBuild {
 		logger.Warn("SIMULATION BUILD: disk statistics come from " + simDiskStatsEnv + ", not statfs; never deploy this binary")
 	}
@@ -304,6 +309,11 @@ type daemon struct {
 	// reports compacts unchanged cycle reports in daemon mode; nil writes
 	// every report in full.
 	reports *reportThrottle
+	// inFlight holds plugin runs the watchdog stopped waiting for, by plugin
+	// name. Only the cycle loop touches it.
+	inFlight map[string]*pluginFlight
+	// pluginGrace overrides defaultPluginGrace; tests shorten it.
+	pluginGrace time.Duration
 }
 
 // run is the daemon loop. Each pass runs one cleanup cycle and then waits a
@@ -346,6 +356,11 @@ func (d *daemon) run(ctx context.Context) error {
 		}
 		first = false
 
+		// Hand the cycle's heap back to the OS before the idle wait, so the
+		// daemon's resident size between cycles is its baseline, not the
+		// last scan's peak.
+		debug.FreeOSMemory()
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -373,17 +388,31 @@ func (d *daemon) runLevelIndependentPlugin(ctx context.Context, report *cycleRep
 		WouldRun:    true,
 	}
 	if d.dryRun {
-		if planner, ok := p.(plugins.Planner); ok {
-			plan := planner.PlanCleanup(ctx, level, d.config, d.logger)
-			pluginReport.Plan = &plan
-			report.PlannedEstimatedBytesFreed += plan.EstimatedBytesFreed
-			report.PlannedTargets += len(plan.Targets)
-		}
 		pluginReport.SkipReason = "dry_run"
+		if planner, ok := p.(plugins.Planner); ok {
+			plan, watch := watchPlugin(d, ctx, p, func(pctx context.Context) plugins.CleanupPlan {
+				return planner.PlanCleanup(pctx, level, d.config, d.logger)
+			})
+			if !d.applyWatch(&pluginReport, watch) {
+				pluginReport.Plan = &plan
+				report.PlannedEstimatedBytesFreed += plan.EstimatedBytesFreed
+				report.PlannedTargets += len(plan.Targets)
+			}
+		}
 		report.Plugins = append(report.Plugins, pluginReport)
 		return 0, 0
 	}
-	result := p.Cleanup(ctx, level, d.config, d.logger)
+	result, watch := watchPlugin(d, ctx, p, func(pctx context.Context) plugins.CleanupResult {
+		return p.Cleanup(pctx, level, d.config, d.logger)
+	})
+	if d.applyWatch(&pluginReport, watch) {
+		pluginReport.Ran = watch.state == wedgeAbandoned
+		report.Plugins = append(report.Plugins, pluginReport)
+		return 0, 0
+	}
+	if watch.state == wedgeCancelled && result.Error == nil {
+		result.Error = errors.New(watch.describe(p.Name()))
+	}
 	pluginReport.Ran = true
 	pluginReport.BytesFreed = result.BytesFreed
 	pluginReport.EstimatedBytesFreed = result.EstimatedBytesFreed
@@ -689,16 +718,20 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		}
 
 		if d.dryRun {
+			pluginReport.SkipReason = "dry_run"
 			if planner, ok := p.(plugins.Planner); ok {
-				plan := planner.PlanCleanup(ctx, pluginLevel, d.config, d.logger)
-				pluginReport.Plan = &plan
-				report.PlannedEstimatedBytesFreed += plan.EstimatedBytesFreed
-				report.PlannedTargets += len(plan.Targets)
-				if plan.RequiredFreeBytes > report.PlannedRequiredFreeBytes {
-					report.PlannedRequiredFreeBytes = plan.RequiredFreeBytes
+				plan, watch := watchPlugin(d, ctx, p, func(pctx context.Context) plugins.CleanupPlan {
+					return planner.PlanCleanup(pctx, pluginLevel, d.config, d.logger)
+				})
+				if !d.applyWatch(&pluginReport, watch) {
+					pluginReport.Plan = &plan
+					report.PlannedEstimatedBytesFreed += plan.EstimatedBytesFreed
+					report.PlannedTargets += len(plan.Targets)
+					if plan.RequiredFreeBytes > report.PlannedRequiredFreeBytes {
+						report.PlannedRequiredFreeBytes = plan.RequiredFreeBytes
+					}
 				}
 			}
-			pluginReport.SkipReason = "dry_run"
 			d.logger.Info("dry-run plugin plan",
 				"plugin", p.Name(),
 				"level", level.String(),
@@ -708,7 +741,28 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 			continue
 		}
 
-		result := p.Cleanup(ctx, pluginLevel, d.config, d.logger)
+		result, watch := watchPlugin(d, ctx, p, func(pctx context.Context) plugins.CleanupResult {
+			return p.Cleanup(pctx, pluginLevel, d.config, d.logger)
+		})
+		if d.applyWatch(&pluginReport, watch) {
+			if watch.state == wedgeAbandoned {
+				// The run started and is still going. Record it so cooldown
+				// and zero-yield accounting see a failed run.
+				pluginReport.Ran = true
+				if stateErr == nil {
+					recordRun(p, &pluginReport, plugins.CleanupResult{
+						Plugin: p.Name(),
+						Level:  pluginLevel,
+						Error:  errors.New(pluginReport.Error),
+					})
+				}
+			}
+			report.Plugins = append(report.Plugins, pluginReport)
+			continue
+		}
+		if watch.state == wedgeCancelled && result.Error == nil {
+			result.Error = errors.New(watch.describe(p.Name()))
+		}
 		pluginReport.Ran = true
 		pluginReport.BytesFreed = result.BytesFreed
 		pluginReport.EstimatedBytesFreed = result.EstimatedBytesFreed
@@ -960,6 +1014,19 @@ type pluginCycleReport struct {
 	// the plugin became exempt).
 	ZeroYieldLifted string `json:"zero_yield_lifted,omitempty"`
 	Error           string `json:"error,omitempty"`
+	// Wedged is set when the plugin watchdog intervened: deadline_cancelled
+	// (the plugin returned after its deadline cancelled it),
+	// deadline_abandoned (it did not return and the cycle continued without
+	// it) or plugin_wedged (skipped because an earlier run is still stuck).
+	Wedged string `json:"wedged,omitempty"`
+	// WedgedSince is when the stuck run started (RFC3339).
+	WedgedSince string `json:"wedged_since,omitempty"`
+	// LastCommand is the external command the wedged run started last.
+	LastCommand string `json:"last_command,omitempty"`
+	// WedgedCommands lists "wedged:<command>" for each external command this
+	// run killed at its deadline. It can be set on a run that otherwise
+	// completed.
+	WedgedCommands []string `json:"wedged_commands,omitempty"`
 }
 
 type pluginListReport struct {

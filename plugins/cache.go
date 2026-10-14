@@ -74,22 +74,21 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	// Go build cache (moderate+, separate from module cache)
 	if level >= LevelModerate {
 		if _, err := exec.LookPath("go"); err == nil {
-			if output, err := exec.CommandContext(ctx, "go", "env", "GOCACHE").Output(); err == nil {
-				goCacheDir := strings.TrimSpace(string(output))
-				if goCacheDir != "" && goCacheDir != "off" {
-					sizeBefore := getDirSize(goCacheDir)
-					if sizeBefore > 0 {
-						if level >= LevelAggressive {
-							exec.CommandContext(ctx, "go", "clean", "-cache").Run()
-						} else {
-							exec.CommandContext(ctx, "go", "clean", "-testcache").Run()
-						}
-						sizeAfter := getDirSize(goCacheDir)
-						freed := safeBytesDiff(sizeBefore, sizeAfter)
-						result.BytesFreed += freed
-						if freed > 0 {
-							logger.Debug("cleaned go build cache", "freed_mb", freed/(1024*1024))
-						}
+			// The cache directory is resolved without starting `go`: a hung
+			// `go env GOCACHE` once held the whole daemon for sixteen hours.
+			if goCacheDir := goBuildCacheDir(); goCacheDir != "" {
+				sizeBefore := getDirSize(goCacheDir)
+				if sizeBefore > 0 {
+					if level >= LevelAggressive {
+						reclaimCommandContext(ctx, "go", "clean", "-cache").Run()
+					} else {
+						reclaimCommandContext(ctx, "go", "clean", "-testcache").Run()
+					}
+					sizeAfter := getDirSize(goCacheDir)
+					freed := safeBytesDiff(sizeBefore, sizeAfter)
+					result.BytesFreed += freed
+					if freed > 0 {
+						logger.Debug("cleaned go build cache", "freed_mb", freed/(1024*1024))
 					}
 				}
 			}
@@ -100,7 +99,7 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	if level >= LevelAggressive {
 		goModCache := filepath.Join(home, "go", "pkg", "mod", "cache")
 		if size := getDirSize(goModCache); size > 0 {
-			exec.CommandContext(ctx, "go", "clean", "-modcache").Run()
+			reclaimCommandContext(ctx, "go", "clean", "-modcache").Run()
 			result.BytesFreed += size
 			logger.Debug("cleaned go mod cache", "freed_mb", size/(1024*1024))
 		}
@@ -118,7 +117,7 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 
 		// cargo clean gc (Rust 1.82+ automatic garbage collection)
 		if _, err := exec.LookPath("cargo"); err == nil {
-			exec.CommandContext(ctx, "cargo", "cache", "--autoclean").Run()
+			reclaimCommandContext(ctx, "cargo", "cache", "--autoclean").Run()
 		}
 	}
 
@@ -126,7 +125,7 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	if level >= LevelCritical {
 		if _, err := exec.LookPath("rustup"); err == nil {
 			// Remove all non-default toolchains
-			output, err := exec.CommandContext(ctx, "rustup", "toolchain", "list").Output()
+			output, err := commandContext(ctx, "rustup", "toolchain", "list").Output()
 			if err == nil {
 				for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 					line = strings.TrimSpace(line)
@@ -135,7 +134,7 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 					}
 					toolchain := strings.Fields(line)[0]
 					logger.Debug("removing non-default rustup toolchain", "toolchain", toolchain)
-					exec.CommandContext(ctx, "rustup", "toolchain", "uninstall", toolchain).Run()
+					reclaimCommandContext(ctx, "rustup", "toolchain", "uninstall", toolchain).Run()
 					result.ItemsCleaned++
 				}
 			}
@@ -193,16 +192,16 @@ func (p *CachePlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	if level >= LevelModerate {
 		if _, err := exec.LookPath("journalctl"); err == nil {
 			// User journal cleanup
-			exec.CommandContext(ctx, "journalctl", "--user", "--vacuum-size=200M", "--vacuum-time=7d").Run()
+			reclaimCommandContext(ctx, "journalctl", "--user", "--vacuum-size=200M", "--vacuum-time=7d").Run()
 		}
 	}
 
 	// System journal (aggressive+, requires sudo)
 	if level >= LevelAggressive {
 		if _, err := exec.LookPath("journalctl"); err == nil {
-			testCmd := exec.Command("sudo", "-n", "true")
+			testCmd := commandContext(ctx, "sudo", "-n", "true")
 			if testCmd.Run() == nil {
-				exec.CommandContext(ctx, "sudo", "journalctl", "--vacuum-size=100M", "--vacuum-time=3d").Run()
+				reclaimCommandContext(ctx, "sudo", "journalctl", "--vacuum-size=100M", "--vacuum-time=3d").Run()
 			}
 		}
 	}
@@ -219,7 +218,7 @@ func getDirSize(path string) int64 {
 
 func getDirSizeContext(ctx context.Context, path string) (int64, error) {
 	var size int64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	err := streamWalk(path, func(_ string, info os.FileInfo, err error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

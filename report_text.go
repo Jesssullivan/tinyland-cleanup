@@ -259,6 +259,23 @@ func writeTextPluginReport(w io.Writer, plugin pluginCycleReport) error {
 	if _, err := fmt.Fprintf(w, "- %s: %s\n", plugin.Name, status); err != nil {
 		return err
 	}
+	if plugin.Wedged != "" {
+		line := "  wedged: " + plugin.Wedged
+		if plugin.WedgedSince != "" {
+			line += " since " + plugin.WedgedSince
+		}
+		if plugin.LastCommand != "" {
+			line += ", last command: " + plugin.LastCommand
+		}
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+	for _, command := range plugin.WedgedCommands {
+		if _, err := fmt.Fprintf(w, "  killed at deadline: %s\n", strings.TrimPrefix(command, "wedged:")); err != nil {
+			return err
+		}
+	}
 
 	if plugin.Plan != nil {
 		plan := plugin.Plan

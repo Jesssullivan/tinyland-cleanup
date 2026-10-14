@@ -312,6 +312,28 @@ type PolicyConfig struct {
 	// An unchanged cycle report is written as one line. Empty or invalid uses
 	// the built-in default (1h); "0s" disables throttling.
 	LogRepeatWindow string `yaml:"log_repeat_window"`
+	// PluginTimeout is the watchdog deadline for one plugin run. At the
+	// deadline the plugin's context is cancelled, which terminates any
+	// command it started; a plugin that still does not return is left behind
+	// and the cycle continues with the next plugin. Empty or invalid uses the
+	// built-in default (45m).
+	PluginTimeout string `yaml:"plugin_timeout"`
+	// PluginTimeouts overrides PluginTimeout per plugin name.
+	PluginTimeouts map[string]string `yaml:"plugin_timeouts"`
+	// ExecTimeout is the deadline for a probe command (a listing, a status
+	// query) that sets no deadline of its own. Empty or invalid uses the
+	// built-in default (60s).
+	ExecTimeout string `yaml:"exec_timeout"`
+	// ExecTimeouts overrides ExecTimeout per plugin name.
+	ExecTimeouts map[string]string `yaml:"exec_timeouts"`
+	// ExecReclaimTimeout is the deadline for a reclaim command (a prune, a
+	// clean) that sets no deadline of its own. Empty or invalid uses the
+	// built-in default (15m).
+	ExecReclaimTimeout string `yaml:"exec_reclaim_timeout"`
+	// MemoryLimitMB is the Go runtime soft memory limit in MiB. Zero uses the
+	// built-in default (256); a negative value sets no limit. GOMEMLIMIT in
+	// the environment takes precedence.
+	MemoryLimitMB int `yaml:"memory_limit_mb"`
 }
 
 // DockerConfig holds Docker-specific cleanup settings.

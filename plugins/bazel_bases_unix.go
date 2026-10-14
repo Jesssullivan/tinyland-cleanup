@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"syscall"
 	"time"
@@ -94,7 +93,7 @@ func bbLsofIndex(ctx context.Context, a *bbActivity, opts bbActivityOptions) {
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, opts.Lsof, "-w", "-nP", "-Fpn")
+	cmd := commandContext(cctx, opts.Lsof, "-w", "-nP", "-Fpn")
 	out, err := cmd.Output()
 	if err != nil && len(out) == 0 {
 		a.lsofError = fmt.Sprintf("lsof listing failed: %v", err)

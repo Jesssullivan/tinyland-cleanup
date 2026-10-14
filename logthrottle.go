@@ -255,9 +255,10 @@ func reportFingerprint(report cycleReport) string {
 		fmt.Fprintf(&b, "|m:%s:%s:%s", mount.Label, mount.Level, mount.Error)
 	}
 	for _, plugin := range report.Plugins {
-		fmt.Fprintf(&b, "|p:%s:%t:%t:%s:%s:%s:%s:%d:%d:%s",
+		fmt.Fprintf(&b, "|p:%s:%t:%t:%s:%s:%s:%s:%d:%d:%s:%s:%s",
 			plugin.Name, plugin.Ran, plugin.WouldRun, plugin.SkipReason, plugin.RetryAt,
-			plugin.SuppressedUntil, plugin.ZeroYieldLifted, plugin.BytesFreed, plugin.ItemsCleaned, plugin.Error)
+			plugin.SuppressedUntil, plugin.ZeroYieldLifted, plugin.BytesFreed, plugin.ItemsCleaned, plugin.Error,
+			plugin.Wedged, strings.Join(plugin.WedgedCommands, ","))
 	}
 	return b.String()
 }

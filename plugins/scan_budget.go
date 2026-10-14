@@ -371,7 +371,7 @@ func (b *devArtifactScanBudget) checkTempRoot(ctx context.Context, path string) 
 func (b *devArtifactScanBudget) sizeDir(ctx context.Context, path string) (int64, error) {
 	var size int64
 	visited := 0
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	err := streamWalk(path, func(_ string, info os.FileInfo, err error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}

@@ -31,7 +31,7 @@ func DetectSudo(ctx context.Context) SudoCapability {
 	cap.Available = true
 
 	// Check if passwordless sudo works
-	testCmd := exec.CommandContext(ctx, "sudo", "-n", "true")
+	testCmd := commandContext(ctx, "sudo", "-n", "true")
 	if testCmd.Run() == nil {
 		cap.Passwordless = true
 	}
@@ -54,7 +54,7 @@ func DetectSudo(ctx context.Context) SudoCapability {
 // Returns output and error. Fails immediately if password would be required.
 func RunWithSudo(ctx context.Context, args ...string) ([]byte, error) {
 	cmdArgs := append([]string{"-n"}, args...)
-	cmd := exec.CommandContext(ctx, "sudo", cmdArgs...)
+	cmd := reclaimCommandContext(ctx, "sudo", cmdArgs...)
 	return cmd.CombinedOutput()
 }
 

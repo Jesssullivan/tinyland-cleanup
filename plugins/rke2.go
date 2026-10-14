@@ -182,7 +182,7 @@ func (p *RKE2Plugin) cleanModerate(ctx context.Context, cfg *config.Config, logg
 	logger.Debug("pruning unused containerd images", "socket", socket)
 
 	// Use ctr to prune images in the k8s.io namespace
-	cmd := exec.CommandContext(ctx, "ctr", "-a", socket, "-n", "k8s.io", "images", "prune")
+	cmd := reclaimCommandContext(ctx, "ctr", "-a", socket, "-n", "k8s.io", "images", "prune")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		logger.Debug("ctr image prune failed", "error", err, "output", string(output))
@@ -205,7 +205,7 @@ func (p *RKE2Plugin) cleanAggressive(ctx context.Context, cfg *config.Config, lo
 	// Clean old containers
 	socket := p.getContainerdSocket()
 	if socket != "" {
-		cmd := exec.CommandContext(ctx, "ctr", "-a", socket, "-n", "k8s.io", "containers", "prune")
+		cmd := reclaimCommandContext(ctx, "ctr", "-a", socket, "-n", "k8s.io", "containers", "prune")
 		cmd.Run() // Best effort
 	}
 
@@ -224,11 +224,11 @@ func (p *RKE2Plugin) cleanCritical(ctx context.Context, logger *slog.Logger) Cle
 
 	// Remove all unused images (more aggressive)
 	// This is similar to 'crictl rmi --prune' but using ctr directly
-	cmd := exec.CommandContext(ctx, "ctr", "-a", socket, "-n", "k8s.io", "images", "prune", "--all")
+	cmd := reclaimCommandContext(ctx, "ctr", "-a", socket, "-n", "k8s.io", "images", "prune", "--all")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// Try without --all flag
-		cmd = exec.CommandContext(ctx, "ctr", "-a", socket, "-n", "k8s.io", "images", "prune")
+		cmd = reclaimCommandContext(ctx, "ctr", "-a", socket, "-n", "k8s.io", "images", "prune")
 		output, err = cmd.CombinedOutput()
 	}
 
@@ -239,7 +239,7 @@ func (p *RKE2Plugin) cleanCritical(ctx context.Context, logger *slog.Logger) Cle
 	// Also try crictl if available
 	if _, err := exec.LookPath("crictl"); err == nil {
 		logger.Debug("running crictl image prune")
-		cmd := exec.CommandContext(ctx, "crictl", "rmi", "--prune")
+		cmd := reclaimCommandContext(ctx, "crictl", "rmi", "--prune")
 		cmd.Run() // Best effort
 	}
 

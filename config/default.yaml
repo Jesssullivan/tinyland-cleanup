@@ -65,6 +65,19 @@ policy:
   zero_yield_backoff_base: 30m
   zero_yield_backoff_max: 6h
   zero_yield_exempt_plugins: []
+  # Deadlines (0.4.3). A plugin run is cancelled at plugin_timeout and, if it
+  # still does not return, left behind so the cycle continues; it is skipped
+  # with skip_reason plugin_wedged until that run returns. A command that sets
+  # no deadline of its own gets exec_timeout (probes and listings) or
+  # exec_reclaim_timeout (commands that delete or prune), is terminated at the
+  # deadline and is reported as wedged:<command>. Per-plugin overrides go in
+  # plugin_timeouts and exec_timeouts, keyed by plugin name.
+  plugin_timeout: 45m
+  exec_timeout: 60s
+  exec_reclaim_timeout: 15m
+  # Go soft memory limit in MiB. GOMEMLIMIT in the environment wins; negative
+  # sets no limit.
+  memory_limit_mb: 256
 
 # Enable/disable specific cleanup plugins
 enable:

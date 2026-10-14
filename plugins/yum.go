@@ -78,10 +78,10 @@ func (p *YumPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 	// Moderate+: Clean all cache
 	if level >= LevelModerate {
 		// Run dnf/yum clean all (requires sudo for system-wide cleanup)
-		testCmd := exec.Command("sudo", "-n", "true")
+		testCmd := commandContext(ctx, "sudo", "-n", "true")
 		if testCmd.Run() == nil {
 			// Can run sudo without password
-			cmd := exec.CommandContext(ctx, "sudo", pkgManager, "clean", "all")
+			cmd := reclaimCommandContext(ctx, "sudo", pkgManager, "clean", "all")
 			if err := cmd.Run(); err != nil {
 				logger.Debug("yum clean failed", "error", err)
 			} else {

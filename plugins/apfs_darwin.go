@@ -259,7 +259,7 @@ func (p *APFSPlugin) listSnapshots(ctx context.Context) ([]snapshotInfo, error) 
 	listCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(listCtx, "tmutil", "listlocalsnapshots", "/")
+	cmd := commandContext(listCtx, "tmutil", "listlocalsnapshots", "/")
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("tmutil listlocalsnapshots failed: %w", err)
@@ -622,7 +622,7 @@ func (p *APFSPlugin) isBackupActive(ctx context.Context) bool {
 	statusCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(statusCtx, "tmutil", "status")
+	cmd := commandContext(statusCtx, "tmutil", "status")
 	output, err := cmd.Output()
 	if err != nil {
 		return false // Assume not active if we can't check
