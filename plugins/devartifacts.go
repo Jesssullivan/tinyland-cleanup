@@ -167,7 +167,7 @@ func (p *DevArtifactsPlugin) PlanCleanup(ctx context.Context, level CleanupLevel
 	_ = logger
 
 	home, _ := os.UserHomeDir()
-	daCfg := cfg.DevArtifacts
+	daCfg := withAgentSessionTempProtection(cfg.DevArtifacts, home)
 	nodeAge, venvAge, rustAge, zigAge, mutates := devArtifactThresholds(level)
 	scanBudget := newDevArtifactScanBudgetForConfig(cfg, false)
 	scanCtx, cancelScan := scanBudget.context(ctx)
@@ -323,7 +323,7 @@ func (p *DevArtifactsPlugin) Cleanup(ctx context.Context, level CleanupLevel, cf
 	}
 
 	home, _ := os.UserHomeDir()
-	daCfg := cfg.DevArtifacts
+	daCfg := withAgentSessionTempProtection(cfg.DevArtifacts, home)
 	scanBudget := newDevArtifactScanBudgetForConfig(cfg, true)
 	scanCtx, cancelScan := scanBudget.context(ctx)
 	defer cancelScan()
@@ -3888,6 +3888,28 @@ func (p *DevArtifactsPlugin) isFileStale(path string, maxAge time.Duration) bool
 	}
 	cutoff := time.Now().Add(-maxAge)
 	return staleModTime(info).Before(cutoff)
+}
+
+// withAgentSessionTempProtection returns daCfg with the agent-session temp
+// trees (TIN-5268, R-W17 item 4) added to ProtectPaths: claude-*, codex*,
+// .tmp* and pi-* directly under every temp scan path, the host temp
+// directories and $TMPDIR. Every dev_artifacts lane consults ProtectPaths,
+// so no lane deletes a session's scratch directory or a build tree inside
+// one: not the harness-scratch lane, not the generated-artifact lanes and
+// not the workspace scan. The set is compiled in; configuration cannot
+// remove an entry. The caller's slice is not modified.
+func withAgentSessionTempProtection(daCfg config.DevArtifactsConfig, home string) config.DevArtifactsConfig {
+	roots := make([]string, 0, len(daCfg.TempScanPaths)+len(agentSessionTempRoots)+1)
+	for _, scanPath := range daCfg.TempScanPaths {
+		roots = append(roots, expandHome(scanPath, home))
+	}
+	roots = append(roots, agentSessionTempRoots...)
+	roots = append(roots, os.Getenv("TMPDIR"))
+	protect := make([]string, 0, len(daCfg.ProtectPaths)+4*len(roots))
+	protect = append(protect, daCfg.ProtectPaths...)
+	protect = append(protect, agentSessionTempProtectPrefixes(roots)...)
+	daCfg.ProtectPaths = protect
+	return daCfg
 }
 
 // isProtected checks if a path is in the protect list.

@@ -64,6 +64,40 @@ var agentSessionAbsolute = []string{
 	"/srv/fast-local/tmp-agents/codex*",
 }
 
+// agentSessionTempNames are top-level entries of a temporary directory that
+// hold agent-session data (R-W17 item 4, TIN-5694): Claude Code scratch under
+// any suffix, Codex temp trees, the .tmp* trees Codex's tempfile crate makes,
+// and Pi session trees. A "*" matches within the one path element.
+var agentSessionTempNames = []string{"claude-*", "codex*", ".tmp*", "pi-*"}
+
+// agentSessionTempRoots are the host temporary directories those names are
+// denied in. $TMPDIR is added per cycle.
+var agentSessionTempRoots = []string{"/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp"}
+
+// agentSessionTempProtectPrefixes returns the literal path prefixes of the
+// agent-session trees directly under each root, in the form
+// dev_artifacts.protect_paths matches (a string prefix). Each root is given
+// literally and with its symlinks resolved.
+func agentSessionTempProtectPrefixes(roots []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		for _, r := range uniquePaths(filepath.Clean(root), resolvedOrSelf(root)) {
+			for _, name := range agentSessionTempNames {
+				prefix := r + string(os.PathSeparator) + strings.TrimSuffix(name, "*")
+				if !seen[prefix] {
+					seen[prefix] = true
+					out = append(out, prefix)
+				}
+			}
+		}
+	}
+	return out
+}
+
 // agentSessionDeny is one snapshot of the deny set: the literal patterns and
 // the physical paths their existing matches resolve to.
 type agentSessionDeny struct {
@@ -99,6 +133,15 @@ func newAgentSessionDeny(home string, uid int, tmpdir string, extra []string, ca
 	if tmpdir != "" {
 		add(filepath.Join(tmpdir, "tmux-"+strconv.Itoa(uid)))
 		add(filepath.Join(tmpdir, "claude-"+strconv.Itoa(uid)))
+	}
+	tempRoots := agentSessionTempRoots
+	if tmpdir != "" {
+		tempRoots = append(append([]string{}, tempRoots...), tmpdir)
+	}
+	for _, root := range tempRoots {
+		for _, name := range agentSessionTempNames {
+			add(filepath.Join(root, name))
+		}
 	}
 	for _, p := range agentSessionAbsolute {
 		add(p)
