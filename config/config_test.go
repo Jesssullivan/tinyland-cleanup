@@ -344,6 +344,9 @@ func TestPackagedLinuxConfigParsesCurrentNixPolicy(t *testing.T) {
 	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
 		t.Errorf("expected dev_artifacts.temp_scan_max_roots=128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
 	}
+	if got := strings.Join(cfg.DevArtifacts.TempUninspectableOKComms, ","); got != "tailscaled,(sd-pam),sd-pam,systemd" {
+		t.Errorf("expected the packaged dev_artifacts.temp_uninspectable_ok_comms, got %q", got)
+	}
 	if !cfg.DevArtifacts.HarnessScratch {
 		t.Error("expected dev_artifacts.harness_scratch=true")
 	}
@@ -456,6 +459,9 @@ func TestDevArtifactsConfigDefaults(t *testing.T) {
 	}
 	if cfg.DevArtifacts.TempScanMaxRoots != 128 {
 		t.Errorf("DevArtifacts.TempScanMaxRoots should default to 128, got %d", cfg.DevArtifacts.TempScanMaxRoots)
+	}
+	if got := strings.Join(cfg.DevArtifacts.TempUninspectableOKComms, ","); got != "tailscaled,(sd-pam),sd-pam,systemd" {
+		t.Errorf("DevArtifacts.TempUninspectableOKComms default = %q", got)
 	}
 	if !cfg.DevArtifacts.NixTempRoots {
 		t.Error("DevArtifacts.NixTempRoots should default to true")

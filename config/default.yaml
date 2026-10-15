@@ -312,7 +312,18 @@ dev_artifacts:
   temp_root_cleanup: false
   temp_scan_paths:
     - /private/tmp
+  # Roots are taken oldest first; a path with more roots than this reclaims
+  # its oldest this cycle and the rest later.
   temp_scan_max_roots: 128
+  # Same-user processes whose cwd/open files may be unreadable (Linux) without
+  # preserving every temp root: the tailscaled SSH incubator, systemd --user,
+  # (sd-pam). Zombies are always ignored. Any other unreadable process of the
+  # user still preserves every temp root.
+  temp_uninspectable_ok_comms:
+    - tailscaled
+    - "(sd-pam)"
+    - sd-pam
+    - systemd
   temp_artifact_min_mb: 256
   temp_artifact_stale_after: 6h
   # Agent-harness scratch containers (e.g. /private/tmp/claude-<uid>) hold
@@ -338,6 +349,7 @@ dev_artifacts:
   # can accumulate quickly under /private/tmp. These are only deleted under
   # aggressive/critical pressure, never while referenced by active processes.
   nix_temp_roots: true
+  # 0 sets no size floor (empty stale roots are reaped too).
   nix_temp_root_min_mb: 1
   nix_temp_root_stale_after: 24h
   node_modules: true
