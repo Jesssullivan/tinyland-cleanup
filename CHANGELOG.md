@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Stale indirect GC roots are reaped before Nix GC.** With
+  `nix.reap_stale_gc_roots: true` the nix plugin removes, before its dry-run
+  preflight, nix-direnv roots of a checkout not loaded within
+  `nix.direnv_gc_root_stale_after` (default 7d) or no longer a git checkout,
+  and store out-links under `nix.temp_gc_root_paths` (default
+  `dev_artifacts.temp_scan_paths`) older than `nix.temp_gc_root_stale_after`
+  (default 72h). Only owned symlinks into the store are removed; roots under a
+  `gcroots` or `profiles` path component and Bazel rules_nixpkgs out-links are
+  never touched. Off by default. The nix-direnv flake-input roots pin flake
+  sources, which a host that keeps only outputs should not retain.
+
 ### Fixed
 
 - **The temp lane no longer stops for good on a non-dumpable helper.** On

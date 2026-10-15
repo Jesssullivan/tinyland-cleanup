@@ -712,6 +712,22 @@ type NixConfig struct {
 	MaxGCDuration string `yaml:"max_gc_duration"`
 	// RootAttributionLimit limits visible GC root targets in low-reclaim dry-runs.
 	RootAttributionLimit int `yaml:"root_attribution_limit"`
+	// ReapStaleGCRoots removes stale indirect GC roots the daemon user owns
+	// before each Nix GC pass: nix-direnv roots (.direnv/flake-profile-*,
+	// .direnv/flake-inputs/*) of a checkout not loaded within
+	// direnv_gc_root_stale_after or no longer a git checkout, and store
+	// out-links under temp_gc_root_paths older than temp_gc_root_stale_after.
+	// Roots under a "gcroots" or "profiles" path component are never touched.
+	ReapStaleGCRoots bool `yaml:"reap_stale_gc_roots"`
+	// DirenvGCRootStaleAfter is how long a checkout's nix-direnv roots may go
+	// unloaded before they are removed (default 7d).
+	DirenvGCRootStaleAfter string `yaml:"direnv_gc_root_stale_after"`
+	// TempGCRootStaleAfter is how old a temporary out-link may be before it is
+	// removed (default 72h).
+	TempGCRootStaleAfter string `yaml:"temp_gc_root_stale_after"`
+	// TempGCRootPaths are the directories under which an out-link counts as
+	// temporary. Empty means dev_artifacts.temp_scan_paths.
+	TempGCRootPaths []string `yaml:"temp_gc_root_paths"`
 }
 
 // ICloudConfig holds iCloud-specific cleanup settings (Darwin).
@@ -1034,6 +1050,9 @@ func DefaultConfig() *Config {
 			DaemonBusyBackoff:                             "30m",
 			MaxGCDuration:                                 "20m",
 			RootAttributionLimit:                          20,
+			ReapStaleGCRoots:                              false,
+			DirenvGCRootStaleAfter:                        "7d",
+			TempGCRootStaleAfter:                          "72h",
 		},
 		Lima: LimaConfig{
 			VMNames: []string{"colima", "unified"},

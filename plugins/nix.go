@@ -22,6 +22,11 @@ const nixDefaultCommandTimeout = 20 * time.Minute
 // NixPlugin handles Nix garbage collection operations.
 type NixPlugin struct {
 	freeDiskSpace func(string) (uint64, error)
+	// Test seams for the stale GC root reaper; empty or nil uses the real
+	// /nix/var/nix/gcroots/auto, /nix/store and wall clock.
+	autoGCRootsDir string
+	storeDir       string
+	now            func() time.Time
 }
 
 type nixGeneration struct {
@@ -128,6 +133,13 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		}
 	}
 
+	staleTargets, staleMetadata, staleWarnings := p.planStaleGCRoots(cfg)
+	plan.Targets = append(plan.Targets, staleTargets...)
+	for key, value := range staleMetadata {
+		plan.Metadata[key] = value
+	}
+	plan.Warnings = append(plan.Warnings, staleWarnings...)
+
 	if output, err := p.collectGarbageDryRun(ctx, cfg.Nix); err != nil {
 		if reason, ok := nixContentionReason(output); ok {
 			plan.Metadata["nix_contention"] = reason
@@ -232,6 +244,11 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		}
 	}
 
+	// Stale indirect roots go before the preflight so the dry-run and the GC
+	// both see what they no longer pin.
+	rootsRemoved := p.reapStaleGCRoots(cfg, logger)
+	result.ItemsCleaned += rootsRemoved
+
 	dryRunOutput, dryRunErr := p.collectGarbageDryRun(ctx, cfg.Nix)
 	if dryRunErr != nil {
 		if reason, ok := nixContentionReason(dryRunOutput); ok && cfg.Nix.SkipWhenDaemonBusy {
@@ -243,7 +260,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 			"output", strings.TrimSpace(dryRunOutput))
 		result.Error = fmt.Errorf("nix garbage collection preflight failed: %w", dryRunErr)
 		return result
-	} else if p.nixDryRunHasNoGCWork(dryRunOutput) && generationsDeleted == 0 && !(level == LevelCritical && cfg.Nix.AllowStoreOptimize) {
+	} else if p.nixDryRunHasNoGCWork(dryRunOutput) && generationsDeleted == 0 && rootsRemoved == 0 && !(level == LevelCritical && cfg.Nix.AllowStoreOptimize) {
 		logger.Info("skipping Nix garbage collection because dry-run reported no reclaimable store paths")
 		return result
 	}
@@ -795,6 +812,7 @@ func nixDeferralTarget(targetType string, name string, action string, active boo
 func nixPlanSteps(level CleanupLevel, cfg config.NixConfig) []string {
 	steps := []string{
 		"Inspect active Nix, Home Manager, and rebuild processes before locking the store",
+		"Remove stale nix-direnv and temporary out-link GC roots the daemon user owns when reap_stale_gc_roots=true",
 		"Run nix-collect-garbage --dry-run to estimate reclaimable store paths",
 		"List user and system profile generations and apply minimum-retention policy",
 		"Preserve current profile generations and visible system generations by default",

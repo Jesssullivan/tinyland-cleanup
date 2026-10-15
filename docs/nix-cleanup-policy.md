@@ -61,6 +61,10 @@ nix:
   daemon_busy_backoff: 30m
   max_gc_duration: 20m
   root_attribution_limit: 20
+  reap_stale_gc_roots: false
+  direnv_gc_root_stale_after: 7d
+  temp_gc_root_stale_after: 72h
+  temp_gc_root_paths: []
 ```
 
 Runtime behavior:
@@ -113,6 +117,29 @@ Runtime behavior:
   Nix cache roots are listed before generic unknown roots when attribution
   output is truncated;
 - `nix-store --optimize` runs only when `allow_store_optimize: true`.
+- with `reap_stale_gc_roots: true`, each real cleanup removes stale indirect
+  GC roots before the dry-run preflight, so the preflight and the GC both see
+  what those roots no longer pin. It reads `/nix/var/nix/gcroots/auto` and
+  considers only out-links that are symlinks the daemon user owns and that
+  select a store path directly. Two classes are removed:
+  - nix-direnv roots (`.direnv/flake-profile-*`, `.direnv/nix-profile-*`,
+    `.direnv/flake-inputs/*`) of a checkout whose newest root link is older
+    than `direnv_gc_root_stale_after`, or whose directory has no `.git`.
+    nix-direnv touches every root on each cached load, so the newest link is
+    the last time the checkout's shell was loaded. The flake inputs are flake
+    sources; the next load re-evaluates the shell and roots it again. The
+    `.rc` cache file is kept, and nix-direnv treats the missing profile as an
+    invalid cache;
+  - out-links under `temp_gc_root_paths` (default
+    `dev_artifacts.temp_scan_paths`; a path that resolves through a symlink
+    also covers its target) whose link is older than
+    `temp_gc_root_stale_after`.
+  Roots under a `gcroots` or `profiles` path component (deliberate
+  `gcroots/<ticket>/` pins, profile generations) and rules_nixpkgs
+  `bazel-support/nix-out-link` links inside Bazel output bases are never
+  touched. Only the link goes; a store path a live process still maps, execs
+  or holds open stays protected by Nix's own runtime roots. Dry-run plans list
+  the classified roots as `remove_stale_gc_root` or `keep_gc_root` targets.
 
 Darwin TCC-protected app bundle wedge:
 
