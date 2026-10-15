@@ -242,9 +242,12 @@ Temporary-root discovery is separately bounded by
 in `temp_scan_paths` gets its own root budget (and a carry-over share of the
 entry and duration budgets: what the lane has left divided by the paths still
 to come), so a `/tmp` full of `nix-shell.*` roots cannot starve a
-later path such as `/srv/fast-local/<user>/tmp`. A temp path cut by its own
-root budget is reported (`temp_scan_paths_truncated`, `scan_truncated_paths`)
-and the remaining temp paths and later lanes still run. The entry and duration
+later path such as `/srv/fast-local/<user>/tmp`. Within a path, roots are
+taken oldest first, so a path with more roots than its budget reclaims its
+oldest stale roots this cycle and reaches the rest in later cycles. A temp
+path cut by its own root budget is reported (`temp_scan_paths_truncated`,
+`scan_truncated_paths`) and the remaining temp paths and later lanes still
+run. The entry and duration
 shares are not independent of the rest of the cycle: each path's entries count
 against the shared entry budget and the shared scan deadline still applies, so
 if the temp paths exhaust their entry or time shares the later lanes truncate

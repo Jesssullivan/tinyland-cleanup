@@ -740,8 +740,17 @@ type DevArtifactsConfig struct {
 	TempRootCleanup bool `yaml:"temp_root_cleanup"`
 	// TempScanPaths are top-level temporary directories scanned for large generated artifacts
 	TempScanPaths []string `yaml:"temp_scan_paths"`
-	// TempScanMaxRoots bounds top-level temp roots inspected per temp scan path
+	// TempScanMaxRoots bounds top-level temp roots inspected per temp scan
+	// path per cycle. Roots are taken oldest first, so a path with more roots
+	// than this reclaims its oldest stale roots and the rest wait for a later
+	// cycle; the path is never skipped as a whole.
 	TempScanMaxRoots int `yaml:"temp_scan_max_roots"`
+	// TempUninspectableOKComms are command names (/proc/<pid>/stat comm) of
+	// this user's processes whose cwd or open files may be unreadable without
+	// making the temp lane's activity inventory incomplete. Any other owned
+	// process that cannot be read still protects every temp root. Zombies are
+	// always ignored. Linux only: Darwin uses lsof, which has no such gap.
+	TempUninspectableOKComms []string `yaml:"temp_uninspectable_ok_comms"`
 	// TempArtifactMinMB is the minimum physical size for review-only temporary artifact targets
 	TempArtifactMinMB int `yaml:"temp_artifact_min_mb"`
 	// TempArtifactStaleAfter is the age after which temp artifacts become review candidates
@@ -761,7 +770,9 @@ type DevArtifactsConfig struct {
 	HarnessScratchStaleAfter string `yaml:"harness_scratch_stale_after"`
 	// NixTempRoots enables deletion of stale top-level nix-shell/nix-develop temp roots
 	NixTempRoots bool `yaml:"nix_temp_roots"`
-	// NixTempRootMinMB is the minimum physical size for stale Nix temp-root deletion candidates
+	// NixTempRootMinMB is the minimum physical size for stale Nix temp-root
+	// deletion candidates. 0 sets no floor, so empty stale roots are reaped
+	// too (they cost inodes); a negative value means the 1 MB default.
 	NixTempRootMinMB int `yaml:"nix_temp_root_min_mb"`
 	// NixTempRootStaleAfter is the age after which Nix temp roots become deletion candidates
 	NixTempRootStaleAfter string `yaml:"nix_temp_root_stale_after"`
@@ -1071,6 +1082,13 @@ func DefaultConfig() *Config {
 			LargeLocalArtifacts:          true,
 			LargeLocalArtifactMinMB:      1024,
 			ProtectPaths:                 []string{},
+			// Same-user processes the kernel does not let this user inspect:
+			// the tailscaled SSH incubator ("tailscaled be-child ssh"), the
+			// systemd user manager and its (sd-pam) helper. None of them
+			// works inside a temp root.
+			TempUninspectableOKComms: []string{
+				"tailscaled", "(sd-pam)", "sd-pam", "systemd",
+			},
 		},
 		DarwinDevCaches: DarwinDevCachesConfig{
 			Enabled:    runtime.GOOS == "darwin",

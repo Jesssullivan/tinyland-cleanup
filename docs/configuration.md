@@ -231,6 +231,52 @@ plugin set for a host. Plugin-specific keys are documented in
 [Plugins](plugins.md) and the policy docs ([Nix](nix-cleanup-policy.md),
 [Bazel](bazel-cache-policy.md), [Darwin caches](darwin-dev-caches.md)).
 
+## Temporary scan paths
+
+The `dev_artifacts` temp lane walks the top-level entries of each
+`temp_scan_paths` directory. It reaps stale `nix-shell.*`, `nix-develop-*`,
+`nix-<n>-<n>` and `nix-build-*` roots at aggressive or critical level, prunes
+rebuildable output inside other idle roots, and reaps released roots that carry
+a custody receipt. Agent-session trees (`claude-*`, `codex*`, `.tmp*`, `pi-*`)
+directly under a temp scan path, the host temp directories and `$TMPDIR` are
+always protected, whatever the configuration.
+
+```yaml
+dev_artifacts:
+  temp_scan_max_roots: 128
+  temp_uninspectable_ok_comms: [tailscaled, "(sd-pam)", sd-pam, systemd]
+  nix_temp_root_min_mb: 1
+  nix_temp_root_stale_after: 24h
+```
+
+- `temp_scan_max_roots` bounds the roots one cycle inspects in each temp scan
+  path. Roots are taken oldest first (by modification time, then by name), so
+  a path with more roots than the budget reclaims its oldest stale roots this
+  cycle and the rest in later cycles. The cut is reported in
+  `temp_scan_paths_truncated` and `scan_truncated_paths`; the later temp paths
+  still run.
+- A root that a same-user process holds, as its cwd or through an open file,
+  is never removed. On Linux the lane reads `/proc/<pid>/cwd` and
+  `/proc/<pid>/fd` for every process of the daemon's user. If it cannot read
+  them for one process, it does not know what that process holds, so the
+  inventory is incomplete and every temp root of every temp scan path is kept
+  that cycle ("preserving temporary scan path because activity inventory is
+  incomplete").
+- `temp_uninspectable_ok_comms` lists the exceptions: command names (the
+  `comm` field of `/proc/<pid>/stat`) of same-user processes the kernel does
+  not let the user inspect and that never work inside a temp root. The default
+  covers the tailscaled SSH incubator (`tailscaled be-child ssh`), the systemd
+  user manager and `(sd-pam)`. A zombie (state `Z`) holds nothing and is always
+  ignored. What a listed process does expose is still recorded. Setting the
+  key replaces the default list. `sshd-session` is deliberately not listed:
+  it is unreadable only while a session is set up, and it may hold a
+  forwarded agent socket under `/tmp`. Darwin reads the inventory with `lsof`
+  and does not use this list. `bazel_bases.uninspectable_ok_comms` is the same
+  rule for the Bazel output-base lane.
+- `nix_temp_root_min_mb` is the size floor for reaping a stale Nix root. `0`
+  sets no floor, so empty stale roots are reaped too; they cost an inode each.
+  A negative value means the 1 MB default.
+
 ## Source of Truth
 
 - Example config: [`config/default.yaml`](https://github.com/Jesssullivan/tinyland-cleanup/blob/main/config/default.yaml)

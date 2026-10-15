@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -28,6 +29,55 @@ type temporaryCustodyReceipt struct {
 	Receipt  string `json:"receipt"`
 }
 
+// tempScanRoot is one top-level entry of a temp scan path.
+type tempScanRoot struct {
+	name string
+	path string
+	info os.FileInfo // Lstat: a symlink is not a directory
+}
+
+// tempScanRootsOldestFirst lists the top-level entries of a temp scan path,
+// oldest first by the modification time the staleness checks use, then by
+// name. temp_scan_max_roots bounds how many roots one cycle inspects per
+// path; taking the oldest first spends that budget on the roots most likely
+// to be stale, a reclaimed root leaves the list, and the next cycle reaches
+// further. Before this, entries came in name order, so every cycle spent the
+// budget on the same lexically first roots. Entries that vanish before they
+// can be inspected are left out.
+func tempScanRootsOldestFirst(scanPath string) ([]tempScanRoot, error) {
+	entries, err := os.ReadDir(scanPath)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	roots := make([]tempScanRoot, 0, len(entries))
+	times := make([]time.Time, 0, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		roots = append(roots, tempScanRoot{name: entry.Name(), path: filepath.Join(scanPath, entry.Name()), info: info})
+		times = append(times, effectiveModTime(info, now))
+	}
+	order := make([]int, len(roots))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		ta, tb := times[order[a]], times[order[b]]
+		if !ta.Equal(tb) {
+			return ta.Before(tb)
+		}
+		return roots[order[a]].name < roots[order[b]].name
+	})
+	sorted := make([]tempScanRoot, len(roots))
+	for i, j := range order {
+		sorted[i] = roots[j]
+	}
+	return sorted, nil
+}
+
 func temporaryRootActivityReason(roots map[string]string, path string) string {
 	if reason := roots["*"]; reason != "" {
 		return reason
@@ -35,9 +85,10 @@ func temporaryRootActivityReason(roots map[string]string, path string) string {
 	return roots[canonicalTempArtifactPath(path)]
 }
 
-func (p *DevArtifactsPlugin) activeTemporaryRoots(ctx context.Context, paths []string, home string) map[string]string {
+func (p *DevArtifactsPlugin) activeTemporaryRoots(ctx context.Context, cfg config.DevArtifactsConfig, home string) map[string]string {
+	paths := cfg.TempScanPaths
 	if p.tempActivity == nil {
-		return activeTempArtifactRoots(ctx, paths, home)
+		return activeTempArtifactRoots(ctx, paths, home, cfg.TempUninspectableOKComms)
 	}
 	roots, err := p.tempActivity(ctx, paths, home)
 	if roots == nil {
@@ -50,8 +101,11 @@ func (p *DevArtifactsPlugin) activeTemporaryRoots(ctx context.Context, paths []s
 }
 
 // Inspect every same-user process, including shell cwd and non-tool open files.
-// Any incomplete inventory is unknown activity and protects every root.
-func inspectTemporaryRootActivity(ctx context.Context, paths []string, home string) (map[string]string, error) {
+// Any incomplete inventory is unknown activity and protects every root. On
+// Linux, okComms names same-user processes whose cwd or open files may be
+// unreadable without making the inventory incomplete (see
+// temporaryRootActivityFromProc).
+func inspectTemporaryRootActivity(ctx context.Context, paths []string, home string, okComms []string) (map[string]string, error) {
 	roots := map[string]string{}
 	if len(paths) == 0 {
 		return roots, nil
@@ -66,7 +120,7 @@ func inspectTemporaryRootActivity(ctx context.Context, paths []string, home stri
 	// NUL-delimited fields preserve spaces and newlines in paths; cwd records
 	// are included by default alongside regular file descriptors.
 	if runtime.GOOS == "linux" {
-		files, err := linuxTemporaryRootActivity(probeCtx, paths, home)
+		files, err := linuxTemporaryRootActivity(probeCtx, paths, home, okComms)
 		for path, reason := range files {
 			roots[path] = reason
 		}
@@ -86,17 +140,35 @@ func inspectTemporaryRootActivity(ctx context.Context, paths []string, home stri
 }
 
 // Linux /proc keeps unrelated inaccessible cluster mounts outside this
-// same-user observation. Permission failures for an owned process remain unknown.
-func linuxTemporaryRootActivity(ctx context.Context, paths []string, home string) (map[string]string, error) {
-	return temporaryRootActivityFromProc(ctx, "/proc", paths, home)
+// same-user observation. Permission failures for an owned process remain
+// unknown unless the process is a zombie or its comm is in okComms.
+func linuxTemporaryRootActivity(ctx context.Context, paths []string, home string, okComms []string) (map[string]string, error) {
+	return temporaryRootActivityFromProc(ctx, "/proc", paths, home, okComms)
 }
 
-func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []string, home string) (map[string]string, error) {
+// tempProcReadlink and tempProcReadDir read a process's cwd and fd links.
+// Tests replace them to simulate a process this user may not inspect.
+var (
+	tempProcReadlink = os.Readlink
+	tempProcReadDir  = os.ReadDir
+)
+
+// temporaryRootActivityFromProc maps temp roots to the same-user process that
+// holds them through its cwd or an open file. A same-user process whose cwd or
+// open files cannot be read makes the inventory incomplete (the error), which
+// protects every temp root, with two exceptions that leave it complete: a
+// zombie (state Z), which holds no cwd or files, and a process whose comm is
+// in okComms, a reviewed list of non-dumpable helpers that never work inside
+// a temp root (dev_artifacts.temp_uninspectable_ok_comms; the bazel_bases
+// lane has the same rule as uninspectable_ok_comms). What such a process
+// does expose is still recorded.
+func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []string, home string, okComms []string) (map[string]string, error) {
 	roots := map[string]string{}
 	entries, err := os.ReadDir(proc)
 	if err != nil {
 		return roots, err
 	}
+	ok := procCommSet(okComms)
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return roots, err
@@ -126,33 +198,51 @@ func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []str
 		if uid != os.Geteuid() {
 			continue
 		}
+		// uninspectable decides an owned process whose cwd or open files
+		// could not be read: nil leaves the inventory complete.
+		uninspectable := func(what string) error {
+			comm, state := procCommState(process)
+			if state == "Z" || ok[comm] {
+				return nil
+			}
+			return fmt.Errorf("owned process %s unavailable: pid %s (%s)", what, entry.Name(), comm)
+		}
 		record := func(path string) {
 			if root := tempArtifactRootForPath(strings.TrimSuffix(path, " (deleted)"), paths, home); root != "" {
 				roots[root] = "cwd/open file held by pid " + entry.Name()
 			}
 		}
-		cwd, err := os.Readlink(filepath.Join(process, "cwd"))
+		cwd, err := tempProcReadlink(filepath.Join(process, "cwd"))
 		if os.IsNotExist(err) {
 			continue
 		} // exited process or kernel thread
 		if err != nil {
-			return roots, fmt.Errorf("owned process cwd unavailable")
+			if err := uninspectable("cwd"); err != nil {
+				return roots, err
+			}
+		} else {
+			record(cwd)
 		}
-		record(cwd)
-		fds, err := os.ReadDir(filepath.Join(process, "fd"))
+		fds, err := tempProcReadDir(filepath.Join(process, "fd"))
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return roots, fmt.Errorf("owned process open files unavailable")
+			if err := uninspectable("open files"); err != nil {
+				return roots, err
+			}
+			continue
 		}
 		for _, fd := range fds {
-			path, err := os.Readlink(filepath.Join(process, "fd", fd.Name()))
+			path, err := tempProcReadlink(filepath.Join(process, "fd", fd.Name()))
 			if os.IsNotExist(err) {
 				continue
 			} // closed after the fd snapshot
 			if err != nil {
-				return roots, fmt.Errorf("owned process file identity unavailable")
+				if err := uninspectable("file identity"); err != nil {
+					return roots, err
+				}
+				break
 			}
 			if filepath.IsAbs(path) {
 				record(path)
@@ -281,7 +371,7 @@ func (p *DevArtifactsPlugin) recheckTemporaryRoot(ctx context.Context, root stri
 		return reason
 	}
 	home, _ := os.UserHomeDir()
-	if reason := temporaryRootActivityReason(p.activeTemporaryRoots(ctx, cfg.TempScanPaths, home), root); reason != "" {
+	if reason := temporaryRootActivityReason(p.activeTemporaryRoots(ctx, cfg, home), root); reason != "" {
 		return reason
 	}
 	if reason := temporaryRootIdleReason(ctx, root, age); reason != "" {
@@ -329,15 +419,15 @@ func (p *DevArtifactsPlugin) planDisposableTemporaryRoots(ctx context.Context, s
 		return
 	}
 	age := parseNixPolicyDuration(cfg.TempArtifactStaleAfter, 7*24*time.Hour)
-	entries, err := os.ReadDir(scanPath)
+	entries, err := tempScanRootsOldestFirst(scanPath)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || isNixTemporaryRootName(entry.Name()) || isHarnessScratchContainer(entry.Name(), cfg) {
+		if !entry.info.IsDir() || isNixTemporaryRootName(entry.name) || isHarnessScratchContainer(entry.name, cfg) {
 			continue
 		}
-		root := filepath.Join(scanPath, entry.Name())
+		root := entry.path
 		if !pathExists(filepath.Join(root, disposableTempReceipt)) {
 			continue
 		}
@@ -355,7 +445,7 @@ func (p *DevArtifactsPlugin) planDisposableTemporaryRoots(ctx context.Context, s
 		if reason == "" {
 			reason = p.recheckTemporaryRoot(ctx, root, info, age, cfg)
 		}
-		target := CleanupTarget{Type: "disposable-temp-root", Name: entry.Name(), Path: root, Action: "protect", Protected: true, Reason: reason}
+		target := CleanupTarget{Type: "disposable-temp-root", Name: entry.name, Path: root, Action: "protect", Protected: true, Reason: reason}
 		if reason == "" {
 			target.Bytes, err = getDirAllocatedBytesContext(ctx, root)
 			if err != nil {

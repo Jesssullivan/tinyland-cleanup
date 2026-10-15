@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The temp lane no longer stops for good on a non-dumpable helper.** On
+  Linux the temp lane reads every same-user process's cwd and open files, and
+  one it could not read made the activity inventory incomplete, which
+  preserves every temp scan path. The kernel does not let a user read those
+  links for some of its own processes: the tailscaled SSH incubator
+  (`tailscaled be-child ssh`), the `systemd --user` manager and `(sd-pam)`.
+  On sting that skipped every temp scan path on every cycle from 2026-10-06,
+  while `/srv/fast-local/tmp-agents` filled with stale `nix-shell.*` and
+  `nix-develop-*` roots. The new `dev_artifacts.temp_uninspectable_ok_comms`
+  (default `tailscaled`, `(sd-pam)`, `sd-pam`, `systemd`) lists command names
+  whose unreadable cwd or open files leave the inventory complete, the rule
+  `bazel_bases.uninspectable_ok_comms` already applies to its own lane.
+  Zombies are always ignored. Any other unreadable same-user process still
+  preserves every temp root, and the warning now names its pid and command.
+- **Temp roots are taken oldest first.** `temp_scan_max_roots` bounds the
+  roots one cycle inspects per temp scan path. The lanes took roots in name
+  order, so a path with more roots than the budget spent it on the same
+  lexically first roots every cycle. They now take the oldest first: the
+  stale roots most likely to be reclaimed go first, a reclaimed root leaves
+  the list and the next cycle reaches further. The cut is still reported in
+  `temp_scan_paths_truncated` and `scan_truncated_paths`.
+- **`nix_temp_root_min_mb: 0` reaps empty stale Nix roots.** Zero used to
+  mean the 1 MB default, so an empty stale `nix-develop-*` root, which costs
+  an inode and no bytes, was never reaped. Zero now sets no floor; a negative
+  value means the default. The default stays 1.
+
 ## [0.4.3] - 2026-10-13
 
 A hotfix for a daemon that could stop for good. On one host the cache plugin

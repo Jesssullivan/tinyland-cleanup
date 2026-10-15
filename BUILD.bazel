@@ -271,6 +271,7 @@ go_library(
         "plugins/nix.go",
         "plugins/plugin.go",
         "plugins/podman.go",
+        "plugins/proc_stat.go",
         "plugins/rke2.go",
         "plugins/scan_budget.go",
         "plugins/streamwalk.go",

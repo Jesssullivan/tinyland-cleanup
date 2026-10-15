@@ -79,10 +79,7 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 		a.incomplete = append(a.incomplete, "cannot list "+procRoot+": "+err.Error())
 		return a
 	}
-	okComms := map[string]bool{}
-	for _, c := range opts.OKComms {
-		okComms[c] = true
-	}
+	okComms := procCommSet(opts.OKComms)
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			a.incomplete = append(a.incomplete, "process scan interrupted")
@@ -107,7 +104,7 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 			}
 			if st, err := os.Stat(d); err == nil {
 				if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) == uid {
-					comm, state := bbProcStat(d)
+					comm, state := procCommState(d)
 					if state != "Z" && !okComms[comm] {
 						a.incomplete = append(a.incomplete, fmt.Sprintf("pid %d (%s) fd unreadable: %v", pid, comm, ferr))
 					}
@@ -139,24 +136,6 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 		bbLsofIndex(ctx, a, opts)
 	}
 	return a
-}
-
-func bbProcStat(d string) (string, string) {
-	raw, err := os.ReadFile(filepath.Join(d, "stat"))
-	if err != nil {
-		return "", ""
-	}
-	s := string(raw)
-	open, close := strings.Index(s, "("), strings.LastIndex(s, ")")
-	if open < 0 || close < open {
-		return "", ""
-	}
-	rest := strings.Fields(s[close+1:])
-	state := ""
-	if len(rest) > 0 {
-		state = rest[0]
-	}
-	return s[open+1 : close], state
 }
 
 var bbProcLockRe = regexp.MustCompile(`^([0-9a-fA-F]+):([0-9a-fA-F]+):(\d+)$`)
