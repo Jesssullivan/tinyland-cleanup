@@ -321,6 +321,7 @@ go_library(
 go_test(
     name = "plugins_test",
     srcs = [
+        "plugins/agentsession_temp_test.go",
         "plugins/archive_lifecycle_test.go",
         "plugins/bazel_bases_test.go",
         "plugins/bazel_test.go",
