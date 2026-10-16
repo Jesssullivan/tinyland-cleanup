@@ -236,6 +236,27 @@ nix:
   temp_gc_root_stale_after: 72h
   temp_gc_root_paths: []
   gc_root_candidates_file: ""
+  # Agent-session trees under the temp roots (TIN-5268): an out-link there is
+  # listed only after agent_tree_idle_after and while no live process of the
+  # daemon user works inside the tree.
+  agent_tree_prefixes: ["claude-*", "codex*", ".tmp*"]
+  agent_tree_idle_after: 7d
+  # Cadence. The nix plugin runs every poll: it collects under pressure and at
+  # least every periodic_gc_interval (empty: never without pressure), never
+  # twice within min_gc_interval, even at critical. gc_state_file keeps the
+  # last pass across restarts (empty: in memory).
+  periodic_gc_interval: ""
+  min_gc_interval: 30m
+  gc_state_file: ""
+  # Hook-path safety. Every /nix/store path these files reference (Claude
+  # settings.json, Codex config) is rooted under hook_pin_dir before each GC
+  # and released only once no session in hook_pin_session_comms that started
+  # while it was referenced is alive. hook_pin_required refuses a GC pass
+  # whose pins could not be established.
+  hook_pin_files: []
+  hook_pin_dir: ~/.local/state/tinyland-cleanup/gcroots/hook-pins
+  hook_pin_session_comms: ["claude", "codex"]
+  hook_pin_required: false
 
 # Structural Bazel output-base reaper (R-C644, R-C645). Level independent:
 # it runs whatever the host cleanup level and applies its own per-mount

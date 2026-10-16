@@ -1,0 +1,44 @@
+# Root job: unregister stale Nix GC roots that the unprivileged daemon lists
+# in each declared user's candidates file (nix.gc_root_candidates_file).
+# Removes only /nix/var/nix/gcroots/auto/<name> entries after re-checking each
+# line; never touches an out-link. No sudo rule: this unit is the privilege.
+# Arguments come from /etc/tinyland-cleanup/root-jobs.env:
+#   TINYLAND_CLEANUP_GCROOT_ARGS="--report-only jess=/home/jess/.local/state/tinyland-cleanup/gcroot-candidates"
+[Unit]
+Description=tinyland-cleanup: unregister stale Nix GC roots listed by the daemon
+Documentation=https://github.com/Jesssullivan/tinyland-cleanup
+ConditionPathExists=/etc/tinyland-cleanup/root-jobs.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tinyland-cleanup/root-jobs.env
+ExecStart=@bindir@/tinyland-cleanup gcroot-unregister $TINYLAND_CLEANUP_GCROOT_ARGS
+TimeoutStartSec=300
+Nice=10
+IOSchedulingClass=idle
+StateDirectory=tinyland-cleanup
+StateDirectoryMode=0700
+# Reads each user's 0600 list and stats out-links in user trees; removes auto
+# entries. /tmp and /var/tmp stay visible (read-only) because out-links live
+# there.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/nix/var/nix/gcroots/auto
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+UMask=0077

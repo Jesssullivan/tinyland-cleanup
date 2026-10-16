@@ -1,0 +1,17 @@
+# Root job: keep the current generation plus --keep-previous in each declared
+# user's Home Manager and user profiles and in root's profile. No store GC:
+# the daemon's nix plugin collects. Arguments come from
+# /etc/tinyland-cleanup/root-jobs.env:
+#   TINYLAND_CLEANUP_PRUNE_ARGS="--keep-previous 1 jess"
+[Unit]
+Description=tinyland-cleanup: prune Nix profile generations
+Documentation=https://github.com/Jesssullivan/tinyland-cleanup
+ConditionPathExists=/etc/tinyland-cleanup/root-jobs.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tinyland-cleanup/root-jobs.env
+ExecStart=@bindir@/tinyland-cleanup profile-prune $TINYLAND_CLEANUP_PRUNE_ARGS
+TimeoutStartSec=600
+Nice=10
+IOSchedulingClass=idle

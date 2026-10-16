@@ -51,6 +51,7 @@ import (
 	"github.com/Jesssullivan/tinyland-cleanup/config"
 	"github.com/Jesssullivan/tinyland-cleanup/monitor"
 	"github.com/Jesssullivan/tinyland-cleanup/plugins"
+	"github.com/Jesssullivan/tinyland-cleanup/rootjobs"
 )
 
 // version mirrors the VERSION file; it is the dev default and is overridden at
@@ -84,6 +85,17 @@ const (
 )
 
 func main() {
+	// Privileged one-shot modes run as root from packaging/systemd units
+	// (no sudo rule): they never start the daemon.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "gcroot-unregister":
+			os.Exit(rootjobs.RunGCRootUnregister(os.Args[2:], os.Stdout))
+		case "profile-prune":
+			os.Exit(rootjobs.RunProfilePrune(os.Args[2:], os.Stdout))
+		}
+	}
+
 	// Parse command line flags
 	var (
 		configPath          = flag.String("config", "", "Path to configuration file")

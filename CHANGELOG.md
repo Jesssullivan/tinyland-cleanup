@@ -6,6 +6,24 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Nix GC cadence.** The nix plugin is level-independent: it collects under
+  pressure and at least every `nix.periodic_gc_interval`, and never twice
+  within `nix.min_gc_interval` (default 30m), even at critical.
+- **Hook-path safety.** `nix.hook_pin_files` (Claude `settings.json`, Codex
+  config): every store path they reference is rooted under
+  `nix.hook_pin_dir` before each GC and released only once no session that
+  started while it was referenced is alive. `nix.hook_pin_required` refuses a
+  GC pass whose pins could not be established.
+- **Root jobs, no sudo.** `tinyland-cleanup gcroot-unregister` (with
+  `--report-only`, stale-list and recreated-root refusal, link age re-check,
+  non-blocking list open and bounded receipts) and `tinyland-cleanup
+  profile-prune --keep-previous 0|1`, with hardened systemd units shipped in
+  `share/tinyland-cleanup/systemd/`.
+- **Agent-session trees.** Stale out-links under `claude-*`, `codex*` and
+  `.tmp*` temp entries are listed only after `nix.agent_tree_idle_after`
+  (7d) and while no live process works in the tree.
+- **nix-direnv checkouts** are found by walking up for `.git` or `.jj`, a
+  stat error keeps the roots, and the 7-day rule applies to every `.direnv`.
 - **Stale indirect GC roots are listed for a root unregister job.** With
   `nix.reap_stale_gc_roots: true` the nix plugin, before its dry-run
   preflight, finds nix-direnv roots of a checkout not loaded within

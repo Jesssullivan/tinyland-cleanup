@@ -2,11 +2,13 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -100,6 +102,7 @@ func (f *gcRootFixture) plugin(now time.Time) *NixPlugin {
 	p.autoGCRootsDir = f.autoDir
 	p.storeDir = f.storeDir
 	p.now = func() time.Time { return now }
+	p.liveCwds = func() ([]string, error) { return nil, nil }
 	return p
 }
 
@@ -157,16 +160,114 @@ func TestNixStaleGCRootsDirenvStaleCheckoutLosesEveryRoot(t *testing.T) {
 	}
 }
 
-func TestNixStaleGCRootsDirenvOutsideAGitCheckoutIsStaleAtOnce(t *testing.T) {
+// M2: a .direnv with no .git or .jj above it is not stale at once; the
+// 7-day age rule applies to it too.
+func TestNixStaleGCRootsDirenvWithoutAVCSFollowsTheAgeRule(t *testing.T) {
 	f := newGCRootFixture(t)
 	input, _ := f.root("scratch/copied/.direnv/flake-inputs/src-1")
 
-	roots, err := f.reaper(time.Now()).collect(nil, 7*24*time.Hour, 72*time.Hour)
+	roots, err := f.reaper(time.Now().Add(time.Hour)).collect(nil, 7*24*time.Hour, 72*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staleByLink(roots)[input] {
+		t.Fatalf("a recently loaded .direnv with no checkout above it is kept: %+v", roots)
+	}
+	roots, err = f.reaper(time.Now().Add(8*24*time.Hour)).collect(nil, 7*24*time.Hour, 72*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !staleByLink(roots)[input] {
-		t.Fatalf("a .direnv outside a git checkout is stale whatever its age: %+v", roots)
+		t.Fatalf("after 7 days it is stale: %+v", roots)
+	}
+}
+
+// M2: a monorepo subdirectory or a jj checkout is found by walking up.
+func TestNixStaleGCRootsFindTheCheckoutAboveASubdirectory(t *testing.T) {
+	for _, marker := range []string{".git", ".jj"} {
+		t.Run(marker, func(t *testing.T) {
+			f := newGCRootFixture(t)
+			f.mkdir("repo/" + marker)
+			profile, _ := f.root("repo/services/api/.direnv/flake-profile-abc")
+			roots, err := f.reaper(time.Now().Add(time.Hour)).collect(nil, 7*24*time.Hour, 72*time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if staleByLink(roots)[profile] {
+				t.Fatalf("a fresh subdirectory .direnv under %s is kept: %+v", marker, roots)
+			}
+			if vcs, err := nixFindVCSRoot(filepath.Join(f.base, "repo/services/api")); err != nil || vcs != filepath.Join(f.base, "repo") {
+				t.Fatalf("walk-up found %q %v", vcs, err)
+			}
+		})
+	}
+}
+
+// M2: any stat error other than "does not exist" keeps the roots.
+func TestNixStaleGCRootsKeepDirenvRootsOnAStatError(t *testing.T) {
+	f := newGCRootFixture(t)
+	profile, _ := f.root("scratch/copied/.direnv/flake-profile-abc")
+	orig := nixLstat
+	nixLstat = func(path string) (os.FileInfo, error) {
+		if filepath.Base(path) == ".git" {
+			return nil, syscall.EACCES
+		}
+		return orig(path)
+	}
+	defer func() { nixLstat = orig }()
+
+	roots, err := f.reaper(time.Now().Add(30*24*time.Hour)).collect(nil, 7*24*time.Hour, 72*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staleByLink(roots)[profile] {
+		t.Fatalf("a stat error must keep the roots: %+v", roots)
+	}
+}
+
+// M1: an out-link in a live agent-session tree is never listed; an idle one
+// needs the 7-day idle rule, not the 72 h temp rule.
+func TestNixStaleGCRootsProtectLiveAgentSessionTrees(t *testing.T) {
+	f := newGCRootFixture(t)
+	tmp := f.mkdir("tmp-agents")
+	result, _ := f.root("tmp-agents/claude-1000/-srv-repo/session-1/scratchpad/result")
+	codex, _ := f.root("tmp-agents/codex-abc/result")
+	plain, _ := f.root("tmp-agents/hm-qualification/candidate")
+	tree := filepath.Join(tmp, "claude-1000")
+
+	reaper := func(now time.Time, cwds []string, err error) nixGCRootReaper {
+		r := f.reaper(now)
+		r.agentPrefixes = []string{"claude-*", "codex*", ".tmp*"}
+		r.agentIdle = 7 * 24 * time.Hour
+		r.liveCwds = func() ([]string, error) { return cwds, err }
+		return r
+	}
+	collect := func(r nixGCRootReaper) map[string]bool {
+		t.Helper()
+		roots, err := r.collect([]string{tmp}, 7*24*time.Hour, 72*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return staleByLink(roots)
+	}
+
+	got := collect(reaper(time.Now().Add(73*time.Hour), nil, nil))
+	if got[result] || got[codex] {
+		t.Fatalf("72 h is not enough idle time for an agent-session tree: %v", got)
+	}
+	if !got[plain] {
+		t.Fatalf("a plain temp out-link still follows the 72 h rule: %v", got)
+	}
+	got = collect(reaper(time.Now().Add(8*24*time.Hour), []string{filepath.Join(tree, "-srv-repo", "session-1")}, nil))
+	if got[result] {
+		t.Fatalf("a live process in the tree keeps its roots: %v", got)
+	}
+	if !got[codex] {
+		t.Fatalf("an idle tree with no live process is listed after 7 days: %v", got)
+	}
+	got = collect(reaper(time.Now().Add(8*24*time.Hour), nil, errors.New("no /proc")))
+	if got[result] || got[codex] {
+		t.Fatalf("inspection failure keeps every agent-session root: %v", got)
 	}
 }
 
@@ -281,14 +382,18 @@ func TestNixStaleGCRootCandidatesListOnlyStaleRootsAndTouchNoUserFile(t *testing
 	}
 	profile, profileStore := f.root("scratch/copied/.direnv/flake-profile-abc")
 	input, inputStore := f.root("scratch/copied/.direnv/flake-inputs/src-1")
-	f.mkdir("git/live/.git")
-	fresh, _ := f.root("git/live/.direnv/flake-profile-def")
+	tmp := f.mkdir("tmp")
+	fresh, _ := f.root("tmp/young/result")
 
 	cfg := config.DefaultConfig()
 	cfg.Nix.ReapStaleGCRoots = true
 	cfg.Nix.GCRootCandidatesFile = f.candidatesFile()
+	// Eight days on, the direnv roots pass the 7-day rule; the temp out-link
+	// is held back by a 30-day temp threshold.
+	cfg.Nix.TempGCRootPaths = []string{tmp}
+	cfg.Nix.TempGCRootStaleAfter = "30d"
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if n := f.plugin(time.Now()).publishStaleGCRootCandidates(cfg, logger); n != 2 {
+	if n := f.plugin(time.Now().Add(8*24*time.Hour)).publishStaleGCRootCandidates(cfg, logger); n != 2 {
 		t.Fatalf("expected the two stale roots listed, got %d", n)
 	}
 	lines := f.candidates()

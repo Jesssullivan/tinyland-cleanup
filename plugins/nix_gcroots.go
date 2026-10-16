@@ -31,6 +31,7 @@
 package plugins
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -78,7 +79,12 @@ type nixGCRootReaper struct {
 	autoDir  string
 	storeDir string
 	uid      int
-	now      time.Time
+	// agentPrefixes match the top-level temp entries that are agent-session
+	// trees; agentIdle is the idle age their roots need (review M1).
+	agentPrefixes []string
+	agentIdle     time.Duration
+	liveCwds      func() ([]string, error)
+	now           time.Time
 }
 
 func newNixGCRootReaper(now time.Time) nixGCRootReaper {
@@ -168,14 +174,27 @@ func (r nixGCRootReaper) collect(tempDirs []string, direnvStaleAfter, tempStaleA
 			continue
 		}
 
-		if nixPathUnderAny(link, tempDirs) {
+		if tempDir, ok := nixTempDirOf(link, tempDirs); ok {
 			age := r.now.Sub(info.ModTime())
 			root := nixStaleGCRoot{AutoLink: autoLink, Link: link, StorePath: storePath, Class: nixStaleGCRootClassTemporary}
-			if age >= tempStaleAfter {
+			threshold := tempStaleAfter
+			agentTree := r.agentTreeOf(link, tempDir)
+			if agentTree != "" && r.agentIdle > threshold {
+				threshold = r.agentIdle
+			}
+			switch {
+			case age < threshold:
+				root.Reason = fmt.Sprintf("temporary out-link changed %s ago, inside %s", age.Round(time.Minute), threshold)
+			case agentTree != "":
+				if live, why := r.treeIsLive(agentTree); live {
+					root.Reason = fmt.Sprintf("agent-session tree %s is live: %s", agentTree, why)
+				} else {
+					root.Stale = true
+					root.Reason = fmt.Sprintf("agent-session out-link idle for %s (threshold %s) and no live process in %s", age.Round(time.Minute), threshold, agentTree)
+				}
+			default:
 				root.Stale = true
-				root.Reason = fmt.Sprintf("temporary out-link unchanged for %s (threshold %s)", age.Round(time.Minute), tempStaleAfter)
-			} else {
-				root.Reason = fmt.Sprintf("temporary out-link changed %s ago, inside %s", age.Round(time.Minute), tempStaleAfter)
+				root.Reason = fmt.Sprintf("temporary out-link unchanged for %s (threshold %s)", age.Round(time.Minute), threshold)
 			}
 			roots = append(roots, root)
 		}
@@ -195,19 +214,24 @@ func (r nixGCRootReaper) collect(tempDirs []string, direnvStaleAfter, tempStaleA
 			}
 		}
 		checkout := filepath.Dir(direnvDir)
-		live := pathExists(filepath.Join(checkout, ".git"))
+		vcs, vcsErr := nixFindVCSRoot(checkout)
 		age := r.now.Sub(newest)
 		stale := false
 		reason := ""
+		// Review M2: a checkout is found by walking up for .git or .jj, a
+		// stat error other than "does not exist" keeps the roots, and the
+		// age rule applies whether or not a checkout is found.
 		switch {
-		case !live:
-			stale = true
-			reason = fmt.Sprintf("nix-direnv root for %s, which is not a git checkout", checkout)
-		case age >= direnvStaleAfter:
-			stale = true
-			reason = fmt.Sprintf("nix-direnv roots for %s last loaded %s ago (threshold %s)", checkout, age.Round(time.Minute), direnvStaleAfter)
-		default:
+		case vcsErr != nil:
+			reason = fmt.Sprintf("nix-direnv roots for %s kept: %v", checkout, vcsErr)
+		case age < direnvStaleAfter:
 			reason = fmt.Sprintf("nix-direnv roots for %s loaded %s ago, inside %s", checkout, age.Round(time.Minute), direnvStaleAfter)
+		case vcs == "":
+			stale = true
+			reason = fmt.Sprintf("nix-direnv roots for %s (no .git or .jj above it) last loaded %s ago (threshold %s)", checkout, age.Round(time.Minute), direnvStaleAfter)
+		default:
+			stale = true
+			reason = fmt.Sprintf("nix-direnv roots for %s (checkout %s) last loaded %s ago (threshold %s)", checkout, vcs, age.Round(time.Minute), direnvStaleAfter)
 		}
 		for _, l := range links {
 			roots = append(roots, nixStaleGCRoot{AutoLink: l.autoLink, Link: l.link, StorePath: l.storePath, Class: nixStaleGCRootClassDirenv, Stale: stale, Reason: reason})
@@ -336,6 +360,89 @@ func nixDirenvRootDir(link string) (string, bool) {
 	return "", false
 }
 
+// nixFindVCSRoot walks up from dir for a .git or .jj entry. It returns the
+// directory that has one, "" when none does, or an error when an entry
+// cannot be checked for any reason other than not existing.
+// nixLstat is os.Lstat; tests replace it to inject a stat error.
+var nixLstat = os.Lstat
+
+func nixFindVCSRoot(dir string) (string, error) {
+	dir = filepath.Clean(dir)
+	for {
+		for _, marker := range []string{".git", ".jj"} {
+			_, err := nixLstat(filepath.Join(dir, marker))
+			if err == nil {
+				return dir, nil
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return "", fmt.Errorf("cannot check %s: %w", filepath.Join(dir, marker), err)
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", nil
+		}
+		dir = parent
+	}
+}
+
+// nixTempDirOf returns the temp dir a link sits under.
+func nixTempDirOf(path string, dirs []string) (string, bool) {
+	candidates := []string{path}
+	if resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+		candidates = append(candidates, filepath.Join(resolvedParent, filepath.Base(path)))
+	}
+	for _, candidate := range candidates {
+		for _, dir := range dirs {
+			if strings.HasPrefix(candidate, dir+string(filepath.Separator)) {
+				return dir, true
+			}
+		}
+	}
+	return "", false
+}
+
+// agentTreeOf returns the agent-session tree a temp link sits in: the
+// top-level entry under its temp dir when that entry matches an agent
+// prefix (claude-*, codex*, .tmp*), else "".
+func (r nixGCRootReaper) agentTreeOf(link, tempDir string) string {
+	candidates := []string{link}
+	if resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(link)); err == nil {
+		candidates = append(candidates, filepath.Join(resolvedParent, filepath.Base(link)))
+	}
+	for _, candidate := range candidates {
+		rel, err := filepath.Rel(tempDir, candidate)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		top := strings.Split(rel, string(filepath.Separator))[0]
+		for _, pattern := range r.agentPrefixes {
+			if ok, _ := filepath.Match(pattern, top); ok {
+				return filepath.Join(tempDir, top)
+			}
+		}
+	}
+	return ""
+}
+
+// treeIsLive reports whether a live process of the daemon user works inside
+// tree. Inspection failure counts as live.
+func (r nixGCRootReaper) treeIsLive(tree string) (bool, string) {
+	if r.liveCwds == nil {
+		return true, "no process inspection"
+	}
+	cwds, err := r.liveCwds()
+	if err != nil {
+		return true, fmt.Sprintf("process inspection failed: %v", err)
+	}
+	for _, cwd := range cwds {
+		if cwd == tree || strings.HasPrefix(cwd, tree+string(filepath.Separator)) {
+			return true, "a live process has its working directory at " + cwd
+		}
+	}
+	return false, ""
+}
+
 func nixPathUnderAny(path string, dirs []string) bool {
 	candidates := []string{path}
 	if resolvedParent, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
@@ -389,7 +496,7 @@ func (p *NixPlugin) planStaleGCRoots(cfg *config.Config) ([]CleanupTarget, map[s
 	if !cfg.Nix.ReapStaleGCRoots {
 		return nil, metadata, nil
 	}
-	roots, err := p.gcRootReaper().collect(nixStaleGCRootTempDirs(cfg), nixDirenvGCRootStaleAfter(cfg.Nix), nixTempGCRootStaleAfter(cfg.Nix))
+	roots, err := p.gcRootReaper(cfg).collect(nixStaleGCRootTempDirs(cfg), nixDirenvGCRootStaleAfter(cfg.Nix), nixTempGCRootStaleAfter(cfg.Nix))
 	if err != nil {
 		return nil, metadata, []string{fmt.Sprintf("could not read indirect Nix GC roots: %v", err)}
 	}
@@ -414,7 +521,7 @@ func (p *NixPlugin) publishStaleGCRootCandidates(cfg *config.Config, logger *slo
 	if !cfg.Nix.ReapStaleGCRoots {
 		return 0
 	}
-	reaper := p.gcRootReaper()
+	reaper := p.gcRootReaper(cfg)
 	roots, err := reaper.collect(nixStaleGCRootTempDirs(cfg), nixDirenvGCRootStaleAfter(cfg.Nix), nixTempGCRootStaleAfter(cfg.Nix))
 	if err != nil {
 		logger.Warn("skipping stale Nix GC root candidates; indirect roots are unreadable", "dir", reaper.autoDir, "error", err)
@@ -440,12 +547,15 @@ func (p *NixPlugin) publishStaleGCRootCandidates(cfg *config.Config, logger *slo
 	return n
 }
 
-func (p *NixPlugin) gcRootReaper() nixGCRootReaper {
-	now := time.Now()
-	if p.now != nil {
-		now = p.now()
+func (p *NixPlugin) gcRootReaper(cfg *config.Config) nixGCRootReaper {
+	reaper := newNixGCRootReaper(p.clock())
+	reaper.agentPrefixes = cfg.Nix.AgentTreePrefixes
+	reaper.agentIdle = parseNixPolicyDuration(cfg.Nix.AgentTreeIdleAfter, 7*24*time.Hour)
+	okComms := cfg.DevArtifacts.TempUninspectableOKComms
+	reaper.liveCwds = func() ([]string, error) { return nixLiveCwds(okComms) }
+	if p.liveCwds != nil {
+		reaper.liveCwds = p.liveCwds
 	}
-	reaper := newNixGCRootReaper(now)
 	if p.autoGCRootsDir != "" {
 		reaper.autoDir = p.autoGCRootsDir
 	}

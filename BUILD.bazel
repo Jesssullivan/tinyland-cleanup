@@ -163,7 +163,29 @@ go_library(
         ":config",
         ":monitor",
         ":plugins",
+        ":rootjobs",
     ],
+)
+
+go_library(
+    name = "rootjobs",
+    srcs = [
+        "rootjobs/gcroot_unregister.go",
+        "rootjobs/profile_prune.go",
+    ],
+    importpath = "github.com/Jesssullivan/tinyland-cleanup/rootjobs",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "rootjobs_test",
+    srcs = [
+        "rootjobs/gcroot_unregister_test.go",
+        "rootjobs/lchtimes_test.go",
+        "rootjobs/profile_prune_test.go",
+    ],
+    embed = [":rootjobs"],
+    deps = ["@org_golang_x_sys//unix"],
 )
 
 go_test(
@@ -269,7 +291,9 @@ go_library(
         "plugins/exec_deadline.go",
         "plugins/fs.go",
         "plugins/nix.go",
+        "plugins/nix_cadence.go",
         "plugins/nix_gcroots.go",
+        "plugins/nix_hookpins.go",
         "plugins/plugin.go",
         "plugins/podman.go",
         "plugins/proc_stat.go",
@@ -289,6 +313,7 @@ go_library(
             "plugins/temp_mounts_darwin.go",
             "plugins/lima.go",
             "plugins/nix_process_argv_darwin.go",
+            "plugins/nix_sessions_other.go",
         ],
         "@platforms//os:linux": [
             "plugins/bazel_bases_linux.go",
@@ -297,6 +322,7 @@ go_library(
             "plugins/temp_mounts_linux.go",
             "plugins/github_runner.go",
             "plugins/nix_process_argv_linux.go",
+            "plugins/nix_sessions_linux.go",
             "plugins/yum.go",
         ],
         "//conditions:default": [
@@ -305,6 +331,7 @@ go_library(
             "plugins/temp_mounts_other.go",
             "plugins/github_runner.go",
             "plugins/nix_process_argv_other.go",
+            "plugins/nix_sessions_other.go",
             "plugins/yum.go",
         ],
     }),
@@ -330,7 +357,9 @@ go_test(
         "plugins/devartifacts_test.go",
         "plugins/exec_deadline_test.go",
         "plugins/fs_test.go",
+        "plugins/nix_cadence_test.go",
         "plugins/nix_gcroots_test.go",
+        "plugins/nix_hookpins_test.go",
         "plugins/nix_test.go",
         "plugins/plugin_pbt_test.go",
         "plugins/plugin_test.go",
@@ -372,6 +401,7 @@ test_suite(
         ":config_test",
         ":monitor_test",
         ":plugins_test",
+        ":rootjobs_test",
         ":tinyland-cleanup_sim_test",
         ":tinyland-cleanup_test",
     ],

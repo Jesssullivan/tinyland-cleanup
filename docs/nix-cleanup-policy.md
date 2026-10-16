@@ -66,7 +66,55 @@ nix:
   temp_gc_root_stale_after: 72h
   temp_gc_root_paths: []
   gc_root_candidates_file: ""
+  agent_tree_prefixes: ["claude-*", "codex*", ".tmp*"]
+  agent_tree_idle_after: 7d
+  periodic_gc_interval: ""
+  min_gc_interval: 30m
+  gc_state_file: ""
+  hook_pin_files: []
+  hook_pin_dir: ~/.local/state/tinyland-cleanup/gcroots/hook-pins
+  hook_pin_session_comms: ["claude", "codex"]
+  hook_pin_required: false
 ```
+
+Cadence. The nix plugin is level-independent: the daemon calls it on every
+poll. Each call rewrites the stale-root candidate list (empty when nothing
+is stale), then collects when due: under pressure (warning and above), or
+when `periodic_gc_interval` has passed since the last pass whatever the
+pressure (a plain GC). It never collects twice within `min_gc_interval`,
+even at critical, so a host above its critical line is not collected every
+poll. `gc_state_file` keeps the last pass across daemon restarts.
+
+Hook-path safety. Claude Code and Codex snapshot their hook commands at
+session start, and a hook named by `/nix/store` path is executed from that
+path for the whole session without being held open, so Nix's runtime roots
+do not protect it. Before every pass the plugin roots each store path that a
+`hook_pin_files` file references, under `hook_pin_dir` (which must have a
+`gcroots` path component, so the reaper never lists it). A path the files no
+longer reference is released only once no live process named in
+`hook_pin_session_comms` started before it stopped being referenced; when
+sessions cannot be inspected every pin is kept. With `hook_pin_required` a
+pass whose pins could not be established does not collect.
+
+Root jobs (no sudo rule). The package ships units under
+`share/tinyland-cleanup/systemd/`, bound to its own binary, configured by
+`/etc/tinyland-cleanup/root-jobs.env`:
+- `tinyland-cleanup-gcroot-unregister.{service,timer}` (hourly) runs
+  `tinyland-cleanup gcroot-unregister [--report-only] USER=FILE...`. For each
+  line of each list it requires: the list is a regular file owned by USER and
+  rewritten within `--max-list-age` (1h), opened without following links or
+  blocking; the auto entry is no newer than the list and resolves to the
+  listed out-link; the out-link is a symlink owned by USER, unchanged for
+  `--min-link-age` (72h), pointing straight into `/nix/store`, outside
+  `gcroots/` and `profiles/`. It removes only that auto entry, or with
+  `--report-only` only reports. Receipts go to stdout and to a bounded
+  receipts file (rotated to `.1`). The unit keeps `/tmp` visible and writes
+  only `/nix/var/nix/gcroots/auto` and its state directory.
+- `tinyland-cleanup-profile-prune.{service,timer}` (daily) runs
+  `tinyland-cleanup profile-prune --keep-previous N USER...`: the current
+  generation plus N (0 or 1) in each user's Home Manager and user profiles
+  (as that user) and root's profile; nothing for a user whose Home Manager
+  roots disagree.
 
 Runtime behavior:
 
@@ -127,6 +175,9 @@ Runtime behavior:
     than `direnv_gc_root_stale_after`, or whose directory has no `.git`.
     nix-direnv touches every root on each cached load, so the newest link is
     the last time the checkout's shell was loaded;
+  - (a checkout is found by walking up for `.git` or `.jj`; a stat error
+    other than "does not exist" keeps the roots; the age rule applies with or
+    without a checkout)
   - out-links under `temp_gc_root_paths` (default
     `dev_artifacts.temp_scan_paths`; a path that resolves through a symlink
     also covers its target) whose link is older than

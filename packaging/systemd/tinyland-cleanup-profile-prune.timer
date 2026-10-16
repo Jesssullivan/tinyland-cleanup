@@ -1,0 +1,10 @@
+[Unit]
+Description=tinyland-cleanup: daily Nix profile generation pruning
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target
