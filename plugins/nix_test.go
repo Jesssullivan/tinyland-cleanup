@@ -524,10 +524,10 @@ func TestParseNixProcStatusUIDReadsEffectiveUID(t *testing.T) {
 func TestNixProcessSnapshotsCountsMalformedRowsAndContinues(t *testing.T) {
 	output := strings.Join([]string{
 		"1 0 0 /sbin/init",
-		"garbage",                 // too few fields
-		"x 1 0 /usr/bin/ssh",      // bad pid, not a Nix candidate
-		"55 1 notauid /bin/zsh",   // bad uid, not a candidate
-		"56 1 notauid nix-daemon", // bad uid, candidate: UID unknown
+		"garbage",                     // too few fields
+		"x 1 0 /usr/bin/ssh",          // bad pid, not a Nix candidate
+		"55 1 notauid /usr/sbin/sshd", // bad uid, not a candidate
+		"56 1 notauid nix-daemon",     // bad uid, candidate: UID unknown
 		"101 1 501 /nix/store/abc/bin/nix",
 	}, "\n")
 	argv := map[int][]string{
