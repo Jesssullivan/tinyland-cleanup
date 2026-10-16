@@ -214,6 +214,13 @@ nix:
   # Avoid fighting active builds, Home Manager switches, and rebuilds
   skip_when_daemon_busy: true
   daemon_busy_backoff: 30m
+  # Active work defers a due pass, but never indefinitely: after
+  # max_busy_deferrals consecutive deferrals or max_busy_deferral_duration
+  # from the first one, the pass runs anyway behind the hook-path pins and
+  # the serialization lock (0 / "0" disables either bound). A failed process
+  # inspection still defers and is never released by these bounds.
+  max_busy_deferrals: 72
+  max_busy_deferral_duration: 6h
   max_gc_duration: 20m
   # When dry-run GC reports no reclaimable space, show up to this many visible
   # GC roots so operators can identify what is pinning the store. Set 0 to

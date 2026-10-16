@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Active Nix work is an exact shape, not a "nix" prefix (lab R-C744,
+  R-C797).** Only an exact client name with a store-writing argv shape
+  defers a GC pass. `nixd`, `nixd-attrset-eval`, `nil`, `nix repl`, queries
+  and nix-direnv hooks no longer do: on sting a 22-hour emacs nixd LSP
+  deferred every pass.
+- **Busy deferral is bounded.** `nix.max_busy_deferrals` (default 72) and
+  `nix.max_busy_deferral_duration` (default 6h) release the next due pass
+  after that many consecutive deferrals or that long, still behind the
+  hook-path pins and the serialization lock, logged at ERROR. The run is
+  the `deferred_passes` gauge in `nix.gc_state_file` and the plan metadata.
+  A failed process inspection still defers and is never released.
+
 ### Added
 
 - **Darwin Nix GC readiness (lab R-C815).** `nix.gc_lock_file` serializes a

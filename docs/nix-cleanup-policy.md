@@ -19,9 +19,24 @@ tinyland-cleanup --once --dry-run --level critical --output json
 The Nix plan includes:
 
 - `estimated_bytes_freed` from `nix-collect-garbage --dry-run`;
-- detected active Nix work such as `nix build`, `nix store gc`,
-  `nix-collect-garbage`, `nix-store --gc`, `home-manager switch`,
-  `darwin-rebuild`, `nixos-rebuild`, and worker-style `nix-daemon` activity;
+- detected active Nix work: an exact client name with a store-writing argv
+  shape, such as `nix build|develop|shell|run|copy|print-dev-env`, `nix store
+  <op>` (not ping/info/ls/cat), `nix profile <op>` (not list/history),
+  `nix flake update|lock|check|archive|prefetch`, `nix eval` without
+  `--read-only`, `nix-build`, `nix-shell`, `nix-store --realise|--add|--gc|...`,
+  `nix-env -i|-u|-e|...`, `nix-instantiate` (not `--eval`/`--parse`),
+  `nix-collect-garbage`, `home-manager switch|build`, `darwin-rebuild` and
+  `nixos-rebuild` switch/boot/build/..., and worker-style `nix-daemon`
+  activity. A name that only starts with "nix" is not work: `nixd`,
+  `nixd-attrset-eval`, `nil`, `nix repl`, queries and nix-direnv hooks never
+  defer a pass (Nix's collector already honours the temp roots of every
+  daemon client);
+- `deferred_passes` and `deferred_since`: the due passes active work has
+  deferred since the last attempted pass. After `max_busy_deferrals`
+  (default 72) consecutive deferrals, or `max_busy_deferral_duration`
+  (default 6h) from the first, the next pass runs anyway, still behind the
+  hook-path pins and the serialization lock, and the daemon logs it at
+  ERROR. A failed process inspection still defers and is never released;
 - protected `nix_active_work`, `nix_process_inspection`, or
   `nix_store_contention` targets when cleanup is deferred before mutation;
 - `retry_after` metadata derived from `daemon_busy_backoff` so operators can
@@ -59,6 +74,8 @@ nix:
   allow_store_optimize: false
   skip_when_daemon_busy: true
   daemon_busy_backoff: 30m
+  max_busy_deferrals: 72
+  max_busy_deferral_duration: 6h
   max_gc_duration: 20m
   root_attribution_limit: 20
   reap_stale_gc_roots: false
@@ -90,7 +107,8 @@ poll. One pass frees at most `max_freed_per_pass` (default 50G, passed as
 `nix-collect-garbage --max-freed`; "0" is unbounded), so the first pass on a
 host with a large backlog does not delete it all at once inside nix-daemon;
 the next pass continues after `min_gc_interval`. `gc_state_file` keeps the
-last pass across daemon restarts.
+last pass and the current run of busy deferrals (`deferred_passes`,
+`first_deferred_at`, `last_deferral`) across daemon restarts.
 
 Hook-path safety. Claude Code and Codex snapshot their hook commands at
 session start, and a hook named by `/nix/store` path is executed from that

@@ -26,6 +26,44 @@ const nixDefaultMinGCInterval = 30 * time.Minute
 
 type nixGCState struct {
 	LastGCAttempt time.Time `json:"last_gc_attempt"`
+	// DeferredPasses counts the due passes deferred since the last attempted
+	// pass (the deferred_passes gauge); FirstDeferredAt is when the run of
+	// deferrals began and LastDeferral why the latest one happened.
+	DeferredPasses  int       `json:"deferred_passes"`
+	FirstDeferredAt time.Time `json:"first_deferred_at,omitempty"`
+	LastDeferral    string    `json:"last_deferral,omitempty"`
+}
+
+// recordDeferral counts one deferred due pass.
+func (st *nixGCState) recordDeferral(now time.Time, reason string) {
+	if st.DeferredPasses == 0 || st.FirstDeferredAt.IsZero() {
+		st.FirstDeferredAt = now
+	}
+	st.DeferredPasses++
+	st.LastDeferral = reason
+}
+
+// recordAttempt marks a pass attempted and ends any run of deferrals.
+func (st *nixGCState) recordAttempt(now time.Time) {
+	st.LastGCAttempt = now
+	st.DeferredPasses = 0
+	st.FirstDeferredAt = time.Time{}
+	st.LastDeferral = ""
+}
+
+// nixBusyDeferralBound reports whether active work has deferred due passes
+// for long enough that the next one runs anyway, and which bound released
+// it. The pass this would defer counts, so max_busy_deferrals N lets N
+// passes defer and runs the next.
+func nixBusyDeferralBound(cfg config.NixConfig, st nixGCState, now time.Time) (bool, string) {
+	if cfg.MaxBusyDeferrals > 0 && st.DeferredPasses >= cfg.MaxBusyDeferrals {
+		return true, fmt.Sprintf("max_busy_deferrals=%d", cfg.MaxBusyDeferrals)
+	}
+	limit := parseNixPolicyDuration(cfg.MaxBusyDeferralDuration, 0)
+	if limit > 0 && st.DeferredPasses > 0 && !st.FirstDeferredAt.IsZero() && now.Sub(st.FirstDeferredAt) >= limit {
+		return true, fmt.Sprintf("max_busy_deferral_duration=%s", cfg.MaxBusyDeferralDuration)
+	}
+	return false, ""
 }
 
 // LevelIndependent makes the daemon call the nix plugin on every poll so the
