@@ -712,6 +712,66 @@ type NixConfig struct {
 	MaxGCDuration string `yaml:"max_gc_duration"`
 	// RootAttributionLimit limits visible GC root targets in low-reclaim dry-runs.
 	RootAttributionLimit int `yaml:"root_attribution_limit"`
+	// ReapStaleGCRoots lists stale indirect GC roots the daemon user owns
+	// before each Nix GC pass: nix-direnv roots (.direnv/flake-profile-*,
+	// .direnv/flake-inputs/*) of a checkout not loaded within
+	// direnv_gc_root_stale_after or no longer a git checkout, and store
+	// out-links under temp_gc_root_paths older than temp_gc_root_stale_after.
+	// Stale roots are listed in gc_root_candidates_file for a root job to
+	// unregister (auto entry only); the out-link itself is never touched.
+	// Roots under a "gcroots" or "profiles" path component are never touched.
+	ReapStaleGCRoots bool `yaml:"reap_stale_gc_roots"`
+	// DirenvGCRootStaleAfter is how long a checkout's nix-direnv roots may go
+	// unloaded before they are listed (default 7d).
+	DirenvGCRootStaleAfter string `yaml:"direnv_gc_root_stale_after"`
+	// TempGCRootStaleAfter is how old a temporary out-link may be before it is
+	// listed (default 72h).
+	TempGCRootStaleAfter string `yaml:"temp_gc_root_stale_after"`
+	// TempGCRootPaths are the directories under which an out-link counts as
+	// temporary. Empty means dev_artifacts.temp_scan_paths.
+	TempGCRootPaths []string `yaml:"temp_gc_root_paths"`
+	// GCRootCandidatesFile is the user-owned file the reaper writes its stale
+	// roots to, one "<auto entry name>\t<out-link>" line each, for a root job
+	// on the host to re-check and unregister. The reaper holds no privilege
+	// and never deletes the out-link. Empty means report only.
+	GCRootCandidatesFile string `yaml:"gc_root_candidates_file"`
+	// AgentTreePrefixes name the top-level entries of a temp root that are
+	// agent-session trees (TIN-5268). A stale out-link inside one is listed
+	// only after AgentTreeIdleAfter and while no live process of the daemon
+	// user has its working directory inside the tree.
+	AgentTreePrefixes []string `yaml:"agent_tree_prefixes"`
+	// AgentTreeIdleAfter is the idle age an agent-session out-link needs
+	// before it is listed (default 7d, the R-C316 idle rule).
+	AgentTreeIdleAfter string `yaml:"agent_tree_idle_after"`
+	// PeriodicGCInterval runs a plain Nix GC at least this often whatever the
+	// disk pressure (empty or 0 disables it). Pressure still triggers GC.
+	PeriodicGCInterval string `yaml:"periodic_gc_interval"`
+	// MinGCInterval is the least time between two Nix GC passes, applied
+	// even at critical (default 30m).
+	MinGCInterval string `yaml:"min_gc_interval"`
+	// MaxFreedPerPass bounds one Nix GC pass (nix-collect-garbage
+	// --max-freed): bytes, or a number with a binary K/M/G/T suffix. The next
+	// pass continues after MinGCInterval. Empty or "0" is unbounded; an
+	// invalid value uses the 50G default.
+	MaxFreedPerPass string `yaml:"max_freed_per_pass"`
+	// GCStateFile records the last Nix GC pass for the two intervals above,
+	// so they survive a daemon restart. Empty keeps it in memory only.
+	GCStateFile string `yaml:"gc_state_file"`
+	// HookPinFiles are config files (Claude settings.json, Codex config)
+	// whose /nix/store references a running session may still execute.
+	// Before each GC every referenced path is rooted under HookPinDir, and a
+	// path is released only once no session in HookPinSessionComms that
+	// started while it was referenced is still alive.
+	HookPinFiles []string `yaml:"hook_pin_files"`
+	// HookPinDir holds those roots. It must have a "gcroots" path component,
+	// so the stale-root reaper never lists them.
+	HookPinDir string `yaml:"hook_pin_dir"`
+	// HookPinSessionComms are the session process names (argv[0] or the
+	// script argv[1] basename) whose start times hold pins.
+	HookPinSessionComms []string `yaml:"hook_pin_session_comms"`
+	// HookPinRequired refuses every Nix GC pass whose hook pins could not be
+	// established.
+	HookPinRequired bool `yaml:"hook_pin_required"`
 }
 
 // ICloudConfig holds iCloud-specific cleanup settings (Darwin).
@@ -1034,6 +1094,15 @@ func DefaultConfig() *Config {
 			DaemonBusyBackoff:                             "30m",
 			MaxGCDuration:                                 "20m",
 			RootAttributionLimit:                          20,
+			ReapStaleGCRoots:                              false,
+			DirenvGCRootStaleAfter:                        "7d",
+			TempGCRootStaleAfter:                          "72h",
+			AgentTreePrefixes:                             []string{"claude-*", "codex*", ".tmp*"},
+			AgentTreeIdleAfter:                            "7d",
+			MinGCInterval:                                 "30m",
+			MaxFreedPerPass:                               "50G",
+			HookPinDir:                                    filepath.Join(home, ".local", "state", "tinyland-cleanup", "gcroots", "hook-pins"),
+			HookPinSessionComms:                           []string{"claude", "codex", "pi", "opencode"},
 		},
 		Lima: LimaConfig{
 			VMNames: []string{"colima", "unified"},

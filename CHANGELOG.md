@@ -4,6 +4,43 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Nix GC cadence.** The nix plugin is level-independent: it collects under
+  pressure and at least every `nix.periodic_gc_interval`, and never twice
+  within `nix.min_gc_interval` (default 30m), even at critical.
+  `nix.max_freed_per_pass` (default 50G, `--max-freed`) bounds each pass.
+- **Hook-path safety.** `nix.hook_pin_files` (Claude `settings.json`, Codex
+  config): every store path they reference is rooted under
+  `nix.hook_pin_dir` on every poll and released only once no session that
+  started while it was referenced is alive. `nix.hook_pin_required` refuses a
+  GC pass whose pins could not be established.
+- **Root jobs, no sudo.** `tinyland-cleanup gcroot-unregister` (with
+  `--report-only`, stale-list and recreated-root refusal, link age re-check,
+  non-blocking list open and bounded receipts) and `tinyland-cleanup
+  profile-prune --keep-previous 0|1`, with hardened systemd units shipped in
+  `share/tinyland-cleanup/systemd/`.
+- **Agent-session trees.** Stale out-links under `claude-*`, `codex*` and
+  `.tmp*` temp entries are listed only after `nix.agent_tree_idle_after`
+  (7d) and while no live process works in the tree.
+- **nix-direnv checkouts** are found by walking up for `.git` or `.jj`, a
+  stat error keeps the roots, and the 7-day rule applies to every `.direnv`.
+- **Stale indirect GC roots are listed for a root unregister job.** With
+  `nix.reap_stale_gc_roots: true` the nix plugin, before its dry-run
+  preflight, finds nix-direnv roots of a checkout not loaded within
+  `nix.direnv_gc_root_stale_after` (default 7d) or no longer a git checkout,
+  and store out-links under `nix.temp_gc_root_paths` (default
+  `dev_artifacts.temp_scan_paths`) older than `nix.temp_gc_root_stale_after`
+  (default 72h), and writes them to `nix.gc_root_candidates_file`, one
+  `<auto entry name>\t<out-link>` line each. A root job on the host
+  re-checks each line and removes only the `/nix/var/nix/gcroots/auto`
+  entry. The reaper holds no privilege and never deletes the out-link, so
+  agent-session trees and `.direnv` directories keep every file. Roots under
+  a `gcroots` or `profiles` path component and Bazel rules_nixpkgs out-links
+  are never listed. Off by default, and report-only without a file. The
+  nix-direnv flake-input roots pin flake sources, which a host that keeps
+  only outputs should not retain.
+
 ### Fixed
 
 - **The temp lane no longer stops for good on a non-dumpable helper.** On

@@ -1,0 +1,11 @@
+[Unit]
+Description=tinyland-cleanup: hourly unregister of stale Nix GC roots
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

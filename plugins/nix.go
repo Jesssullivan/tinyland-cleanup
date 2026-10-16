@@ -22,6 +22,19 @@ const nixDefaultCommandTimeout = 20 * time.Minute
 // NixPlugin handles Nix garbage collection operations.
 type NixPlugin struct {
 	freeDiskSpace func(string) (uint64, error)
+	// Test seams for the stale GC root reaper; empty or nil uses the real
+	// /nix/var/nix/gcroots/auto, /nix/store and wall clock.
+	autoGCRootsDir string
+	storeDir       string
+	now            func() time.Time
+	// Hook-pin and live-tree seams for tests; nil uses nix-store and /proc.
+	hookValid         func(ctx context.Context, storePath string) bool
+	hookAddRoot       func(ctx context.Context, link, storePath string) error
+	hookSessionStarts func(comms []string) ([]time.Time, error)
+	liveCwds          func() ([]string, error)
+	// lastGCAttempt is the in-memory record min_gc_interval and
+	// periodic_gc_interval read when nix.gc_state_file is empty.
+	lastGCAttempt time.Time
 }
 
 type nixGeneration struct {
@@ -89,6 +102,7 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 			"skip_when_daemon_busy":                                  strconv.FormatBool(cfg.Nix.SkipWhenDaemonBusy),
 			"daemon_busy_backoff":                                    cfg.Nix.DaemonBusyBackoff,
 			"max_gc_duration":                                        cfg.Nix.MaxGCDuration,
+			"max_freed_per_pass":                                     cfg.Nix.MaxFreedPerPass,
 			"host_measure_path":                                      nixHostMeasurePath(cfg.Nix),
 			"root_attribution_limit":                                 strconv.Itoa(nixRootAttributionLimit(cfg.Nix)),
 			"generation_policy_delete_older_than_level":              nixGenerationPolicyAge(level, cfg.Nix),
@@ -127,6 +141,13 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 			return plan
 		}
 	}
+
+	staleTargets, staleMetadata, staleWarnings := p.planStaleGCRoots(cfg)
+	plan.Targets = append(plan.Targets, staleTargets...)
+	for key, value := range staleMetadata {
+		plan.Metadata[key] = value
+	}
+	plan.Warnings = append(plan.Warnings, staleWarnings...)
 
 	if output, err := p.collectGarbageDryRun(ctx, cfg.Nix); err != nil {
 		if reason, ok := nixContentionReason(output); ok {
@@ -188,8 +209,60 @@ func nixDeferPlan(plan *CleanupPlan, skipReason string, summary string, cfg conf
 	}
 }
 
-// Cleanup performs Nix garbage collection at the specified level.
+// Cleanup runs every poll (the plugin is level-independent). It rewrites the
+// stale GC root candidate list and refreshes the hook-path pins, then
+// collects when nixGCDue says so: under pressure or on the periodic interval,
+// never within min_gc_interval of the last pass (R-C796), and only once hook
+// paths are pinned (H1).
 func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
+	result := CleanupResult{
+		Plugin: p.Name(),
+		Level:  level,
+	}
+
+	// Rewritten every poll while reaping is on, empty when nothing is stale,
+	// so the root job never replays an old list (review H2).
+	p.publishStaleGCRootCandidates(cfg, logger)
+
+	// Pins are refreshed every poll, not only when a GC is due: two
+	// hook-changing switches inside one GC gap would otherwise replace the
+	// middle hook path before any refresh saw it, and a session started
+	// under it would lose it to the next GC (re-review N1). A poll observes
+	// every path that stayed referenced for at least one poll interval.
+	pinErr := p.refreshHookPins(ctx, cfg.Nix, logger)
+	if pinErr != nil {
+		logger.Warn("hook-path pins could not be established", "error", pinErr)
+	}
+
+	statePath := nixGCStatePath(cfg.Nix)
+	st := loadNixGCState(statePath)
+	if p.lastGCAttempt.After(st.LastGCAttempt) {
+		st.LastGCAttempt = p.lastGCAttempt
+	}
+	gcLevel, why := nixGCDue(level, cfg.Nix, st, p.clock())
+	if gcLevel == LevelNone {
+		logger.Debug("Nix GC not due", "reason", why, "last_gc_attempt", st.LastGCAttempt)
+		return result
+	}
+	if pinErr != nil && cfg.Nix.HookPinRequired {
+		logger.Warn("skipping Nix GC: hook-path pins could not be established", "error", pinErr)
+		return result
+	}
+	gcResult, attempted := p.runGC(ctx, gcLevel, cfg, logger)
+	if attempted {
+		st.LastGCAttempt = p.clock()
+		p.lastGCAttempt = st.LastGCAttempt
+		if err := saveNixGCState(statePath, st); err != nil {
+			logger.Warn("could not record the Nix GC pass", "path", statePath, "error", err)
+		}
+	}
+	gcResult.Level = level
+	return gcResult
+}
+
+// runGC is one Nix GC pass at level. attempted is true once the dry-run
+// preflight ran, which is what min_gc_interval spaces out.
+func (p *NixPlugin) runGC(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) (CleanupResult, bool) {
 	result := CleanupResult{
 		Plugin: p.Name(),
 		Level:  level,
@@ -197,19 +270,19 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 
 	if !p.isNixAvailable() {
 		logger.Debug("nix not available, skipping")
-		return result
+		return result, false
 	}
 
 	if cfg.Nix.SkipWhenDaemonBusy {
 		busy, err := p.activeNixProcesses(ctx)
 		if err != nil {
 			logger.Warn("could not inspect active Nix processes", "error", err)
-			return result
+			return result, false
 		} else if len(busy) > 0 {
 			logger.Warn("skipping Nix cleanup because active Nix work was detected",
 				"processes", strings.Join(busy, ", "),
 				"backoff", cfg.Nix.DaemonBusyBackoff)
-			return result
+			return result, false
 		}
 	}
 
@@ -220,7 +293,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		generationsDeleted = generationResult.ItemsCleaned
 		if generationResult.Error != nil {
 			result.Error = generationResult.Error
-			return result
+			return result, false
 		}
 
 		homeManagerGenerationResult := p.deleteHomeManagerGenerationsByPolicy(ctx, level, cfg.Nix, logger)
@@ -228,7 +301,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		generationsDeleted += homeManagerGenerationResult.ItemsCleaned
 		if homeManagerGenerationResult.Error != nil {
 			result.Error = homeManagerGenerationResult.Error
-			return result
+			return result, false
 		}
 	}
 
@@ -236,16 +309,16 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 	if dryRunErr != nil {
 		if reason, ok := nixContentionReason(dryRunOutput); ok && cfg.Nix.SkipWhenDaemonBusy {
 			logger.Warn("skipping Nix garbage collection because dry-run preflight reported store contention", "reason", reason)
-			return result
+			return result, true
 		}
 		logger.Warn("skipping Nix garbage collection because dry-run preflight failed",
 			"error", dryRunErr,
 			"output", strings.TrimSpace(dryRunOutput))
 		result.Error = fmt.Errorf("nix garbage collection preflight failed: %w", dryRunErr)
-		return result
+		return result, true
 	} else if p.nixDryRunHasNoGCWork(dryRunOutput) && generationsDeleted == 0 && !(level == LevelCritical && cfg.Nix.AllowStoreOptimize) {
 		logger.Info("skipping Nix garbage collection because dry-run reported no reclaimable store paths")
-		return result
+		return result, true
 	}
 
 	switch level {
@@ -265,7 +338,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		result.Error = gcResult.Error
 	}
 
-	return result
+	return result, true
 }
 
 func (p *NixPlugin) isNixAvailable() bool {
@@ -333,6 +406,11 @@ func (p *NixPlugin) planGCRootAttribution(ctx context.Context, cfg config.NixCon
 func (p *NixPlugin) collectGarbage(ctx context.Context, level CleanupLevel, args []string, cfg config.NixConfig, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: p.Name(), Level: level}
 
+	// Re-review N3: bound every pass. The first pass after a switch can
+	// otherwise delete a whole host's backlog at once inside nix-daemon,
+	// outside this unit's Nice and idle IO class; the next pass continues
+	// after min_gc_interval.
+	args = append(append([]string{}, args...), nixMaxFreedArgs(cfg, logger)...)
 	logger.Debug("running nix-collect-garbage", "args", strings.Join(args, " "))
 	measurePath := nixHostMeasurePath(cfg)
 	before, beforeOK := p.measureFreeDiskSpace(measurePath, logger)
@@ -795,6 +873,7 @@ func nixDeferralTarget(targetType string, name string, action string, active boo
 func nixPlanSteps(level CleanupLevel, cfg config.NixConfig) []string {
 	steps := []string{
 		"Inspect active Nix, Home Manager, and rebuild processes before locking the store",
+		"List stale nix-direnv and temporary out-link GC roots in gc_root_candidates_file for the host's root unregister job (out-links untouched) when reap_stale_gc_roots=true",
 		"Run nix-collect-garbage --dry-run to estimate reclaimable store paths",
 		"List user and system profile generations and apply minimum-retention policy",
 		"Preserve current profile generations and visible system generations by default",

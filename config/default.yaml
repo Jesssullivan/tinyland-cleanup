@@ -219,6 +219,46 @@ nix:
   # GC roots so operators can identify what is pinning the store. Set 0 to
   # disable root attribution.
   root_attribution_limit: 20
+  # Stale indirect GC roots, listed before each Nix GC pass when enabled:
+  # nix-direnv roots of a checkout not loaded within
+  # direnv_gc_root_stale_after (nix-direnv touches them on every cached load)
+  # or no longer a git checkout, and store out-links under temp_gc_root_paths
+  # (default: dev_artifacts.temp_scan_paths) older than
+  # temp_gc_root_stale_after. The unprivileged reaper writes them to
+  # gc_root_candidates_file, one "<auto entry name><TAB><out-link>" line each;
+  # a root job on the host re-checks each line and removes only the
+  # /nix/var/nix/gcroots/auto entry. The out-link file is never deleted, so
+  # agent-session and .direnv trees keep every file. Without a file the
+  # reaper only reports. Roots under a "gcroots" or "profiles" path component
+  # are never listed.
+  reap_stale_gc_roots: false
+  direnv_gc_root_stale_after: 7d
+  temp_gc_root_stale_after: 72h
+  temp_gc_root_paths: []
+  gc_root_candidates_file: ""
+  # Agent-session trees under the temp roots (TIN-5268): an out-link there is
+  # listed only after agent_tree_idle_after and while no live process of the
+  # daemon user works inside the tree.
+  agent_tree_prefixes: ["claude-*", "codex*", ".tmp*"]
+  agent_tree_idle_after: 7d
+  # Cadence. The nix plugin runs every poll: it collects under pressure and at
+  # least every periodic_gc_interval (empty: never without pressure), never
+  # twice within min_gc_interval, even at critical, and never more than
+  # max_freed_per_pass in one pass (bytes or K/M/G/T; "0": unbounded).
+  # gc_state_file keeps the last pass across restarts (empty: in memory).
+  periodic_gc_interval: ""
+  min_gc_interval: 30m
+  max_freed_per_pass: 50G
+  gc_state_file: ""
+  # Hook-path safety. Every /nix/store path these files reference (Claude
+  # settings.json, Codex config) is rooted under hook_pin_dir on every poll
+  # and released only once no session in hook_pin_session_comms that started
+  # while it was referenced is alive. hook_pin_required refuses a GC pass
+  # whose pins could not be established.
+  hook_pin_files: []
+  hook_pin_dir: ~/.local/state/tinyland-cleanup/gcroots/hook-pins
+  hook_pin_session_comms: ["claude", "codex", "pi", "opencode"]
+  hook_pin_required: false
 
 # Structural Bazel output-base reaper (R-C644, R-C645). Level independent:
 # it runs whatever the host cleanup level and applies its own per-mount

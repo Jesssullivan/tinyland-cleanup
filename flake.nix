@@ -27,6 +27,19 @@
             "-X main.date=${buildDate}"
           ];
 
+          # Root-job units (gcroot-unregister, profile-prune), with ExecStart
+          # bound to this package's binary, for hosts to install as shipped.
+          postInstall = ''
+            mkdir -p "$out/share/tinyland-cleanup/systemd"
+            for unit in packaging/systemd/tinyland-cleanup-gcroot-unregister.service \
+                        packaging/systemd/tinyland-cleanup-gcroot-unregister.timer \
+                        packaging/systemd/tinyland-cleanup-profile-prune.service \
+                        packaging/systemd/tinyland-cleanup-profile-prune.timer; do
+              substitute "$unit" "$out/share/tinyland-cleanup/systemd/$(basename "$unit")" \
+                --replace-quiet "@bindir@" "$out/bin"
+            done
+          '';
+
           meta = with pkgs.lib; {
             description = "Cross-platform disk cleanup daemon with graduated thresholds";
             homepage = "https://github.com/Jesssullivan/tinyland-cleanup";

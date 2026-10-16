@@ -61,7 +61,71 @@ nix:
   daemon_busy_backoff: 30m
   max_gc_duration: 20m
   root_attribution_limit: 20
+  reap_stale_gc_roots: false
+  direnv_gc_root_stale_after: 7d
+  temp_gc_root_stale_after: 72h
+  temp_gc_root_paths: []
+  gc_root_candidates_file: ""
+  agent_tree_prefixes: ["claude-*", "codex*", ".tmp*"]
+  agent_tree_idle_after: 7d
+  periodic_gc_interval: ""
+  min_gc_interval: 30m
+  max_freed_per_pass: 50G
+  gc_state_file: ""
+  hook_pin_files: []
+  hook_pin_dir: ~/.local/state/tinyland-cleanup/gcroots/hook-pins
+  hook_pin_session_comms: ["claude", "codex", "pi", "opencode"]
+  hook_pin_required: false
 ```
+
+Cadence. The nix plugin is level-independent: the daemon calls it on every
+poll. Each call rewrites the stale-root candidate list (empty when nothing
+is stale), then collects when due: under pressure (warning and above), or
+when `periodic_gc_interval` has passed since the last pass whatever the
+pressure (a plain GC). It never collects twice within `min_gc_interval`,
+even at critical, so a host above its critical line is not collected every
+poll. One pass frees at most `max_freed_per_pass` (default 50G, passed as
+`nix-collect-garbage --max-freed`; "0" is unbounded), so the first pass on a
+host with a large backlog does not delete it all at once inside nix-daemon;
+the next pass continues after `min_gc_interval`. `gc_state_file` keeps the
+last pass across daemon restarts.
+
+Hook-path safety. Claude Code and Codex snapshot their hook commands at
+session start, and a hook named by `/nix/store` path is executed from that
+path for the whole session without being held open, so Nix's runtime roots
+do not protect it. On every poll, whether or not a pass is due, the plugin
+roots each store path that a `hook_pin_files` file references, under `hook_pin_dir` (which must have a
+`gcroots` path component, so the reaper never lists it). A path the files no
+longer reference is released only once no live process named in
+`hook_pin_session_comms` started before it stopped being referenced; when
+sessions cannot be inspected every pin is kept. A name matches argv[0], the
+basename of a script's argv[1], or the comm, with a leading `.` and a
+`-wrapped`/`-unwrapped` suffix (Nix wrappers) ignored. Refreshing every poll
+means any path that stayed referenced for one poll interval is pinned, even
+when two switches replace hooks inside one GC gap. A session that predates
+the first refresh is covered only if its hook paths are still the current
+ones then. With `hook_pin_required` a
+pass whose pins could not be established does not collect.
+
+Root jobs (no sudo rule). The package ships units under
+`share/tinyland-cleanup/systemd/`, bound to its own binary, configured by
+`/etc/tinyland-cleanup/root-jobs.env`:
+- `tinyland-cleanup-gcroot-unregister.{service,timer}` (hourly) runs
+  `tinyland-cleanup gcroot-unregister [--report-only] USER=FILE...`. For each
+  line of each list it requires: the list is a regular file owned by USER and
+  rewritten within `--max-list-age` (1h), opened without following links or
+  blocking; the auto entry is no newer than the list and resolves to the
+  listed out-link; the out-link is a symlink owned by USER, unchanged for
+  `--min-link-age` (72h), pointing straight into `/nix/store`, outside
+  `gcroots/` and `profiles/`. It removes only that auto entry, or with
+  `--report-only` only reports. Receipts go to stdout and to a bounded
+  receipts file (rotated to `.1`). The unit keeps `/tmp` visible and writes
+  only `/nix/var/nix/gcroots/auto` and its state directory.
+- `tinyland-cleanup-profile-prune.{service,timer}` (daily) runs
+  `tinyland-cleanup profile-prune --keep-previous N USER...`: the current
+  generation plus N (0 or 1) in each user's Home Manager and user profiles
+  (as that user) and root's profile; nothing for a user whose Home Manager
+  roots disagree.
 
 Runtime behavior:
 
@@ -113,6 +177,42 @@ Runtime behavior:
   Nix cache roots are listed before generic unknown roots when attribution
   output is truncated;
 - `nix-store --optimize` runs only when `allow_store_optimize: true`.
+- with `reap_stale_gc_roots: true`, each real cleanup lists stale indirect GC
+  roots before the dry-run preflight. It reads `/nix/var/nix/gcroots/auto`
+  and considers only out-links that are symlinks the daemon user owns and that
+  select a store path directly. Two classes are stale:
+  - nix-direnv roots (`.direnv/flake-profile-*`, `.direnv/nix-profile-*`,
+    `.direnv/flake-inputs/*`) of a checkout whose newest root link is older
+    than `direnv_gc_root_stale_after`, or whose directory has no `.git`.
+    nix-direnv touches every root on each cached load, so the newest link is
+    the last time the checkout's shell was loaded;
+  - (a checkout is found by walking up for `.git` or `.jj`; a stat error
+    other than "does not exist" keeps the roots; the age rule applies with or
+    without a checkout)
+  - out-links under `temp_gc_root_paths` (default
+    `dev_artifacts.temp_scan_paths`; a path that resolves through a symlink
+    also covers its target) whose link is older than
+    `temp_gc_root_stale_after`.
+  The reaper never deletes, moves or rewrites the out-link, and it holds no
+  privilege. It writes the stale roots to `gc_root_candidates_file`, a file
+  the daemon user owns (mode 0600, replaced atomically each cycle), one
+  `<auto entry name>\t<out-link>` line each. A root job on the host reads
+  that list, re-checks every line (the out-link is owned by that user,
+  points straight into the store, is outside `gcroots/` and `profiles/`, and
+  the auto entry resolves to it) and removes only the matching
+  `/nix/var/nix/gcroots/auto/<name>` entries. Listing is not cleanup work and
+  does not force a GC; the next collection after the root job takes what the
+  roots no longer pin. Without a candidates file the reaper only reports.
+  Agent-session trees (TIN-5268) and `.direnv` directories therefore keep
+  every file: an unregistered link dangles once the collector takes its store
+  path, and nix-direnv treats a dangling profile as an invalid cache and
+  re-evaluates.
+  Roots under a `gcroots` or `profiles` path component (deliberate
+  `gcroots/<ticket>/` pins, profile generations) and rules_nixpkgs
+  `bazel-support/nix-out-link` links inside Bazel output bases are never
+  touched. A store path a live process still maps, execs or holds open stays
+  protected by Nix's own runtime roots. Dry-run plans list the classified
+  roots as `propose_gc_root_unregister` or `keep_gc_root` targets.
 
 Darwin TCC-protected app bundle wedge:
 

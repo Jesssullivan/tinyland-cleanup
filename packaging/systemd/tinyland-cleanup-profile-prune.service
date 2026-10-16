@@ -1,0 +1,33 @@
+# Root job: keep the current generation plus --keep-previous in each declared
+# user's Home Manager and user profiles and in root's profile. No store GC:
+# the daemon's nix plugin collects. Arguments come from
+# /etc/tinyland-cleanup/root-jobs.env:
+#   TINYLAND_CLEANUP_PRUNE_ARGS="--keep-previous 1 jess"
+[Unit]
+Description=tinyland-cleanup: prune Nix profile generations
+Documentation=https://github.com/Jesssullivan/tinyland-cleanup
+ConditionPathExists=/etc/tinyland-cleanup/root-jobs.env
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tinyland-cleanup/root-jobs.env
+ExecStart=@bindir@/tinyland-cleanup profile-prune $TINYLAND_CLEANUP_PRUNE_ARGS
+TimeoutStartSec=600
+Nice=10
+IOSchedulingClass=idle
+# Confinement compatible with runuser (PAM session, setuid to the user) and
+# nix-env (the daemon socket; profile links under the user's home and
+# /nix/var/nix/profiles), so no filesystem protection: it needs no network,
+# kernel tunables, modules, logs, clock or cgroup writes (re-review N5).
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
