@@ -253,3 +253,153 @@ func TestNixCleanupBoundsTheFirstPassAtCritical(t *testing.T) {
 		t.Fatalf("the critical pass is bounded: %q", got)
 	}
 }
+
+func busyCleanupFixture(t *testing.T) (*NixPlugin, *config.Config, string, *time.Time) {
+	t.Helper()
+	calls := fakeNixGC(t)
+	cfg := config.DefaultConfig()
+	cfg.Nix.SkipWhenDaemonBusy = true
+	cfg.Nix.HostMeasurePath = t.TempDir()
+	cfg.Nix.PeriodicGCInterval = "4h"
+	cfg.Nix.MinGCInterval = "30m"
+	cfg.Nix.GCStateFile = filepath.Join(t.TempDir(), "nix-gc-state.json")
+	now := time.Date(2026, 10, 16, 20, 0, 0, 0, time.UTC)
+	p := NewNixPlugin()
+	p.now = func() time.Time { return now }
+	return p, cfg, calls, &now
+}
+
+// No single process can hold GC off indefinitely: after max_busy_deferrals
+// consecutive deferrals the next due pass runs, and the gauge resets.
+func TestNixBusyDeferralIsBoundedByCount(t *testing.T) {
+	p, cfg, calls, now := busyCleanupFixture(t)
+	cfg.Nix.MaxBusyDeferrals = 3
+	cfg.Nix.MaxBusyDeferralDuration = ""
+	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
+		return []string{"nix build"}, nixProcessInspection{}, nil
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for i := 1; i <= 3; i++ {
+		p.Cleanup(context.Background(), LevelNone, cfg, logger)
+		if got := gcCalls(t, calls); len(got) != 0 {
+			t.Fatalf("deferral %d must not collect: %q", i, got)
+		}
+		st := loadNixGCState(cfg.Nix.GCStateFile)
+		if st.DeferredPasses != i || !strings.Contains(st.LastDeferral, "nix build") {
+			t.Fatalf("after deferral %d state = %+v", i, st)
+		}
+		*now = now.Add(5 * time.Minute)
+	}
+	plan := p.PlanCleanup(context.Background(), LevelNone, cfg, logger)
+	if plan.Metadata["deferred_passes"] != "3" || plan.Metadata["busy_deferral_released_by"] != "max_busy_deferrals=3" || !plan.WouldRun {
+		t.Fatalf("plan must report the gauge and the release: %+v", plan.Metadata)
+	}
+	before := len(gcCalls(t, calls)) // the plan runs its own dry-run
+	p.Cleanup(context.Background(), LevelNone, cfg, logger)
+	if got := gcCalls(t, calls); len(got) != before+2 || !strings.HasPrefix(got[len(got)-1], "call:--max-freed") {
+		t.Fatalf("the pass after the bound runs a dry-run and a GC: %q", got)
+	}
+	st := loadNixGCState(cfg.Nix.GCStateFile)
+	if st.DeferredPasses != 0 || !st.FirstDeferredAt.IsZero() || !st.LastGCAttempt.Equal(*now) {
+		t.Fatalf("an attempted pass resets the deferral run: %+v", st)
+	}
+}
+
+func TestNixBusyDeferralIsBoundedByDuration(t *testing.T) {
+	p, cfg, calls, now := busyCleanupFixture(t)
+	cfg.Nix.MaxBusyDeferrals = 0
+	cfg.Nix.MaxBusyDeferralDuration = "6h"
+	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
+		return []string{"nix-daemon worker"}, nixProcessInspection{}, nil
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	start := *now
+	p.Cleanup(context.Background(), LevelWarning, cfg, logger)
+	*now = start.Add(5*time.Hour + 59*time.Minute)
+	p.Cleanup(context.Background(), LevelWarning, cfg, logger)
+	if got := gcCalls(t, calls); len(got) != 0 {
+		t.Fatalf("inside six hours the pass defers: %q", got)
+	}
+	if st := loadNixGCState(cfg.Nix.GCStateFile); st.DeferredPasses != 2 || !st.FirstDeferredAt.Equal(start) {
+		t.Fatalf("state = %+v", st)
+	}
+	*now = start.Add(6 * time.Hour)
+	p.Cleanup(context.Background(), LevelWarning, cfg, logger)
+	if got := gcCalls(t, calls); len(got) != 2 {
+		t.Fatalf("six hours after the first deferral the pass runs: %q", got)
+	}
+}
+
+// A failed inspection is not active work and is never released by the
+// deferral bound: it still fails closed, and it is counted.
+func TestNixInspectionFailureIsNeverReleasedByTheBound(t *testing.T) {
+	p, cfg, calls, now := busyCleanupFixture(t)
+	cfg.Nix.MaxBusyDeferrals = 1
+	cfg.Nix.MaxBusyDeferralDuration = "1m"
+	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
+		return nil, nixProcessInspection{}, errors.New("ps: not found")
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for i := 0; i < 4; i++ {
+		p.Cleanup(context.Background(), LevelCritical, cfg, logger)
+		*now = now.Add(10 * time.Minute)
+	}
+	if got := gcCalls(t, calls); len(got) != 0 {
+		t.Fatalf("an inspection failure must never collect: %q", got)
+	}
+	if st := loadNixGCState(cfg.Nix.GCStateFile); st.DeferredPasses != 4 || st.LastDeferral != "process_inspection_failed" {
+		t.Fatalf("state = %+v", st)
+	}
+}
+
+// A pass the bound releases is still held by required hook-path pins.
+func TestNixReleasedPassStillNeedsHookPins(t *testing.T) {
+	p, cfg, calls, _ := busyCleanupFixture(t)
+	home := t.TempDir()
+	settings := filepath.Join(home, "settings.json")
+	if err := os.WriteFile(settings, []byte(`{"command":"/nix/store/0123456789abcdfghijklmnpqrsvwxyz-hook/bin/hook"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Nix.HookPinFiles = []string{settings}
+	cfg.Nix.HookPinDir = filepath.Join(home, "gcroots", "hook-pins")
+	cfg.Nix.HookPinRequired = true
+	cfg.Nix.MaxBusyDeferrals = 1
+	if err := saveNixGCState(cfg.Nix.GCStateFile, nixGCState{DeferredPasses: 5, FirstDeferredAt: time.Unix(0, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	p.hookValid = func(context.Context, string) bool { return true }
+	p.hookAddRoot = func(context.Context, string, string) error { return errors.New("daemon refused") }
+	p.hookSessionStarts = func([]string) ([]time.Time, error) { return nil, nil }
+	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
+		return []string{"nix build"}, nixProcessInspection{}, nil
+	}
+	p.Cleanup(context.Background(), LevelCritical, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if got := gcCalls(t, calls); len(got) != 0 {
+		t.Fatalf("a released pass may not run without its hook pins: %q", got)
+	}
+}
+
+// Without a state file the deferral run is kept in memory.
+func TestNixBusyDeferralCountsInMemoryWithoutAStateFile(t *testing.T) {
+	p, cfg, calls, now := busyCleanupFixture(t)
+	cfg.Nix.GCStateFile = ""
+	cfg.Nix.MaxBusyDeferrals = 2
+	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
+		return []string{"nix build"}, nixProcessInspection{}, nil
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for i := 0; i < 3; i++ {
+		p.Cleanup(context.Background(), LevelNone, cfg, logger)
+		*now = now.Add(5 * time.Minute)
+	}
+	if got := gcCalls(t, calls); len(got) != 2 {
+		t.Fatalf("the third due pass runs: %q", got)
+	}
+}
+
+func TestNixBusyDeferralDefaults(t *testing.T) {
+	nix := config.DefaultConfig().Nix
+	if nix.MaxBusyDeferrals != 72 || nix.MaxBusyDeferralDuration != "6h" {
+		t.Fatalf("defaults = %d %q, want 72 and 6h", nix.MaxBusyDeferrals, nix.MaxBusyDeferralDuration)
+	}
+}

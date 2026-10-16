@@ -708,6 +708,14 @@ type NixConfig struct {
 	SkipWhenDaemonBusy bool `yaml:"skip_when_daemon_busy"`
 	// DaemonBusyBackoff is the operator-facing backoff after busy detection.
 	DaemonBusyBackoff string `yaml:"daemon_busy_backoff"`
+	// MaxBusyDeferrals bounds how many consecutive due passes active Nix
+	// work may defer before a pass runs anyway, still behind the hook-path
+	// pins and the serialization lock (0 disables this bound).
+	MaxBusyDeferrals int `yaml:"max_busy_deferrals"`
+	// MaxBusyDeferralDuration bounds how long active Nix work may defer due
+	// passes, from the first deferral, before a pass runs anyway (empty or
+	// "0" disables this bound). Either bound releases the pass.
+	MaxBusyDeferralDuration string `yaml:"max_busy_deferral_duration"`
 	// MaxGCDuration bounds nix-collect-garbage and related Nix commands.
 	MaxGCDuration string `yaml:"max_gc_duration"`
 	// RootAttributionLimit limits visible GC root targets in low-reclaim dry-runs.
@@ -1104,6 +1112,8 @@ func DefaultConfig() *Config {
 			AllowStoreOptimize:                            false,
 			SkipWhenDaemonBusy:                            true,
 			DaemonBusyBackoff:                             "30m",
+			MaxBusyDeferrals:                              72,
+			MaxBusyDeferralDuration:                       "6h",
 			MaxGCDuration:                                 "20m",
 			RootAttributionLimit:                          20,
 			ReapStaleGCRoots:                              false,

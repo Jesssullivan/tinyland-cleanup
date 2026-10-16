@@ -33,8 +33,12 @@ type NixPlugin struct {
 	hookAddRoot       func(ctx context.Context, link, storePath string) error
 	hookSessionStarts func(comms []string) ([]time.Time, error)
 	liveCwds          func() ([]string, error)
-	// lastGCAttempt is the in-memory record min_gc_interval and
-	// periodic_gc_interval read when nix.gc_state_file is empty.
+	// activeWork replaces process inspection in tests; nil uses ps.
+	activeWork func(ctx context.Context) ([]string, nixProcessInspection, error)
+	// memState is the in-memory record of the last pass and the current run
+	// of deferrals, read when nix.gc_state_file is empty.
+	memState nixGCState
+	// lastGCAttempt mirrors memState.LastGCAttempt for older tests.
 	lastGCAttempt time.Time
 }
 
@@ -118,7 +122,21 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		return plan
 	}
 
-	busy, inspection, err := p.activeNixProcesses(ctx)
+	inspect := p.activeWork
+	if inspect == nil {
+		inspect = p.activeNixProcesses
+	}
+	gcState := loadNixGCState(nixGCStatePath(cfg.Nix))
+	if nixGCStatePath(cfg.Nix) == "" {
+		gcState = p.memState
+	}
+	plan.Metadata["deferred_passes"] = strconv.Itoa(gcState.DeferredPasses)
+	if !gcState.FirstDeferredAt.IsZero() {
+		plan.Metadata["deferred_since"] = gcState.FirstDeferredAt.UTC().Format(time.RFC3339)
+	}
+	plan.Metadata["max_busy_deferrals"] = strconv.Itoa(cfg.Nix.MaxBusyDeferrals)
+	plan.Metadata["max_busy_deferral_duration"] = cfg.Nix.MaxBusyDeferralDuration
+	busy, inspection, err := inspect(ctx)
 	if inspection.MalformedRows > 0 {
 		plan.Metadata["process_inspection_malformed_rows"] = strconv.Itoa(inspection.MalformedRows)
 		plan.Warnings = append(plan.Warnings, inspection.warning())
@@ -137,7 +155,10 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not inspect active Nix processes: %v", err))
 	} else if len(busy) > 0 {
 		plan.Metadata["active_nix_processes"] = strings.Join(busy, ", ")
-		if cfg.Nix.SkipWhenDaemonBusy {
+		if released, bound := nixBusyDeferralBound(cfg.Nix, gcState, p.clock()); released && cfg.Nix.SkipWhenDaemonBusy {
+			plan.Metadata["busy_deferral_released_by"] = bound
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("active Nix work (%s) has deferred %d due passes; %s releases the next pass, which runs behind the hook-path pins and the serialization lock", strings.Join(busy, ", "), gcState.DeferredPasses, bound))
+		} else if cfg.Nix.SkipWhenDaemonBusy {
 			nixDeferPlan(&plan,
 				"nix_daemon_busy",
 				"Nix cleanup is deferred because active Nix work was detected",
@@ -242,8 +263,17 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 
 	statePath := nixGCStatePath(cfg.Nix)
 	st := loadNixGCState(statePath)
+	if statePath == "" {
+		st = p.memState
+	}
 	if p.lastGCAttempt.After(st.LastGCAttempt) {
 		st.LastGCAttempt = p.lastGCAttempt
+	}
+	saveState := func() {
+		p.memState = st
+		if err := saveNixGCState(statePath, st); err != nil {
+			logger.Warn("could not record the Nix GC state", "path", statePath, "error", err)
+		}
 	}
 	gcLevel, why := nixGCDue(level, cfg.Nix, st, p.clock())
 	if gcLevel == LevelNone {
@@ -270,16 +300,63 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		return result
 	}
 	defer release()
+	if cfg.Nix.SkipWhenDaemonBusy && p.isNixAvailable() {
+		if proceed := p.busyGate(ctx, cfg.Nix, &st, logger); !proceed {
+			saveState()
+			return result
+		}
+	}
 	gcResult, attempted := p.runGC(ctx, gcLevel, cfg, logger)
 	if attempted {
-		st.LastGCAttempt = p.clock()
+		st.recordAttempt(p.clock())
 		p.lastGCAttempt = st.LastGCAttempt
-		if err := saveNixGCState(statePath, st); err != nil {
-			logger.Warn("could not record the Nix GC pass", "path", statePath, "error", err)
-		}
+		saveState()
 	}
 	gcResult.Level = level
 	return gcResult
+}
+
+// busyGate defers a due pass while active Nix work is detected, but never
+// past nixBusyDeferralBound: no single process can hold the store's GC off
+// indefinitely. A pass the bound releases still runs behind the hook-path
+// pins and the serialization lock. A failed process inspection always
+// defers. It returns whether the pass may run, updating st's deferral run.
+func (p *NixPlugin) busyGate(ctx context.Context, cfg config.NixConfig, st *nixGCState, logger *slog.Logger) bool {
+	inspect := p.activeWork
+	if inspect == nil {
+		inspect = p.activeNixProcesses
+	}
+	now := p.clock()
+	busy, inspection, err := inspect(ctx)
+	if inspection.MalformedRows > 0 {
+		logger.Warn("ignored malformed process rows during Nix process inspection",
+			"count", inspection.MalformedRows,
+			"samples", strings.Join(inspection.MalformedSamples, " | "))
+	}
+	if err != nil {
+		st.recordDeferral(now, "process_inspection_failed")
+		logger.Warn("could not inspect active Nix processes", "error", err,
+			"deferred_passes", st.DeferredPasses, "deferred_since", st.FirstDeferredAt)
+		return false
+	}
+	if len(busy) == 0 {
+		return true
+	}
+	if released, bound := nixBusyDeferralBound(cfg, *st, now); released {
+		logger.Error("running Nix GC despite active Nix work: the deferral bound is reached",
+			"bound", bound,
+			"deferred_passes", st.DeferredPasses,
+			"deferred_since", st.FirstDeferredAt,
+			"processes", strings.Join(busy, ", "))
+		return true
+	}
+	st.recordDeferral(now, "active_nix_work: "+strings.Join(busy, ", "))
+	logger.Warn("skipping Nix cleanup because active Nix work was detected",
+		"processes", strings.Join(busy, ", "),
+		"deferred_passes", st.DeferredPasses,
+		"deferred_since", st.FirstDeferredAt,
+		"backoff", cfg.DaemonBusyBackoff)
+	return false
 }
 
 // runGC is one Nix GC pass at level. attempted is true once the dry-run
@@ -295,23 +372,7 @@ func (p *NixPlugin) runGC(ctx context.Context, level CleanupLevel, cfg *config.C
 		return result, false
 	}
 
-	if cfg.Nix.SkipWhenDaemonBusy {
-		busy, inspection, err := p.activeNixProcesses(ctx)
-		if inspection.MalformedRows > 0 {
-			logger.Warn("ignored malformed process rows during Nix process inspection",
-				"count", inspection.MalformedRows,
-				"samples", strings.Join(inspection.MalformedSamples, " | "))
-		}
-		if err != nil {
-			logger.Warn("could not inspect active Nix processes", "error", err)
-			return result, false
-		} else if len(busy) > 0 {
-			logger.Warn("skipping Nix cleanup because active Nix work was detected",
-				"processes", strings.Join(busy, ", "),
-				"backoff", cfg.Nix.DaemonBusyBackoff)
-			return result, false
-		}
-	}
+	// Active-work deferral is decided by busyGate in Cleanup, before this.
 
 	generationsDeleted := 0
 	if level >= LevelModerate {
@@ -1543,6 +1604,12 @@ func parseNixProcStatusUID(raw []byte) (uint32, error) {
 	return 0, errors.New("no Uid line in process status")
 }
 
+// nixBusyProcessReasons returns the active Nix work in processes. Only an
+// exact executable basename with a store-mutating argv shape counts
+// (nixActiveWorkReason): a long-lived evaluator or editor server such as
+// nixd, nixd-attrset-eval, nil or nix repl is not build work, and Nix's own
+// collector already honours the temp roots of every client connected to the
+// daemon.
 func nixBusyProcessReasons(processes []nixProcessSnapshot) ([]string, error) {
 	seen := map[string]bool{}
 	var reasons []string
@@ -1562,17 +1629,21 @@ func nixBusyProcessReasons(processes []nixProcessSnapshot) ([]string, error) {
 				if reason, busy := nixDaemonProcessReason(process, nil); busy {
 					add(reason)
 				}
-				continue
 			case command != "":
+				// The argv shape cannot be checked, so a known client
+				// stays busy.
 				add(command)
-				continue
-			default:
+			case nixProcessInterpreterName(process.Comm) != "":
+				// An interpreter may be running a client script; without
+				// argv it cannot be told apart, so inspection fails closed.
 				return nil, fmt.Errorf("inspect candidate pid %d (%s): %w", process.PID, process.Comm, process.ArgvErr)
 			}
+			// An unknown Nix-prefixed name (nixd-attrset-ev, ...) is not a
+			// known client and is not build work.
+			continue
 		}
 
 		command := nixBusyProcessCommandName(process.Comm)
-		unknownNixCandidate := nixProcessNixPrefixedName(process.Comm)
 		interpreter := nixProcessInterpreterName(process.Comm)
 		if len(process.Argv) > 0 {
 			if argvCommand := nixBusyProcessCommandName(process.Argv[0]); argvCommand != "" {
@@ -1580,6 +1651,11 @@ func nixBusyProcessReasons(processes []nixProcessSnapshot) ([]string, error) {
 				interpreter = ""
 			} else if argvInterpreter := nixProcessInterpreterName(process.Argv[0]); argvInterpreter != "" {
 				interpreter = argvInterpreter
+				command = ""
+			} else {
+				// argv[0] is authoritative over a truncated comm: nixd and
+				// nixd-attrset-eval are not Nix clients.
+				command = ""
 			}
 		}
 
@@ -1588,10 +1664,6 @@ func nixBusyProcessReasons(processes []nixProcessSnapshot) ([]string, error) {
 			args = args[1:]
 		}
 
-		if command == "" && unknownNixCandidate {
-			add("nix-prefixed process")
-			continue
-		}
 		if command == "" && interpreter != "" {
 			var ok bool
 			command, args, ok = nixInterpreterScriptProcess(interpreter, args)
@@ -1617,6 +1689,14 @@ func nixBusyProcessCommandName(raw string) string {
 	switch name {
 	case "nix", "nix-store", "nix-build", "nix-shell", "nix-instantiate", "nix-collect-garbage", "nix-env", "nix-prefetch-url", "nix-copy-closure", "nix-channel", "home-manager", "darwin-rebuild", "nixos-rebuild", "nix-daemon":
 		return name
+	// Linux truncates comm to 15 bytes; these are the known clients whose
+	// names are longer. argv[0], when readable, still decides.
+	case "nix-collect-gar":
+		return "nix-collect-garbage"
+	case "nix-prefetch-ur":
+		return "nix-prefetch-url"
+	case "nix-copy-closur":
+		return "nix-copy-closure"
 	default:
 		return ""
 	}
@@ -1829,20 +1909,235 @@ func nixNormalizedProcessArgs(args []string) []string {
 }
 
 func nixBusyProcessReason(process nixProcessSnapshot, command string, args []string) (string, bool) {
-	switch command {
-	case "nix-daemon":
+	if command == "nix-daemon" {
 		return nixDaemonProcessReason(process, args)
+	}
+	return nixActiveWorkReason(command, args)
+}
+
+// nixActiveWorkReason decides, from an exact client name and its lowercased
+// arguments, whether a process is store-mutating Nix work that a GC pass
+// should wait for. Queries, evaluators and REPLs are not.
+func nixActiveWorkReason(command string, args []string) (string, bool) {
+	switch command {
 	case "nix":
-		if len(args) == 1 && args[0] == "daemon" {
-			return "", false
+		return nixCommandWorkReason(args)
+	case "nix-build", "nix-shell", "nix-collect-garbage", "nix-copy-closure", "nix-prefetch-url":
+		return command, true
+	case "nix-store":
+		if op := nixLegacyOperation(args, nixStoreOperations); op != "" && nixStoreBusyOperations[op] {
+			return "nix-store " + op, true
 		}
-		if len(args) > 1 && args[0] == "daemon" && nixDaemonWorker(args[1:]) {
+		if nixHasArg(args, "--repair") {
+			return "nix-store --repair", true
+		}
+		return "", false
+	case "nix-env":
+		if op := nixLegacyOperation(args, nixEnvOperations); op != "" && nixEnvBusyOperations[op] {
+			return "nix-env " + op, true
+		}
+		return "", false
+	case "nix-instantiate":
+		// Instantiation writes .drv files unless it only parses or
+		// evaluates.
+		for _, arg := range args {
+			switch arg {
+			case "--parse", "--eval", "--eval-only", "--find-file", "--help", "--version":
+				return "", false
+			}
+		}
+		return command, true
+	case "nix-channel":
+		if nixHasArg(args, "--update") || nixHasArg(args, "--rollback") {
+			return command, true
+		}
+		return "", false
+	case "home-manager":
+		if sub := nixFirstWord(args, nixHomeManagerBusy); sub != "" {
+			return "home-manager " + sub, true
+		}
+		return "", false
+	case "darwin-rebuild", "nixos-rebuild":
+		if sub := nixFirstWord(args, nixRebuildBusy); sub != "" {
+			return command + " " + sub, true
+		}
+		return "", false
+	default:
+		return "", false
+	}
+}
+
+var (
+	nixHomeManagerBusy = map[string]bool{"switch": true, "build": true}
+	nixRebuildBusy     = map[string]bool{
+		"switch": true, "boot": true, "test": true, "build": true, "dry-build": true,
+		"dry-activate": true, "activate": true, "check": true, "build-vm": true,
+		"build-vm-with-bootloader": true, "build-image": true, "--rollback": true,
+	}
+
+	// nixSubcommands is the vocabulary used to find the subcommand after
+	// global options whose arity is not known.
+	nixSubcommands = map[string]bool{
+		"build": true, "bundle": true, "copy": true, "daemon": true, "derivation": true,
+		"develop": true, "doctor": true, "edit": true, "eval": true, "flake": true,
+		"fmt": true, "formatter": true, "hash": true, "help": true, "help-stores": true,
+		"key": true, "log": true, "nar": true, "path-info": true, "print-dev-env": true,
+		"profile": true, "realisation": true, "registry": true, "repl": true, "run": true,
+		"search": true, "shell": true, "store": true, "upgrade-nix": true,
+		"why-depends": true, "config": true, "env": true,
+	}
+	// nixOptionArity are global options that take values, so a value is
+	// never read as the subcommand.
+	nixOptionArity = map[string]int{
+		"--option": 2, "--arg": 2, "--argstr": 2, "--override-input": 2,
+		"--extra-experimental-features": 1, "--experimental-features": 1,
+		"--store": 1, "--eval-store": 1, "--log-format": 1, "--max-jobs": 1, "-j": 1,
+		"--cores": 1, "--builders": 1, "--substituters": 1, "--extra-substituters": 1,
+		"-i": 1, "-I": 1, "--include": 1, "--file": 1, "-f": 1, "--system": 1,
+		"--trusted-public-keys": 1, "--extra-trusted-public-keys": 1, "--profile": 1,
+		"--out-link": 1, "-o": 1, "--reference-lock-file": 1, "--output-lock-file": 1,
+		"--inputs-from": 1, "--override-flake": 2, "--update-input": 1,
+	}
+	nixStoreReadOnly   = map[string]bool{"ping": true, "info": true, "ls": true, "cat": true, "dump-path": true, "path-from-hash-part": true, "diff-closures": true}
+	nixProfileReadOnly = map[string]bool{"list": true, "history": true, "diff-closures": true}
+	nixFlakeBusy       = map[string]bool{"update": true, "lock": true, "check": true, "archive": true, "prefetch": true}
+
+	nixStoreOperations = map[string]string{
+		"-r": "--realise", "--realise": "--realise", "--realize": "--realise",
+		"--add": "--add", "--add-fixed": "--add-fixed", "--import": "--import",
+		"--gc": "--gc", "--delete": "--delete", "--optimise": "--optimise", "--optimize": "--optimise",
+		"--restore": "--restore", "--load-db": "--load-db", "--serve": "--serve",
+		"--repair-path": "--repair-path", "-q": "--query", "--query": "--query",
+		"--dump": "--dump", "--export": "--export", "--verify": "--verify",
+		"--verify-path": "--verify-path", "-l": "--read-log", "--read-log": "--read-log",
+		"--dump-db": "--dump-db", "--print-env": "--print-env", "--generate-binary-cache-key": "--generate-binary-cache-key",
+	}
+	nixStoreBusyOperations = map[string]bool{
+		"--realise": true, "--add": true, "--add-fixed": true, "--import": true, "--gc": true,
+		"--delete": true, "--optimise": true, "--restore": true, "--load-db": true,
+		"--serve": true, "--repair-path": true,
+	}
+	nixEnvOperations = map[string]string{
+		"-i": "--install", "--install": "--install", "-u": "--upgrade", "--upgrade": "--upgrade",
+		"-e": "--uninstall", "--uninstall": "--uninstall", "--set": "--set",
+		"--set-flag": "--set-flag", "--rollback": "--rollback", "-g": "--switch-generation",
+		"--switch-generation": "--switch-generation", "--delete-generations": "--delete-generations",
+		"-q": "--query", "--query": "--query", "--list-generations": "--list-generations",
+	}
+	nixEnvBusyOperations = map[string]bool{
+		"--install": true, "--upgrade": true, "--uninstall": true, "--set": true,
+		"--set-flag": true, "--rollback": true, "--switch-generation": true, "--delete-generations": true,
+	}
+)
+
+// nixCommandWorkReason classifies the new-style nix CLI by its subcommand.
+func nixCommandWorkReason(args []string) (string, bool) {
+	sub, rest := nixSubcommand(args)
+	switch sub {
+	case "":
+		return "", false
+	case "daemon":
+		if nixDaemonWorker(rest) {
 			return "nix-daemon worker", true
 		}
-		return "nix", true
+		return "", false
+	case "build", "develop", "shell", "run", "copy", "bundle", "print-dev-env", "upgrade-nix", "fmt":
+		return "nix " + sub, true
+	case "eval":
+		// An eval may realise import-from-derivation; --read-only cannot.
+		if nixHasArg(rest, "--read-only") {
+			return "", false
+		}
+		return "nix eval", true
+	case "store":
+		next := nixFirstBare(rest)
+		if next == "" || nixStoreReadOnly[next] {
+			return "", false
+		}
+		return "nix store " + next, true
+	case "profile":
+		next := nixFirstBare(rest)
+		if next == "" || nixProfileReadOnly[next] {
+			return "", false
+		}
+		return "nix profile " + next, true
+	case "flake":
+		if next := nixFirstBare(rest); nixFlakeBusy[next] {
+			return "nix flake " + next, true
+		}
+		return "", false
+	case "derivation":
+		if nixFirstBare(rest) == "add" {
+			return "nix derivation add", true
+		}
+		return "", false
 	default:
-		return command, true
+		return "", false
 	}
+}
+
+// nixSubcommand returns the first argument that names a nix subcommand,
+// skipping global options and the values of options with known arity.
+func nixSubcommand(args []string) (string, []string) {
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		if strings.HasPrefix(arg, "-") {
+			idx += nixOptionArity[arg]
+			continue
+		}
+		if nixSubcommands[arg] {
+			return arg, args[idx+1:]
+		}
+	}
+	return "", nil
+}
+
+// nixFirstBare returns the first argument that is not an option.
+func nixFirstBare(args []string) string {
+	for idx := 0; idx < len(args); idx++ {
+		if strings.HasPrefix(args[idx], "-") {
+			idx += nixOptionArity[args[idx]]
+			continue
+		}
+		return args[idx]
+	}
+	return ""
+}
+
+// nixFirstWord returns the first argument found in words.
+func nixFirstWord(args []string, words map[string]bool) string {
+	for _, arg := range args {
+		if words[arg] {
+			return arg
+		}
+	}
+	return ""
+}
+
+func nixHasArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+// nixLegacyOperation returns the canonical operation of a nix-store or
+// nix-env invocation: the first argument naming one, where a short cluster
+// such as -iA or -qR names the operation by its first letter.
+func nixLegacyOperation(args []string, operations map[string]string) string {
+	for _, arg := range args {
+		if op, ok := operations[arg]; ok {
+			return op
+		}
+		if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' {
+			if op, ok := operations[arg[:2]]; ok {
+				return op
+			}
+		}
+	}
+	return ""
 }
 
 func nixDaemonProcessReason(process nixProcessSnapshot, args []string) (string, bool) {
