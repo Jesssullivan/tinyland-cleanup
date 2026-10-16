@@ -259,6 +259,12 @@ nix:
   hook_pin_dir: ~/.local/state/tinyland-cleanup/gcroots/hook-pins
   hook_pin_session_comms: ["claude", "codex", "pi", "opencode"]
   hook_pin_required: false
+  # Serialization (lab R-C815). gc_lock_file is a flock(2) file held for the
+  # whole pass; a fallback collector that locks the same file never runs at
+  # the same time. While any gc_defer_paths entry exists (a switch's or a
+  # delivery's mkdir lock) a due pass is deferred to a later poll.
+  gc_lock_file: ""
+  gc_defer_paths: []
 
 # Structural Bazel output-base reaper (R-C644, R-C645). Level independent:
 # it runs whatever the host cleanup level and applies its own per-mount

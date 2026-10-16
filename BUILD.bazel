@@ -294,8 +294,10 @@ go_library(
         "plugins/fs.go",
         "plugins/nix.go",
         "plugins/nix_cadence.go",
+        "plugins/nix_gclock.go",
         "plugins/nix_gcroots.go",
         "plugins/nix_hookpins.go",
+        "plugins/nix_sessions.go",
         "plugins/plugin.go",
         "plugins/podman.go",
         "plugins/proc_stat.go",
@@ -314,9 +316,10 @@ go_library(
             "plugins/fs_ctime_darwin.go",
             "plugins/temp_mounts_darwin.go",
             "plugins/lima.go",
+            "plugins/nix_gclock_unix.go",
             "plugins/nix_process_argv_darwin.go",
             "plugins/nix_process_uid_other.go",
-            "plugins/nix_sessions_other.go",
+            "plugins/nix_sessions_darwin.go",
         ],
         "@platforms//os:linux": [
             "plugins/bazel_bases_linux.go",
@@ -324,6 +327,7 @@ go_library(
             "plugins/fs_ctime_linux.go",
             "plugins/temp_mounts_linux.go",
             "plugins/github_runner.go",
+            "plugins/nix_gclock_unix.go",
             "plugins/nix_process_argv_linux.go",
             "plugins/nix_process_uid_linux.go",
             "plugins/nix_sessions_linux.go",
@@ -334,6 +338,8 @@ go_library(
             "plugins/fs_ctime_other.go",
             "plugins/temp_mounts_other.go",
             "plugins/github_runner.go",
+            "plugins/nix_gclock_other.go",
+            "plugins/nix_gclock_unix.go",
             "plugins/nix_process_argv_other.go",
             "plugins/nix_process_uid_other.go",
             "plugins/nix_sessions_other.go",
@@ -365,6 +371,7 @@ go_test(
         "plugins/nix_cadence_test.go",
         "plugins/nix_gcroots_test.go",
         "plugins/nix_hookpins_test.go",
+        "plugins/nix_sessions_test.go",
         "plugins/nix_test.go",
         "plugins/plugin_pbt_test.go",
         "plugins/plugin_test.go",
@@ -379,11 +386,14 @@ go_test(
         "@platforms//os:macos": [
             "plugins/apfs_darwin_test.go",
             "plugins/darwin_dev_cache_test.go",
+            "plugins/nix_gclock_test.go",
             "plugins/nix_process_argv_darwin_test.go",
+            "plugins/nix_sessions_darwin_test.go",
         ],
         "@platforms//os:linux": [
             "plugins/bazel_bases_linux_test.go",
             "plugins/github_runner_linux_test.go",
+            "plugins/nix_gclock_test.go",
             "plugins/nix_process_argv_linux_test.go",
             "plugins/nix_process_uid_linux_test.go",
             "plugins/nix_sessions_linux_test.go",
@@ -394,7 +404,10 @@ go_test(
     deps = [
         ":config",
         "@net_pgregory_rapid//:rapid",
-    ],
+    ] + select({
+        "@platforms//os:macos": ["@org_golang_x_sys//unix"],
+        "//conditions:default": [],
+    }),
 )
 
 test_suite(

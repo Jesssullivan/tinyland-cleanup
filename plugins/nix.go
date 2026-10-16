@@ -254,6 +254,22 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		logger.Warn("skipping Nix GC: hook-path pins could not be established", "error", pinErr)
 		return result
 	}
+	// R-C815: a switch, a delivery or another collector in progress defers
+	// the pass; it is retried on a later poll and not counted as an attempt.
+	if marker, deferred := nixGCDeferredBy(cfg.Nix); deferred {
+		logger.Info("deferring Nix GC: a serialized operation is in progress", "marker", marker)
+		return result
+	}
+	release, lockErr := nixAcquireGCLock(cfg.Nix)
+	if errors.Is(lockErr, errNixGCLockHeld) {
+		logger.Info("deferring Nix GC: another collector holds the serialization lock", "lock", nixGCLockPath(cfg.Nix))
+		return result
+	}
+	if lockErr != nil {
+		logger.Warn("skipping Nix GC: the serialization lock is unusable", "error", lockErr)
+		return result
+	}
+	defer release()
 	gcResult, attempted := p.runGC(ctx, gcLevel, cfg, logger)
 	if attempted {
 		st.LastGCAttempt = p.clock()
@@ -329,6 +345,13 @@ func (p *NixPlugin) runGC(ctx context.Context, level CleanupLevel, cfg *config.C
 		return result, true
 	} else if p.nixDryRunHasNoGCWork(dryRunOutput) && generationsDeleted == 0 && !(level == LevelCritical && cfg.Nix.AllowStoreOptimize) {
 		logger.Info("skipping Nix garbage collection because dry-run reported no reclaimable store paths")
+		return result, true
+	}
+
+	// R-C815: a switch or delivery that started during the preflight still
+	// defers the collection itself.
+	if marker, deferred := nixGCDeferredBy(cfg.Nix); deferred {
+		logger.Info("deferring Nix garbage collection: a serialized operation started", "marker", marker)
 		return result, true
 	}
 

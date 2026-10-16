@@ -76,6 +76,8 @@ nix:
   hook_pin_dir: ~/.local/state/tinyland-cleanup/gcroots/hook-pins
   hook_pin_session_comms: ["claude", "codex", "pi", "opencode"]
   hook_pin_required: false
+  gc_lock_file: ""
+  gc_defer_paths: []
 ```
 
 Cadence. The nix plugin is level-independent: the daemon calls it on every
@@ -105,7 +107,20 @@ means any path that stayed referenced for one poll interval is pinned, even
 when two switches replace hooks inside one GC gap. A session that predates
 the first refresh is covered only if its hook paths are still the current
 ones then. With `hook_pin_required` a
-pass whose pins could not be established does not collect.
+pass whose pins could not be established does not collect. Session start
+times come from `/proc` on Linux and from `sysctl kern.proc.uid` (with argv
+from `kern.procargs2`) on Darwin.
+
+Serialization. `gc_lock_file` names a flock(2) lock file the plugin takes
+non-blocking before a due pass and holds until the pass ends; it is created
+0600 in a 0700 directory and must be a private regular file the daemon user
+owns. A host that keeps another collector as a fallback points both at the
+same file, so the two never run together. `gc_defer_paths` are markers other
+tools create, such as the mkdir lock of a Home Manager switch or a delivery:
+while any exists the pass is deferred, and they are checked again just
+before `nix-collect-garbage`. A deferred pass is not counted as an attempt,
+so the next poll retries it; nothing in either list is created or removed
+by the plugin apart from the lock file itself.
 
 Root jobs (no sudo rule). The package ships units under
 `share/tinyland-cleanup/systemd/`, bound to its own binary, configured by
