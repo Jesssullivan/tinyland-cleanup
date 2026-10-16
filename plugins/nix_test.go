@@ -401,7 +401,7 @@ func TestNixProcessSnapshotsUseStructuredArgvOnlyForCandidates(t *testing.T) {
 	}
 
 	output := "1 0 0 /sbin/launchd\n101 1 501 /nix/store/abc/bin/nix\n102 1 501 /usr/bin/ssh\n103 1 501 /bin/bash\n104 1 0 nix-collect-gar\n105 1 501 /bin/zsh\n106 1 501 nix-prefetch-ur\n107 1 501 nix-copy-closur\n108 1 501 nix-process-sca\n"
-	snapshots, err := nixProcessSnapshots(context.Background(), output, reader)
+	snapshots, _, err := nixProcessSnapshots(context.Background(), output, reader, nil)
 	if err != nil {
 		t.Fatalf("nixProcessSnapshots: %v", err)
 	}
@@ -421,15 +421,205 @@ func TestNixProcessSnapshotsUseStructuredArgvOnlyForCandidates(t *testing.T) {
 }
 
 func TestNixProcessSnapshotsFailClosedOnArgvReadError(t *testing.T) {
-	snapshots, err := nixProcessSnapshots(context.Background(), "42 1 501 /bin/bash\n", func(int) ([]string, error) {
+	snapshots, _, err := nixProcessSnapshots(context.Background(), "42 1 501 /bin/bash\n", func(int) ([]string, error) {
 		return nil, errors.New("argv unavailable")
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("nixProcessSnapshots: %v", err)
 	}
 	_, err = nixBusyProcessReasons(snapshots)
 	if err == nil || !strings.Contains(err.Error(), "argv unavailable") {
 		t.Fatalf("expected argv inspection error, got %v", err)
+	}
+}
+
+func TestParseNixPSUIDWrapsSignedUserNamespaceUIDs(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want uint32
+		ok   bool
+	}{
+		{raw: "0", want: 0, ok: true},
+		{raw: "1000", want: 1000, ok: true},
+		{raw: "4294967295", want: 4294967295, ok: true},
+		// procps prints a host UID >= 2^31 as signed int32 (sting, 2026-10-16).
+		{raw: "-964362244", want: 3330605052, ok: true},
+		{raw: "-2147483648", want: 2147483648, ok: true},
+		{raw: "-1", want: 4294967295, ok: true},
+		{raw: "-2147483649", ok: false},
+		{raw: "4294967296", ok: false},
+		{raw: "uid", ok: false},
+	}
+	for _, tc := range cases {
+		got, ok := parseNixPSUID(tc.raw)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("parseNixPSUID(%q) = %d, %v; want %d, %v", tc.raw, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestNixProcessSnapshotsToleratesNegativeUserNamespaceUID(t *testing.T) {
+	// The exact row that stopped every GC pass on sting on 2026-10-16: a
+	// hostUsers:false pod's pause process with a UID >= 2^31.
+	output := "1 0 0 /sbin/init\n 405921  405810 -964362244 pause\n500 1 0 nix-daemon\n"
+	snapshots, inspection, err := nixProcessSnapshots(context.Background(), output, func(int) ([]string, error) {
+		return []string{"nix-daemon", "--daemon"}, nil
+	}, nil)
+	if err != nil {
+		t.Fatalf("nixProcessSnapshots: %v", err)
+	}
+	if inspection.MalformedRows != 0 {
+		t.Fatalf("malformed rows = %d, want 0: %+v", inspection.MalformedRows, inspection)
+	}
+	if len(snapshots) != 1 || snapshots[0].PID != 500 || snapshots[0].UID != 0 || snapshots[0].UIDUnknown {
+		t.Fatalf("snapshots = %+v, want only the root nix-daemon", snapshots)
+	}
+	reasons, err := nixBusyProcessReasons(snapshots)
+	if err != nil || len(reasons) != 0 {
+		t.Fatalf("busy reasons = %v, %v; want none", reasons, err)
+	}
+}
+
+func TestNixProcessSnapshotsPrefersProcUIDAboveSignedRange(t *testing.T) {
+	// A pod-local nix-daemon under a user namespace: ps would print it
+	// negative, /proc/<pid>/status prints the unsigned host UID. Either way it
+	// is not the host's root daemon, so it reads as busy, never as idle.
+	output := "700 650 -964362244 nix-daemon\n"
+	var uidPIDs []int
+	snapshots, _, err := nixProcessSnapshots(context.Background(), output, func(int) ([]string, error) {
+		return []string{"nix-daemon", "--daemon"}, nil
+	}, func(pid int) (uint32, error) {
+		uidPIDs = append(uidPIDs, pid)
+		return 3330605052, nil
+	})
+	if err != nil {
+		t.Fatalf("nixProcessSnapshots: %v", err)
+	}
+	if !slices.Equal(uidPIDs, []int{700}) {
+		t.Fatalf("uid reader pids = %v, want [700]", uidPIDs)
+	}
+	if len(snapshots) != 1 || snapshots[0].UID != 3330605052 || snapshots[0].UIDUnknown {
+		t.Fatalf("snapshots = %+v, want uid 3330605052", snapshots)
+	}
+	reasons, err := nixBusyProcessReasons(snapshots)
+	if err != nil || !slices.Equal(reasons, []string{"nix-daemon state unknown"}) {
+		t.Fatalf("busy reasons = %v, %v; want nix-daemon state unknown", reasons, err)
+	}
+}
+
+func TestParseNixProcStatusUIDReadsEffectiveUID(t *testing.T) {
+	status := []byte("Name:\tpause\nState:\tS (sleeping)\nUid:\t3330605052\t3330605053\t3330605052\t3330605052\nGid:\t3330605052\t3330605052\t3330605052\t3330605052\n")
+	got, err := parseNixProcStatusUID(status)
+	if err != nil || got != 3330605053 {
+		t.Fatalf("parseNixProcStatusUID = %d, %v; want 3330605053", got, err)
+	}
+	if _, err := parseNixProcStatusUID([]byte("Name:\tx\n")); err == nil {
+		t.Fatal("expected an error for a status without a Uid line")
+	}
+	if _, err := parseNixProcStatusUID([]byte("Uid:\tabc\tdef\n")); err == nil {
+		t.Fatal("expected an error for a malformed Uid line")
+	}
+}
+
+func TestNixProcessSnapshotsCountsMalformedRowsAndContinues(t *testing.T) {
+	output := strings.Join([]string{
+		"1 0 0 /sbin/init",
+		"garbage",                 // too few fields
+		"x 1 0 /usr/bin/ssh",      // bad pid, not a Nix candidate
+		"55 1 notauid /bin/zsh",   // bad uid, not a candidate
+		"56 1 notauid nix-daemon", // bad uid, candidate: UID unknown
+		"101 1 501 /nix/store/abc/bin/nix",
+	}, "\n")
+	argv := map[int][]string{
+		56:  {"nix-daemon", "--daemon"},
+		101: {"/nix/store/abc/bin/nix", "build", ".#x"},
+	}
+	snapshots, inspection, err := nixProcessSnapshots(context.Background(), output, func(pid int) ([]string, error) {
+		return argv[pid], nil
+	}, func(int) (uint32, error) {
+		return 0, errors.New("no /proc here")
+	})
+	if err != nil {
+		t.Fatalf("nixProcessSnapshots: %v", err)
+	}
+	if inspection.MalformedRows != 4 || len(inspection.MalformedSamples) != nixProcessMalformedSampleLimit {
+		t.Fatalf("inspection = %+v, want 4 malformed rows with %d samples", inspection, nixProcessMalformedSampleLimit)
+	}
+	if len(inspection.MalformedCandidates) != 0 {
+		t.Fatalf("malformed candidates = %v, want none", inspection.MalformedCandidates)
+	}
+	if !strings.Contains(inspection.warning(), "ignored 4 malformed process row(s)") {
+		t.Fatalf("warning = %q", inspection.warning())
+	}
+	if len(snapshots) != 2 || !snapshots[0].UIDUnknown {
+		t.Fatalf("snapshots = %+v, want the uid-unknown daemon and nix build", snapshots)
+	}
+	reasons, err := nixBusyProcessReasons(snapshots)
+	if err != nil || !slices.Equal(reasons, []string{"nix", "nix-daemon state unknown"}) {
+		t.Fatalf("busy reasons = %v, %v", reasons, err)
+	}
+}
+
+func TestNixProcessSnapshotsMalformedNixRowDefersNotAborts(t *testing.T) {
+	output := "1 0 0 /sbin/init\nbad 1 501 nix-build\n"
+	snapshots, inspection, err := nixProcessSnapshots(context.Background(), output, func(int) ([]string, error) {
+		return nil, nil
+	}, nil)
+	if err != nil {
+		t.Fatalf("nixProcessSnapshots: %v", err)
+	}
+	if len(snapshots) != 0 || inspection.MalformedRows != 1 || len(inspection.MalformedCandidates) != 1 {
+		t.Fatalf("snapshots = %+v, inspection = %+v", snapshots, inspection)
+	}
+}
+
+func TestNixProcessSnapshotsFailClosedWhenNoRowParses(t *testing.T) {
+	_, _, err := nixProcessSnapshots(context.Background(), "garbage\nmore garbage here\n", func(int) ([]string, error) {
+		return nil, nil
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "no parseable process rows") {
+		t.Fatalf("expected total-failure error, got %v", err)
+	}
+	snapshots, inspection, err := nixProcessSnapshots(context.Background(), "", nil, nil)
+	if err != nil || len(snapshots) != 0 || inspection.MalformedRows != 0 {
+		t.Fatalf("empty output = %+v, %+v, %v; want empty and no error", snapshots, inspection, err)
+	}
+}
+
+func TestNixActiveProcessesFailClosedWhenPSUnavailable(t *testing.T) {
+	// ps missing from PATH: the whole table is unreadable, so inspection
+	// errors and the caller defers instead of assuming no Nix work.
+	t.Setenv("PATH", t.TempDir())
+	if _, _, err := (&NixPlugin{}).activeNixProcesses(context.Background()); err == nil {
+		t.Fatal("expected an error with ps unavailable")
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	if _, _, err := (&NixPlugin{}).activeNixProcesses(context.Background()); err == nil {
+		t.Fatal("expected an error when ps fails")
+	}
+}
+
+func TestNixActiveProcessesReportsMalformedNixRowAsBusy(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nprintf '1 0 0 init\\n 405921  405810 -964362244 pause\\nbad 1 501 nix-build\\n'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	reasons, inspection, err := (&NixPlugin{}).activeNixProcesses(context.Background())
+	if err != nil {
+		t.Fatalf("activeNixProcesses: %v", err)
+	}
+	if inspection.MalformedRows != 1 {
+		t.Fatalf("inspection = %+v, want one malformed row", inspection)
+	}
+	if !slices.Equal(reasons, []string{"nix-named process with unparseable ps row"}) {
+		t.Fatalf("reasons = %v", reasons)
 	}
 }
 

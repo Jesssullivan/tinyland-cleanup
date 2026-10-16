@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,7 +118,12 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		return plan
 	}
 
-	if busy, err := p.activeNixProcesses(ctx); err != nil {
+	busy, inspection, err := p.activeNixProcesses(ctx)
+	if inspection.MalformedRows > 0 {
+		plan.Metadata["process_inspection_malformed_rows"] = strconv.Itoa(inspection.MalformedRows)
+		plan.Warnings = append(plan.Warnings, inspection.warning())
+	}
+	if err != nil {
 		if cfg.Nix.SkipWhenDaemonBusy {
 			nixDeferPlan(&plan,
 				"nix_process_inspection_failed",
@@ -274,7 +280,12 @@ func (p *NixPlugin) runGC(ctx context.Context, level CleanupLevel, cfg *config.C
 	}
 
 	if cfg.Nix.SkipWhenDaemonBusy {
-		busy, err := p.activeNixProcesses(ctx)
+		busy, inspection, err := p.activeNixProcesses(ctx)
+		if inspection.MalformedRows > 0 {
+			logger.Warn("ignored malformed process rows during Nix process inspection",
+				"count", inspection.MalformedRows,
+				"samples", strings.Join(inspection.MalformedSamples, " | "))
+		}
 		if err != nil {
 			logger.Warn("could not inspect active Nix processes", "error", err)
 			return result, false
@@ -796,20 +807,32 @@ func discoverNixProfileLinkGenerations(profileDir, profileName, scope string) ([
 	return generations, nil
 }
 
-func (p *NixPlugin) activeNixProcesses(ctx context.Context) ([]string, error) {
+// activeNixProcesses reports host-wide Nix work that should defer a GC pass.
+// It fails closed (returns an error) only when the process table as a whole
+// cannot be read: ps is missing or fails, or none of its rows parse. A single
+// malformed row is counted and reported in the inspection, never fatal.
+func (p *NixPlugin) activeNixProcesses(ctx context.Context) ([]string, nixProcessInspection, error) {
 	psCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	cmd := commandContext(psCtx, "ps", "-axo", "pid=,ppid=,uid=,comm=")
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, nixProcessInspection{}, err
 	}
-	snapshots, err := nixProcessSnapshots(psCtx, string(output), nixProcessArgv)
+	snapshots, inspection, err := nixProcessSnapshots(psCtx, string(output), nixProcessArgv, nixProcessUID)
 	if err != nil {
-		return nil, err
+		return nil, inspection, err
 	}
-	return nixBusyProcessReasons(snapshots)
+	reasons, err := nixBusyProcessReasons(snapshots)
+	if err != nil {
+		return nil, inspection, err
+	}
+	if len(inspection.MalformedCandidates) > 0 {
+		reasons = append(reasons, "nix-named process with unparseable ps row")
+		sort.Strings(reasons)
+	}
+	return reasons, inspection, nil
 }
 
 func nixReviewOnlyGenerationTargets(targets []CleanupTarget, action string, deleteReason string, tier string) []CleanupTarget {
@@ -1410,9 +1433,12 @@ func nixGenerationTargetsWithMax(generations []nixGeneration, now time.Time, min
 }
 
 type nixProcessSnapshot struct {
-	PID        int
-	PPID       int
-	UID        uint32
+	PID  int
+	PPID int
+	UID  uint32
+	// UIDUnknown is set when neither /proc nor ps yielded a usable UID. Code
+	// that branches on UID must treat it as "not root".
+	UIDUnknown bool
 	Comm       string
 	ParentComm string
 	Argv       []string
@@ -1420,6 +1446,79 @@ type nixProcessSnapshot struct {
 }
 
 type nixProcessArgvReader func(int) ([]string, error)
+
+// nixProcessUIDReader returns a process's effective UID from an
+// authoritative source (/proc/<pid>/status on Linux). An error means the
+// caller falls back to the ps column.
+type nixProcessUIDReader func(int) (uint32, error)
+
+// nixProcessInspection records rows of the process table that could not be
+// parsed, so a caller can report them instead of dropping them silently.
+type nixProcessInspection struct {
+	MalformedRows    int
+	MalformedSamples []string
+	// MalformedCandidates are malformed rows whose command still names a Nix
+	// process. Without a usable PID they cannot be inspected, so they defer
+	// the pass the same way an unreadable argv does.
+	MalformedCandidates []string
+}
+
+const nixProcessMalformedSampleLimit = 3
+
+func (i *nixProcessInspection) malformed(line string, candidate bool) {
+	i.MalformedRows++
+	line = strings.TrimSpace(line)
+	if len(i.MalformedSamples) < nixProcessMalformedSampleLimit {
+		i.MalformedSamples = append(i.MalformedSamples, line)
+	}
+	if candidate {
+		i.MalformedCandidates = append(i.MalformedCandidates, line)
+	}
+}
+
+func (i nixProcessInspection) warning() string {
+	return fmt.Sprintf("ignored %d malformed process row(s) during Nix process inspection: %s",
+		i.MalformedRows, strings.Join(i.MalformedSamples, " | "))
+}
+
+// parseNixPSUID parses a ps uid column. procps prints a UID at or above 2^31
+// (a user-namespaced pod's host UID, for example) as a negative signed 32-bit
+// value, so a negative value in int32 range is wrapped back to its uint32.
+func parseNixPSUID(raw string) (uint32, bool) {
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	switch {
+	case value >= 0 && value <= math.MaxUint32:
+		return uint32(value), true
+	case value < 0 && value >= math.MinInt32:
+		return uint32(value + (1 << 32)), true
+	default:
+		return 0, false
+	}
+}
+
+// parseNixProcStatusUID returns the effective UID from the "Uid:" line of a
+// /proc/<pid>/status file (real, effective, saved, filesystem).
+func parseNixProcStatusUID(raw []byte) (uint32, error) {
+	for _, line := range strings.Split(string(raw), "\n") {
+		rest, ok := strings.CutPrefix(line, "Uid:")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("parse Uid line %q", line)
+		}
+		uid, err := strconv.ParseUint(fields[1], 10, 32)
+		if err != nil {
+			return 0, fmt.Errorf("parse effective uid from %q: %w", line, err)
+		}
+		return uint32(uid), nil
+	}
+	return 0, errors.New("no Uid line in process status")
+}
 
 func nixBusyProcessReasons(processes []nixProcessSnapshot) ([]string, error) {
 	seen := map[string]bool{}
@@ -1515,39 +1614,49 @@ func nixProcessNixPrefixedName(raw string) bool {
 	return strings.HasPrefix(name, "nix")
 }
 
-func nixProcessSnapshots(ctx context.Context, output string, readArgv nixProcessArgvReader) ([]nixProcessSnapshot, error) {
+func nixProcessSnapshots(ctx context.Context, output string, readArgv nixProcessArgvReader, readUID nixProcessUIDReader) ([]nixProcessSnapshot, nixProcessInspection, error) {
 	type processRow struct {
-		pid  int
-		ppid int
-		uid  uint32
-		comm string
+		pid        int
+		ppid       int
+		uid        uint32
+		uidUnknown bool
+		comm       string
 	}
 
+	var inspection nixProcessInspection
 	var rows []processRow
+	nonEmpty := 0
 	parentNames := map[int]string{}
 	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		nonEmpty++
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
-			if strings.TrimSpace(line) == "" {
-				continue
-			}
-			return nil, fmt.Errorf("parse process row %q", line)
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			return nil, fmt.Errorf("parse process id from %q: %w", line, err)
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return nil, fmt.Errorf("parse parent process id from %q: %w", line, err)
-		}
-		uid, err := strconv.ParseUint(fields[2], 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("parse process uid from %q: %w", line, err)
+			inspection.malformed(line, false)
+			continue
 		}
 		comm := strings.Join(fields[3:], " ")
-		rows = append(rows, processRow{pid: pid, ppid: ppid, uid: uint32(uid), comm: comm})
+		pid, pidErr := strconv.Atoi(fields[0])
+		ppid, ppidErr := strconv.Atoi(fields[1])
+		if pidErr != nil || ppidErr != nil {
+			inspection.malformed(line, nixProcessCandidateName(comm))
+			continue
+		}
+		uid, uidOK := parseNixPSUID(fields[2])
+		if !uidOK {
+			// The row still identifies a process; only its ps UID is
+			// unusable. Keep it so a candidate is still inspected, and let
+			// the /proc reader below supply the UID where it can.
+			inspection.malformed(line, false)
+		}
+		rows = append(rows, processRow{pid: pid, ppid: ppid, uid: uid, uidUnknown: !uidOK, comm: comm})
 		parentNames[pid] = comm
+	}
+	if nonEmpty > 0 && len(rows) == 0 {
+		return nil, inspection, fmt.Errorf("no parseable process rows in ps output (%d malformed): %s",
+			inspection.MalformedRows, strings.Join(inspection.MalformedSamples, " | "))
 	}
 
 	var snapshots []nixProcessSnapshot
@@ -1556,23 +1665,30 @@ func nixProcessSnapshots(ctx context.Context, output string, readArgv nixProcess
 			continue
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, inspection, err
 		}
 		argv, err := readArgv(row.pid)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		uid, uidUnknown := row.uid, row.uidUnknown
+		if readUID != nil {
+			if procUID, uidErr := readUID(row.pid); uidErr == nil {
+				uid, uidUnknown = procUID, false
+			}
+		}
 		snapshots = append(snapshots, nixProcessSnapshot{
 			PID:        row.pid,
 			PPID:       row.ppid,
-			UID:        row.uid,
+			UID:        uid,
+			UIDUnknown: uidUnknown,
 			Comm:       row.comm,
 			ParentComm: parentNames[row.ppid],
 			Argv:       argv,
 			ArgvErr:    err,
 		})
 	}
-	return snapshots, nil
+	return snapshots, inspection, nil
 }
 
 func nixProcessInterpreterName(raw string) string {
@@ -1710,7 +1826,7 @@ func nixDaemonProcessReason(process nixProcessSnapshot, args []string) (string, 
 	if nixDaemonWorker(args) || nixDaemonProcessName(process.ParentComm) == "nix-daemon" {
 		return "nix-daemon worker", true
 	}
-	if process.UID != 0 {
+	if process.UIDUnknown || process.UID != 0 {
 		return "nix-daemon state unknown", true
 	}
 	if process.PPID == 1 {
