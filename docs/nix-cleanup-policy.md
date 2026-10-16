@@ -65,7 +65,7 @@ nix:
   direnv_gc_root_stale_after: 7d
   temp_gc_root_stale_after: 72h
   temp_gc_root_paths: []
-  gc_root_unregister_command: []
+  gc_root_candidates_file: ""
 ```
 
 Runtime behavior:
@@ -118,9 +118,8 @@ Runtime behavior:
   Nix cache roots are listed before generic unknown roots when attribution
   output is truncated;
 - `nix-store --optimize` runs only when `allow_store_optimize: true`.
-- with `reap_stale_gc_roots: true`, each real cleanup unregisters stale
-  indirect GC roots before the dry-run preflight, so the preflight and the GC
-  both see what those roots no longer pin. It reads `/nix/var/nix/gcroots/auto`
+- with `reap_stale_gc_roots: true`, each real cleanup lists stale indirect GC
+  roots before the dry-run preflight. It reads `/nix/var/nix/gcroots/auto`
   and considers only out-links that are symlinks the daemon user owns and that
   select a store path directly. Two classes are stale:
   - nix-direnv roots (`.direnv/flake-profile-*`, `.direnv/nix-profile-*`,
@@ -132,21 +131,26 @@ Runtime behavior:
     `dev_artifacts.temp_scan_paths`; a path that resolves through a symlink
     also covers its target) whose link is older than
     `temp_gc_root_stale_after`.
-  The reaper never deletes, moves or rewrites the out-link. It removes only
-  the root's `/nix/var/nix/gcroots/auto/<hash>` entry, by running
-  `gc_root_unregister_command` with the entry name appended, after
-  re-checking that the entry and the link are unchanged. That directory is
-  root-owned, so the command is normally a `sudo -n` helper that validates
-  the entry itself; without a command the reaper only reports. Agent-session
-  trees (TIN-5268) and `.direnv` directories therefore keep every file: an
-  unregistered link dangles once the collector takes its store path, and
-  nix-direnv treats a dangling profile as an invalid cache and re-evaluates.
+  The reaper never deletes, moves or rewrites the out-link, and it holds no
+  privilege. It writes the stale roots to `gc_root_candidates_file`, a file
+  the daemon user owns (mode 0600, replaced atomically each cycle), one
+  `<auto entry name>\t<out-link>` line each. A root job on the host reads
+  that list, re-checks every line (the out-link is owned by that user,
+  points straight into the store, is outside `gcroots/` and `profiles/`, and
+  the auto entry resolves to it) and removes only the matching
+  `/nix/var/nix/gcroots/auto/<name>` entries. Listing is not cleanup work and
+  does not force a GC; the next collection after the root job takes what the
+  roots no longer pin. Without a candidates file the reaper only reports.
+  Agent-session trees (TIN-5268) and `.direnv` directories therefore keep
+  every file: an unregistered link dangles once the collector takes its store
+  path, and nix-direnv treats a dangling profile as an invalid cache and
+  re-evaluates.
   Roots under a `gcroots` or `profiles` path component (deliberate
   `gcroots/<ticket>/` pins, profile generations) and rules_nixpkgs
   `bazel-support/nix-out-link` links inside Bazel output bases are never
   touched. A store path a live process still maps, execs or holds open stays
   protected by Nix's own runtime roots. Dry-run plans list the classified
-  roots as `unregister_stale_gc_root` or `keep_gc_root` targets.
+  roots as `propose_gc_root_unregister` or `keep_gc_root` targets.
 
 Darwin TCC-protected app bundle wedge:
 

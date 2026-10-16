@@ -712,29 +712,29 @@ type NixConfig struct {
 	MaxGCDuration string `yaml:"max_gc_duration"`
 	// RootAttributionLimit limits visible GC root targets in low-reclaim dry-runs.
 	RootAttributionLimit int `yaml:"root_attribution_limit"`
-	// ReapStaleGCRoots unregisters stale indirect GC roots the daemon user
-	// owns before each Nix GC pass: nix-direnv roots (.direnv/flake-profile-*,
+	// ReapStaleGCRoots lists stale indirect GC roots the daemon user owns
+	// before each Nix GC pass: nix-direnv roots (.direnv/flake-profile-*,
 	// .direnv/flake-inputs/*) of a checkout not loaded within
 	// direnv_gc_root_stale_after or no longer a git checkout, and store
 	// out-links under temp_gc_root_paths older than temp_gc_root_stale_after.
-	// Only the /nix/var/nix/gcroots/auto entry is removed, through
-	// gc_root_unregister_command; the out-link itself is never touched.
+	// Stale roots are listed in gc_root_candidates_file for a root job to
+	// unregister (auto entry only); the out-link itself is never touched.
 	// Roots under a "gcroots" or "profiles" path component are never touched.
 	ReapStaleGCRoots bool `yaml:"reap_stale_gc_roots"`
 	// DirenvGCRootStaleAfter is how long a checkout's nix-direnv roots may go
-	// unloaded before they are unregistered (default 7d).
+	// unloaded before they are listed (default 7d).
 	DirenvGCRootStaleAfter string `yaml:"direnv_gc_root_stale_after"`
 	// TempGCRootStaleAfter is how old a temporary out-link may be before it is
-	// unregistered (default 72h).
+	// listed (default 72h).
 	TempGCRootStaleAfter string `yaml:"temp_gc_root_stale_after"`
 	// TempGCRootPaths are the directories under which an out-link counts as
 	// temporary. Empty means dev_artifacts.temp_scan_paths.
 	TempGCRootPaths []string `yaml:"temp_gc_root_paths"`
-	// GCRootUnregisterCommand is the argv prefix that unregisters one stale
-	// root; the /nix/var/nix/gcroots/auto entry name is appended. The auto
-	// directory is root-owned, so this is normally a sudo -n helper. Empty
-	// means report only. The reaper never deletes the out-link itself.
-	GCRootUnregisterCommand []string `yaml:"gc_root_unregister_command"`
+	// GCRootCandidatesFile is the user-owned file the reaper writes its stale
+	// roots to, one "<auto entry name>\t<out-link>" line each, for a root job
+	// on the host to re-check and unregister. The reaper holds no privilege
+	// and never deletes the out-link. Empty means report only.
+	GCRootCandidatesFile string `yaml:"gc_root_candidates_file"`
 }
 
 // ICloudConfig holds iCloud-specific cleanup settings (Darwin).

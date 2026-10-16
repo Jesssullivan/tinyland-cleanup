@@ -6,20 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **Stale indirect GC roots are unregistered before Nix GC.** With
+- **Stale indirect GC roots are listed for a root unregister job.** With
   `nix.reap_stale_gc_roots: true` the nix plugin, before its dry-run
-  preflight, unregisters nix-direnv roots of a checkout not loaded within
+  preflight, finds nix-direnv roots of a checkout not loaded within
   `nix.direnv_gc_root_stale_after` (default 7d) or no longer a git checkout,
   and store out-links under `nix.temp_gc_root_paths` (default
   `dev_artifacts.temp_scan_paths`) older than `nix.temp_gc_root_stale_after`
-  (default 72h). It removes only the `/nix/var/nix/gcroots/auto` entry,
-  through `nix.gc_root_unregister_command` (the directory is root-owned), and
-  never deletes the out-link, so agent-session trees and `.direnv`
-  directories keep every file. Roots under a `gcroots` or `profiles` path
-  component and Bazel rules_nixpkgs out-links are never touched. Off by
-  default, and report-only without a command. The nix-direnv flake-input
-  roots pin flake sources, which a host that keeps only outputs should not
-  retain.
+  (default 72h), and writes them to `nix.gc_root_candidates_file`, one
+  `<auto entry name>\t<out-link>` line each. A root job on the host
+  re-checks each line and removes only the `/nix/var/nix/gcroots/auto`
+  entry. The reaper holds no privilege and never deletes the out-link, so
+  agent-session trees and `.direnv` directories keep every file. Roots under
+  a `gcroots` or `profiles` path component and Bazel rules_nixpkgs out-links
+  are never listed. Off by default, and report-only without a file. The
+  nix-direnv flake-input roots pin flake sources, which a host that keeps
+  only outputs should not retain.
 
 ### Fixed
 

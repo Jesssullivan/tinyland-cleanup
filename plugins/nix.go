@@ -244,10 +244,9 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		}
 	}
 
-	// Stale indirect roots go before the preflight so the dry-run and the GC
-	// both see what they no longer pin.
-	rootsRemoved := p.reapStaleGCRoots(ctx, cfg, logger)
-	result.ItemsCleaned += rootsRemoved
+	// Stale indirect roots are listed for the host's root unregister job; the
+	// collector sees what they stop pinning once that job has run.
+	p.publishStaleGCRootCandidates(cfg, logger)
 
 	dryRunOutput, dryRunErr := p.collectGarbageDryRun(ctx, cfg.Nix)
 	if dryRunErr != nil {
@@ -260,7 +259,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 			"output", strings.TrimSpace(dryRunOutput))
 		result.Error = fmt.Errorf("nix garbage collection preflight failed: %w", dryRunErr)
 		return result
-	} else if p.nixDryRunHasNoGCWork(dryRunOutput) && generationsDeleted == 0 && rootsRemoved == 0 && !(level == LevelCritical && cfg.Nix.AllowStoreOptimize) {
+	} else if p.nixDryRunHasNoGCWork(dryRunOutput) && generationsDeleted == 0 && !(level == LevelCritical && cfg.Nix.AllowStoreOptimize) {
 		logger.Info("skipping Nix garbage collection because dry-run reported no reclaimable store paths")
 		return result
 	}
@@ -812,7 +811,7 @@ func nixDeferralTarget(targetType string, name string, action string, active boo
 func nixPlanSteps(level CleanupLevel, cfg config.NixConfig) []string {
 	steps := []string{
 		"Inspect active Nix, Home Manager, and rebuild processes before locking the store",
-		"Unregister stale nix-direnv and temporary out-link GC roots (auto entry only; out-links untouched) when reap_stale_gc_roots=true",
+		"List stale nix-direnv and temporary out-link GC roots in gc_root_candidates_file for the host's root unregister job (out-links untouched) when reap_stale_gc_roots=true",
 		"Run nix-collect-garbage --dry-run to estimate reclaimable store paths",
 		"List user and system profile generations and apply minimum-retention policy",
 		"Preserve current profile generations and visible system generations by default",
