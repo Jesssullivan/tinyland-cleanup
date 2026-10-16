@@ -183,7 +183,9 @@ go_test(
         "rootjobs/gcroot_unregister_test.go",
         "rootjobs/lchtimes_test.go",
         "rootjobs/profile_prune_test.go",
+        "rootjobs/units_test.go",
     ],
+    data = glob(["packaging/systemd/tinyland-cleanup-*"]),
     embed = [":rootjobs"],
     deps = ["@org_golang_x_sys//unix"],
 )
