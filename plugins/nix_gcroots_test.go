@@ -74,6 +74,27 @@ func (f *gcRootFixture) reaper(now time.Time) nixGCRootReaper {
 	return r
 }
 
+// unregisterCommand writes a fake privileged helper that removes exactly the
+// named auto entry, as the lab sudo helper does, and records its argument.
+func (f *gcRootFixture) unregisterCommand() []string {
+	f.t.Helper()
+	script := filepath.Join(f.base, "fake-unregister")
+	body := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> " + filepath.Join(f.base, "unregister.log") + "\nrm -f " + f.autoDir + "/\"$1\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	return []string{script}
+}
+
+func (f *gcRootFixture) autoEntries() int {
+	f.t.Helper()
+	entries, err := os.ReadDir(f.autoDir)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return len(entries)
+}
+
 func staleByLink(roots []nixStaleGCRoot) map[string]bool {
 	out := map[string]bool{}
 	for _, r := range roots {
@@ -234,7 +255,7 @@ func TestNixStaleGCRootsSkipForeignOwnersAndNonStoreTargets(t *testing.T) {
 	}
 }
 
-func TestNixStaleGCRootRemovalTakesOnlyTheLinks(t *testing.T) {
+func TestNixStaleGCRootUnregisterTouchesNoUserFile(t *testing.T) {
 	f := newGCRootFixture(t)
 	direnv := f.mkdir("scratch/copied/.direnv")
 	rc := filepath.Join(direnv, "flake-profile-abc.rc")
@@ -242,32 +263,72 @@ func TestNixStaleGCRootRemovalTakesOnlyTheLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := f.mkdir("scratch/copied/.direnv/bin")
-	profile, _ := f.root("scratch/copied/.direnv/flake-profile-abc")
-	input, _ := f.root("scratch/copied/.direnv/flake-inputs/src-1")
+	profile, profileStore := f.root("scratch/copied/.direnv/flake-profile-abc")
+	input, inputStore := f.root("scratch/copied/.direnv/flake-inputs/src-1")
 
 	reaper := f.reaper(time.Now())
 	roots, err := reaper.collect(nil, 7*24*time.Hour, 72*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
+	command := f.unregisterCommand()
 	for _, r := range roots {
-		if err := reaper.remove(r); err != nil {
-			t.Fatalf("remove %s: %v", r.Link, err)
+		if err := reaper.unregister(context.Background(), command, r); err != nil {
+			t.Fatalf("unregister %s: %v", r.Link, err)
 		}
 	}
-	for _, gone := range []string{profile, input, filepath.Dir(input)} {
-		if _, err := os.Lstat(gone); !os.IsNotExist(err) {
-			t.Fatalf("%s should be gone, lstat err=%v", gone, err)
+	if n := f.autoEntries(); n != 0 {
+		t.Fatalf("every stale auto entry should be unregistered, %d left", n)
+	}
+	for link, store := range map[string]string{profile: profileStore, input: inputStore} {
+		dest, err := os.Readlink(link)
+		if err != nil || dest != store {
+			t.Fatalf("out-link %s must stay exactly as it was: %q %v", link, dest, err)
 		}
 	}
-	for _, kept := range []string{rc, bin, direnv} {
+	for _, kept := range []string{rc, bin, direnv, filepath.Dir(input)} {
 		if _, err := os.Lstat(kept); err != nil {
 			t.Fatalf("%s must stay: %v", kept, err)
 		}
 	}
 }
 
-func TestNixStaleGCRootRemovalRefusesARetargetedLink(t *testing.T) {
+// TIN-5268: agent-session data is never deleted. A stale out-link inside a
+// harness session tree is only unregistered; the link and every file beside
+// it survive.
+func TestNixStaleGCRootInAgentSessionTreeKeepsEveryFile(t *testing.T) {
+	f := newGCRootFixture(t)
+	tmp := f.mkdir("tmp-agents")
+	session := "tmp-agents/claude-1000/-srv-fast-local-jess-git-repo/132408fc-4933-4f0f-92c1-c1bfeaba72e3/scratchpad"
+	result, store := f.root(session + "/res-default")
+	notes := filepath.Join(f.base, session, "notes.md")
+	if err := os.WriteFile(notes, []byte("session notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reaper := f.reaper(time.Now().Add(30 * 24 * time.Hour))
+	roots, err := reaper.collect([]string{tmp}, 7*24*time.Hour, 72*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || !roots[0].Stale {
+		t.Fatalf("expected one stale temporary root: %+v", roots)
+	}
+	if err := reaper.unregister(context.Background(), f.unregisterCommand(), roots[0]); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.autoEntries(); n != 0 {
+		t.Fatalf("the auto entry should be gone, %d left", n)
+	}
+	if dest, err := os.Readlink(result); err != nil || dest != store {
+		t.Fatalf("the session's out-link must survive untouched: %q %v", dest, err)
+	}
+	if body, err := os.ReadFile(notes); err != nil || string(body) != "session notes\n" {
+		t.Fatalf("session files must survive: %q %v", body, err)
+	}
+}
+
+func TestNixStaleGCRootUnregisterRefusesARetargetedLink(t *testing.T) {
 	f := newGCRootFixture(t)
 	link, _ := f.root("scratch/copied/.direnv/flake-profile-abc")
 	reaper := f.reaper(time.Now())
@@ -281,11 +342,35 @@ func TestNixStaleGCRootRemovalRefusesARetargetedLink(t *testing.T) {
 	if err := os.Symlink(filepath.Join(f.storeDir, "bbbbbbbb-new"), link); err != nil {
 		t.Fatal(err)
 	}
-	if err := reaper.remove(roots[0]); err == nil {
-		t.Fatal("a link that changed since classification must be kept")
+	if err := reaper.unregister(context.Background(), f.unregisterCommand(), roots[0]); err == nil {
+		t.Fatal("a link that changed since classification must stay registered")
 	}
-	if _, err := os.Lstat(link); err != nil {
-		t.Fatalf("retargeted link must stay: %v", err)
+	if n := f.autoEntries(); n != 1 {
+		t.Fatalf("the auto entry must stay, %d entries", n)
+	}
+}
+
+func TestNixStaleGCRootWithoutACommandOnlyReports(t *testing.T) {
+	f := newGCRootFixture(t)
+	tmp := f.mkdir("tmp")
+	result, _ := f.root("tmp/session/result")
+
+	cfg := config.DefaultConfig()
+	cfg.Nix.ReapStaleGCRoots = true
+	cfg.Nix.TempGCRootPaths = []string{tmp}
+	p := NewNixPlugin()
+	p.autoGCRootsDir = f.autoDir
+	p.storeDir = f.storeDir
+	p.now = func() time.Time { return time.Now().Add(73 * time.Hour) }
+
+	if got := p.reapStaleGCRoots(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); got != 0 {
+		t.Fatalf("no command means nothing is unregistered, got %d", got)
+	}
+	if n := f.autoEntries(); n != 1 {
+		t.Fatalf("the auto entry must stay, %d entries", n)
+	}
+	if _, err := os.Lstat(result); err != nil {
+		t.Fatalf("the out-link must stay: %v", err)
 	}
 }
 
@@ -314,6 +399,7 @@ printf '%s\n' "1 store paths deleted, 1.0 MiB freed"
 	cfg.Nix.HostMeasurePath = tmp
 	cfg.Nix.ReapStaleGCRoots = true
 	cfg.Nix.TempGCRootPaths = []string{tmp}
+	cfg.Nix.GCRootUnregisterCommand = f.unregisterCommand()
 
 	p := NewNixPlugin()
 	p.autoGCRootsDir = f.autoDir
@@ -325,8 +411,11 @@ printf '%s\n' "1 store paths deleted, 1.0 MiB freed"
 	if result1.Error != nil {
 		t.Fatalf("cleanup: %v", result1.Error)
 	}
-	if _, err := os.Lstat(result); !os.IsNotExist(err) {
-		t.Fatalf("stale out-link should be removed before GC, lstat err=%v", err)
+	if n := f.autoEntries(); n != 0 {
+		t.Fatalf("stale root should be unregistered before GC, %d auto entries left", n)
+	}
+	if _, err := os.Lstat(result); err != nil {
+		t.Fatalf("the out-link itself must survive: %v", err)
 	}
 	calls, err := os.ReadFile(callsPath)
 	if err != nil {
@@ -337,7 +426,7 @@ printf '%s\n' "1 store paths deleted, 1.0 MiB freed"
 		t.Fatalf("nix-collect-garbage calls %q, want %q", got, want)
 	}
 	if result1.ItemsCleaned < 2 {
-		t.Fatalf("removed root and deleted path both count: %+v", result1)
+		t.Fatalf("unregistered root and deleted path both count: %+v", result1)
 	}
 }
 

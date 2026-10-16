@@ -6,16 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **Stale indirect GC roots are reaped before Nix GC.** With
-  `nix.reap_stale_gc_roots: true` the nix plugin removes, before its dry-run
-  preflight, nix-direnv roots of a checkout not loaded within
+- **Stale indirect GC roots are unregistered before Nix GC.** With
+  `nix.reap_stale_gc_roots: true` the nix plugin, before its dry-run
+  preflight, unregisters nix-direnv roots of a checkout not loaded within
   `nix.direnv_gc_root_stale_after` (default 7d) or no longer a git checkout,
   and store out-links under `nix.temp_gc_root_paths` (default
   `dev_artifacts.temp_scan_paths`) older than `nix.temp_gc_root_stale_after`
-  (default 72h). Only owned symlinks into the store are removed; roots under a
-  `gcroots` or `profiles` path component and Bazel rules_nixpkgs out-links are
-  never touched. Off by default. The nix-direnv flake-input roots pin flake
-  sources, which a host that keeps only outputs should not retain.
+  (default 72h). It removes only the `/nix/var/nix/gcroots/auto` entry,
+  through `nix.gc_root_unregister_command` (the directory is root-owned), and
+  never deletes the out-link, so agent-session trees and `.direnv`
+  directories keep every file. Roots under a `gcroots` or `profiles` path
+  component and Bazel rules_nixpkgs out-links are never touched. Off by
+  default, and report-only without a command. The nix-direnv flake-input
+  roots pin flake sources, which a host that keeps only outputs should not
+  retain.
 
 ### Fixed
 

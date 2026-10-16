@@ -712,22 +712,29 @@ type NixConfig struct {
 	MaxGCDuration string `yaml:"max_gc_duration"`
 	// RootAttributionLimit limits visible GC root targets in low-reclaim dry-runs.
 	RootAttributionLimit int `yaml:"root_attribution_limit"`
-	// ReapStaleGCRoots removes stale indirect GC roots the daemon user owns
-	// before each Nix GC pass: nix-direnv roots (.direnv/flake-profile-*,
+	// ReapStaleGCRoots unregisters stale indirect GC roots the daemon user
+	// owns before each Nix GC pass: nix-direnv roots (.direnv/flake-profile-*,
 	// .direnv/flake-inputs/*) of a checkout not loaded within
 	// direnv_gc_root_stale_after or no longer a git checkout, and store
 	// out-links under temp_gc_root_paths older than temp_gc_root_stale_after.
+	// Only the /nix/var/nix/gcroots/auto entry is removed, through
+	// gc_root_unregister_command; the out-link itself is never touched.
 	// Roots under a "gcroots" or "profiles" path component are never touched.
 	ReapStaleGCRoots bool `yaml:"reap_stale_gc_roots"`
 	// DirenvGCRootStaleAfter is how long a checkout's nix-direnv roots may go
-	// unloaded before they are removed (default 7d).
+	// unloaded before they are unregistered (default 7d).
 	DirenvGCRootStaleAfter string `yaml:"direnv_gc_root_stale_after"`
 	// TempGCRootStaleAfter is how old a temporary out-link may be before it is
-	// removed (default 72h).
+	// unregistered (default 72h).
 	TempGCRootStaleAfter string `yaml:"temp_gc_root_stale_after"`
 	// TempGCRootPaths are the directories under which an out-link counts as
 	// temporary. Empty means dev_artifacts.temp_scan_paths.
 	TempGCRootPaths []string `yaml:"temp_gc_root_paths"`
+	// GCRootUnregisterCommand is the argv prefix that unregisters one stale
+	// root; the /nix/var/nix/gcroots/auto entry name is appended. The auto
+	// directory is root-owned, so this is normally a sudo -n helper. Empty
+	// means report only. The reaper never deletes the out-link itself.
+	GCRootUnregisterCommand []string `yaml:"gc_root_unregister_command"`
 }
 
 // ICloudConfig holds iCloud-specific cleanup settings (Darwin).

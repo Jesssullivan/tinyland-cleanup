@@ -12,14 +12,24 @@
 //   - temporary out-links: `nix build` results and qualification roots left
 //     under temporary directories.
 //
-// The reaper only removes symlinks the daemon user owns that point into the
-// Nix store. It never removes a directory that holds anything but such links,
-// and it never touches a root under a path component named "gcroots" (named,
+// The reaper never deletes, moves or rewrites a user's file. It unpins a stale
+// root by unregistering it: removing only its /nix/var/nix/gcroots/auto/<hash>
+// entry, which is the indirection the collector follows. The out-link itself
+// stays where it is, so agent-session trees (TIN-5268) and .direnv
+// directories keep every file; the link simply dangles once the collector has
+// taken the store path, and nix-direnv treats a dangling profile as an
+// invalid cache. The auto directory is root-owned, so unregistering runs
+// nix.gc_root_unregister_command (for example a sudo -n helper) with the
+// entry's name; without one the reaper only reports.
+//
+// Only out-links the daemon user owns that select a store path are
+// considered, and never one under a path component named "gcroots" (named,
 // deliberate pins such as gcroots/<ticket>/...) or "profiles" (profile
 // generations), or a rules_nixpkgs out-link inside a Bazel output base.
 package plugins
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -40,14 +50,17 @@ const (
 	nixDefaultTempGCRootStaleAfter    = 72 * time.Hour
 	nixStaleGCRootClassDirenv         = "direnv_root"
 	nixStaleGCRootClassTemporary      = "temporary_root"
-	nixStaleGCRootActionRemove        = "remove_stale_gc_root"
+	nixStaleGCRootActionRemove        = "unregister_stale_gc_root"
+	nixGCRootUnregisterTimeout        = 30 * time.Second
 	nixStaleGCRootActionKeep          = "keep_gc_root"
 	nixBazelRulesNixpkgsOutLinkSuffix = "/bazel-support/nix-out-link"
 )
 
 // nixStaleGCRoot is one indirect root the reaper classified.
 type nixStaleGCRoot struct {
-	// Link is the out-link path the auto root points at.
+	// AutoLink is the /nix/var/nix/gcroots/auto entry that registers Link.
+	AutoLink string
+	// Link is the out-link path the auto root points at. It is never touched.
 	Link string
 	// StorePath is the store path the out-link selects.
 	StorePath string
@@ -123,6 +136,7 @@ func (r nixGCRootReaper) collect(tempDirs []string, direnvStaleAfter, tempStaleA
 	}
 
 	type direnvLink struct {
+		autoLink  string
 		link      string
 		storePath string
 		modTime   time.Time
@@ -149,13 +163,13 @@ func (r nixGCRootReaper) collect(tempDirs []string, direnvStaleAfter, tempStaleA
 		}
 
 		if direnvDir, ok := nixDirenvRootDir(link); ok {
-			direnvGroups[direnvDir] = append(direnvGroups[direnvDir], direnvLink{link: link, storePath: storePath, modTime: info.ModTime()})
+			direnvGroups[direnvDir] = append(direnvGroups[direnvDir], direnvLink{autoLink: autoLink, link: link, storePath: storePath, modTime: info.ModTime()})
 			continue
 		}
 
 		if nixPathUnderAny(link, tempDirs) {
 			age := r.now.Sub(info.ModTime())
-			root := nixStaleGCRoot{Link: link, StorePath: storePath, Class: nixStaleGCRootClassTemporary}
+			root := nixStaleGCRoot{AutoLink: autoLink, Link: link, StorePath: storePath, Class: nixStaleGCRootClassTemporary}
 			if age >= tempStaleAfter {
 				root.Stale = true
 				root.Reason = fmt.Sprintf("temporary out-link unchanged for %s (threshold %s)", age.Round(time.Minute), tempStaleAfter)
@@ -195,7 +209,7 @@ func (r nixGCRootReaper) collect(tempDirs []string, direnvStaleAfter, tempStaleA
 			reason = fmt.Sprintf("nix-direnv roots for %s loaded %s ago, inside %s", checkout, age.Round(time.Minute), direnvStaleAfter)
 		}
 		for _, l := range links {
-			roots = append(roots, nixStaleGCRoot{Link: l.link, StorePath: l.storePath, Class: nixStaleGCRootClassDirenv, Stale: stale, Reason: reason})
+			roots = append(roots, nixStaleGCRoot{AutoLink: l.autoLink, Link: l.link, StorePath: l.storePath, Class: nixStaleGCRootClassDirenv, Stale: stale, Reason: reason})
 		}
 	}
 
@@ -226,22 +240,34 @@ func (r nixGCRootReaper) ownedStoreLink(link string) (string, os.FileInfo, bool)
 	return dest, info, true
 }
 
-// remove deletes one selected link after re-checking that it is still an
-// owned symlink into the store. It never removes anything else.
-func (r nixGCRootReaper) remove(root nixStaleGCRoot) error {
+// unregister removes only the auto entry for one selected root, through the
+// configured command, after re-checking that the entry still names the same
+// out-link and the out-link still selects the same store path. The out-link
+// is never touched.
+func (r nixGCRootReaper) unregister(ctx context.Context, command []string, root nixStaleGCRoot) error {
+	if len(command) == 0 {
+		return fmt.Errorf("no gc_root_unregister_command configured")
+	}
+	if filepath.Dir(root.AutoLink) != filepath.Clean(r.autoDir) {
+		return fmt.Errorf("gc root %s is not an entry of %s", root.AutoLink, r.autoDir)
+	}
+	current, err := os.Readlink(root.AutoLink)
+	if err != nil || filepath.Clean(current) != root.Link {
+		return fmt.Errorf("auto root %s changed since classification", root.AutoLink)
+	}
 	storePath, _, ok := r.ownedStoreLink(root.Link)
 	if !ok || storePath != root.StorePath {
 		return fmt.Errorf("gc root %s changed since classification", root.Link)
 	}
-	if err := os.Remove(root.Link); err != nil {
-		return err
+	runCtx, cancel := context.WithTimeout(ctx, nixGCRootUnregisterTimeout)
+	defer cancel()
+	args := append(append([]string{}, command[1:]...), filepath.Base(root.AutoLink))
+	output, err := commandContext(runCtx, command[0], args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s failed: %w: %s", command[0], err, strings.TrimSpace(string(output)))
 	}
-	if root.Class == nixStaleGCRootClassDirenv {
-		// An emptied flake-inputs directory goes too; a non-empty one stays.
-		parent := filepath.Dir(root.Link)
-		if filepath.Base(parent) == "flake-inputs" {
-			_ = os.Remove(parent)
-		}
+	if _, err := os.Lstat(root.AutoLink); !os.IsNotExist(err) {
+		return fmt.Errorf("auto root %s still present after %s", root.AutoLink, command[0])
 	}
 	return nil
 }
@@ -343,16 +369,19 @@ func (p *NixPlugin) planStaleGCRoots(cfg *config.Config) ([]CleanupTarget, map[s
 		}
 	}
 	metadata["stale_gc_roots"] = strconv.Itoa(stale)
+	metadata["gc_root_unregister_configured"] = strconv.FormatBool(len(cfg.Nix.GCRootUnregisterCommand) > 0)
 	metadata["classified_gc_roots"] = strconv.Itoa(len(roots))
 	return nixStaleGCRootTargets(roots), metadata, nil
 }
 
-// reapStaleGCRoots removes the stale roots before GC and returns how many it
-// removed. Failure to read the auto directory skips reaping; GC still runs.
-func (p *NixPlugin) reapStaleGCRoots(cfg *config.Config, logger *slog.Logger) int {
+// reapStaleGCRoots unregisters the stale roots before GC and returns how many
+// it unregistered. Failure to read the auto directory skips reaping; GC still
+// runs. Without an unregister command it reports and changes nothing.
+func (p *NixPlugin) reapStaleGCRoots(ctx context.Context, cfg *config.Config, logger *slog.Logger) int {
 	if !cfg.Nix.ReapStaleGCRoots {
 		return 0
 	}
+	command := cfg.Nix.GCRootUnregisterCommand
 	reaper := p.gcRootReaper()
 	roots, err := reaper.collect(nixStaleGCRootTempDirs(cfg), nixDirenvGCRootStaleAfter(cfg.Nix), nixTempGCRootStaleAfter(cfg.Nix))
 	if err != nil {
@@ -364,12 +393,16 @@ func (p *NixPlugin) reapStaleGCRoots(cfg *config.Config, logger *slog.Logger) in
 		if !root.Stale {
 			continue
 		}
-		if err := reaper.remove(root); err != nil {
-			logger.Warn("kept Nix GC root", "link", root.Link, "error", err)
+		if len(command) == 0 {
+			logger.Info("stale Nix GC root left registered; no gc_root_unregister_command", "class", root.Class, "link", root.Link, "reason", root.Reason)
+			continue
+		}
+		if err := reaper.unregister(ctx, command, root); err != nil {
+			logger.Warn("kept Nix GC root registered", "link", root.Link, "error", err)
 			continue
 		}
 		removed++
-		logger.Info("removed stale Nix GC root", "class", root.Class, "link", root.Link, "store_path", root.StorePath, "reason", root.Reason)
+		logger.Info("unregistered stale Nix GC root; the out-link is untouched", "class", root.Class, "auto_root", root.AutoLink, "link", root.Link, "store_path", root.StorePath, "reason", root.Reason)
 	}
 	return removed
 }

@@ -219,17 +219,22 @@ nix:
   # GC roots so operators can identify what is pinning the store. Set 0 to
   # disable root attribution.
   root_attribution_limit: 20
-  # Stale indirect GC roots, removed before each Nix GC pass when enabled.
-  # nix-direnv roots of a checkout not loaded within direnv_gc_root_stale_after
-  # (nix-direnv touches them on every cached load) or no longer a git
-  # checkout, and store out-links under temp_gc_root_paths (default:
-  # dev_artifacts.temp_scan_paths) older than temp_gc_root_stale_after. Only
-  # symlinks the daemon user owns that point into the store are removed; a
-  # root under a "gcroots" or "profiles" path component is never touched.
+  # Stale indirect GC roots, unregistered before each Nix GC pass when
+  # enabled: nix-direnv roots of a checkout not loaded within
+  # direnv_gc_root_stale_after (nix-direnv touches them on every cached load)
+  # or no longer a git checkout, and store out-links under temp_gc_root_paths
+  # (default: dev_artifacts.temp_scan_paths) older than
+  # temp_gc_root_stale_after. Only the /nix/var/nix/gcroots/auto entry is
+  # removed, by gc_root_unregister_command with the entry name appended (the
+  # auto directory is root-owned, so normally a sudo -n helper); the out-link
+  # file is never deleted, so agent-session and .direnv trees keep every file.
+  # Without a command the reaper only reports. Roots under a "gcroots" or
+  # "profiles" path component are never touched.
   reap_stale_gc_roots: false
   direnv_gc_root_stale_after: 7d
   temp_gc_root_stale_after: 72h
   temp_gc_root_paths: []
+  gc_root_unregister_command: []
 
 # Structural Bazel output-base reaper (R-C644, R-C645). Level independent:
 # it runs whatever the host cleanup level and applies its own per-mount

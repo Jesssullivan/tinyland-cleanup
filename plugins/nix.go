@@ -246,7 +246,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 
 	// Stale indirect roots go before the preflight so the dry-run and the GC
 	// both see what they no longer pin.
-	rootsRemoved := p.reapStaleGCRoots(cfg, logger)
+	rootsRemoved := p.reapStaleGCRoots(ctx, cfg, logger)
 	result.ItemsCleaned += rootsRemoved
 
 	dryRunOutput, dryRunErr := p.collectGarbageDryRun(ctx, cfg.Nix)
@@ -812,7 +812,7 @@ func nixDeferralTarget(targetType string, name string, action string, active boo
 func nixPlanSteps(level CleanupLevel, cfg config.NixConfig) []string {
 	steps := []string{
 		"Inspect active Nix, Home Manager, and rebuild processes before locking the store",
-		"Remove stale nix-direnv and temporary out-link GC roots the daemon user owns when reap_stale_gc_roots=true",
+		"Unregister stale nix-direnv and temporary out-link GC roots (auto entry only; out-links untouched) when reap_stale_gc_roots=true",
 		"Run nix-collect-garbage --dry-run to estimate reclaimable store paths",
 		"List user and system profile generations and apply minimum-retention policy",
 		"Preserve current profile generations and visible system generations by default",
