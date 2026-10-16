@@ -243,19 +243,21 @@ nix:
   agent_tree_idle_after: 7d
   # Cadence. The nix plugin runs every poll: it collects under pressure and at
   # least every periodic_gc_interval (empty: never without pressure), never
-  # twice within min_gc_interval, even at critical. gc_state_file keeps the
-  # last pass across restarts (empty: in memory).
+  # twice within min_gc_interval, even at critical, and never more than
+  # max_freed_per_pass in one pass (bytes or K/M/G/T; "0": unbounded).
+  # gc_state_file keeps the last pass across restarts (empty: in memory).
   periodic_gc_interval: ""
   min_gc_interval: 30m
+  max_freed_per_pass: 50G
   gc_state_file: ""
   # Hook-path safety. Every /nix/store path these files reference (Claude
-  # settings.json, Codex config) is rooted under hook_pin_dir before each GC
+  # settings.json, Codex config) is rooted under hook_pin_dir on every poll
   # and released only once no session in hook_pin_session_comms that started
   # while it was referenced is alive. hook_pin_required refuses a GC pass
   # whose pins could not be established.
   hook_pin_files: []
   hook_pin_dir: ~/.local/state/tinyland-cleanup/gcroots/hook-pins
-  hook_pin_session_comms: ["claude", "codex"]
+  hook_pin_session_comms: ["claude", "codex", "pi", "opencode"]
   hook_pin_required: false
 
 # Structural Bazel output-base reaper (R-C644, R-C645). Level independent:

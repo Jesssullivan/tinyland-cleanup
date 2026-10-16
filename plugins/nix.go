@@ -102,6 +102,7 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 			"skip_when_daemon_busy":                                  strconv.FormatBool(cfg.Nix.SkipWhenDaemonBusy),
 			"daemon_busy_backoff":                                    cfg.Nix.DaemonBusyBackoff,
 			"max_gc_duration":                                        cfg.Nix.MaxGCDuration,
+			"max_freed_per_pass":                                     cfg.Nix.MaxFreedPerPass,
 			"host_measure_path":                                      nixHostMeasurePath(cfg.Nix),
 			"root_attribution_limit":                                 strconv.Itoa(nixRootAttributionLimit(cfg.Nix)),
 			"generation_policy_delete_older_than_level":              nixGenerationPolicyAge(level, cfg.Nix),
@@ -209,9 +210,10 @@ func nixDeferPlan(plan *CleanupPlan, skipReason string, summary string, cfg conf
 }
 
 // Cleanup runs every poll (the plugin is level-independent). It rewrites the
-// stale GC root candidate list, then collects when nixGCDue says so: under
-// pressure or on the periodic interval, never within min_gc_interval of the
-// last pass (R-C796), and only once hook paths are pinned (H1).
+// stale GC root candidate list and refreshes the hook-path pins, then
+// collects when nixGCDue says so: under pressure or on the periodic interval,
+// never within min_gc_interval of the last pass (R-C796), and only once hook
+// paths are pinned (H1).
 func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{
 		Plugin: p.Name(),
@@ -221,6 +223,16 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 	// Rewritten every poll while reaping is on, empty when nothing is stale,
 	// so the root job never replays an old list (review H2).
 	p.publishStaleGCRootCandidates(cfg, logger)
+
+	// Pins are refreshed every poll, not only when a GC is due: two
+	// hook-changing switches inside one GC gap would otherwise replace the
+	// middle hook path before any refresh saw it, and a session started
+	// under it would lose it to the next GC (re-review N1). A poll observes
+	// every path that stayed referenced for at least one poll interval.
+	pinErr := p.refreshHookPins(ctx, cfg.Nix, logger)
+	if pinErr != nil {
+		logger.Warn("hook-path pins could not be established", "error", pinErr)
+	}
 
 	statePath := nixGCStatePath(cfg.Nix)
 	st := loadNixGCState(statePath)
@@ -232,12 +244,9 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		logger.Debug("Nix GC not due", "reason", why, "last_gc_attempt", st.LastGCAttempt)
 		return result
 	}
-	if err := p.refreshHookPins(ctx, cfg.Nix, logger); err != nil {
-		if cfg.Nix.HookPinRequired {
-			logger.Warn("skipping Nix GC: hook-path pins could not be established", "error", err)
-			return result
-		}
-		logger.Warn("hook-path pins could not be established", "error", err)
+	if pinErr != nil && cfg.Nix.HookPinRequired {
+		logger.Warn("skipping Nix GC: hook-path pins could not be established", "error", pinErr)
+		return result
 	}
 	gcResult, attempted := p.runGC(ctx, gcLevel, cfg, logger)
 	if attempted {
@@ -397,6 +406,11 @@ func (p *NixPlugin) planGCRootAttribution(ctx context.Context, cfg config.NixCon
 func (p *NixPlugin) collectGarbage(ctx context.Context, level CleanupLevel, args []string, cfg config.NixConfig, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: p.Name(), Level: level}
 
+	// Re-review N3: bound every pass. The first pass after a switch can
+	// otherwise delete a whole host's backlog at once inside nix-daemon,
+	// outside this unit's Nice and idle IO class; the next pass continues
+	// after min_gc_interval.
+	args = append(append([]string{}, args...), nixMaxFreedArgs(cfg, logger)...)
 	logger.Debug("running nix-collect-garbage", "args", strings.Join(args, " "))
 	measurePath := nixHostMeasurePath(cfg)
 	before, beforeOK := p.measureFreeDiskSpace(measurePath, logger)

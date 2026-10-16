@@ -9,9 +9,10 @@ All notable changes to this project will be documented in this file.
 - **Nix GC cadence.** The nix plugin is level-independent: it collects under
   pressure and at least every `nix.periodic_gc_interval`, and never twice
   within `nix.min_gc_interval` (default 30m), even at critical.
+  `nix.max_freed_per_pass` (default 50G, `--max-freed`) bounds each pass.
 - **Hook-path safety.** `nix.hook_pin_files` (Claude `settings.json`, Codex
   config): every store path they reference is rooted under
-  `nix.hook_pin_dir` before each GC and released only once no session that
+  `nix.hook_pin_dir` on every poll and released only once no session that
   started while it was referenced is alive. `nix.hook_pin_required` refuses a
   GC pass whose pins could not be established.
 - **Root jobs, no sudo.** `tinyland-cleanup gcroot-unregister` (with

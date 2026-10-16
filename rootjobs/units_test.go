@@ -70,3 +70,32 @@ func TestGCRootUnregisterUnitIsConfinedAndKeepsTmpVisible(t *testing.T) {
 		}
 	}
 }
+
+// Re-review N5: profile-prune runs runuser and nix-env as root, so it keeps
+// the filesystem writable, but needs no network, kernel or cgroup writes.
+func TestProfilePruneUnitIsConfined(t *testing.T) {
+	lines := unitLines(readUnit(t, "tinyland-cleanup-profile-prune.service"))
+	for key, want := range map[string]string{
+		"NoNewPrivileges":         "yes",
+		"PrivateNetwork":          "yes",
+		"RestrictAddressFamilies": "AF_UNIX AF_NETLINK",
+		"ProtectKernelTunables":   "yes",
+		"ProtectKernelModules":    "yes",
+		"ProtectKernelLogs":       "yes",
+		"ProtectControlGroups":    "yes",
+		"LockPersonality":         "yes",
+		"SystemCallArchitectures": "native",
+	} {
+		if got := lines[key]; len(got) != 1 || got[0] != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	for _, forbidden := range []string{"ProtectHome", "ProtectSystem", "CapabilityBoundingSet"} {
+		if _, ok := lines[forbidden]; ok {
+			t.Fatalf("%s would stop runuser or nix-env from pruning profiles", forbidden)
+		}
+	}
+	if exec := lines["ExecStart"]; len(exec) != 1 || !strings.HasPrefix(exec[0], "@bindir@/tinyland-cleanup profile-prune ") {
+		t.Fatalf("ExecStart must run this package's binary: %q", exec)
+	}
+}

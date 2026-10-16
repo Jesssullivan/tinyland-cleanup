@@ -58,6 +58,21 @@ func nixOwnProcs() ([]string, error) {
 	return dirs, nil
 }
 
+// nixSessionName strips what Nix wrappers add to a session's name: a
+// leading "." and a "-wrapped" or "-unwrapped" suffix, which the 15-byte
+// comm may truncate (".claude-unwrapp" is claude).
+func nixSessionName(name string) string {
+	name = strings.TrimPrefix(name, ".")
+	for _, suffix := range []string{"-unwrapp", "-wrapp"} {
+		if i := strings.Index(name, suffix); i > 0 {
+			return name[:i]
+		}
+	}
+	return name
+}
+
+// nixProcMatches reports whether a process is a session: argv[0], the
+// basename of a script's argv[1], or the comm names one of comms.
 func nixProcMatches(dir string, comms map[string]bool) bool {
 	raw, err := os.ReadFile(filepath.Join(dir, "cmdline"))
 	if err != nil {
@@ -68,12 +83,13 @@ func nixProcMatches(dir string, comms map[string]bool) bool {
 		if i > 1 {
 			break
 		}
-		if comms[filepath.Base(string(arg))] {
+		base := filepath.Base(string(arg))
+		if comms[base] || comms[nixSessionName(base)] {
 			return true
 		}
 	}
 	comm, _ := procCommState(dir)
-	return comms[comm]
+	return comm != "" && (comms[comm] || comms[nixSessionName(comm)])
 }
 
 func nixProcStart(dir string, boot time.Time) (time.Time, bool) {

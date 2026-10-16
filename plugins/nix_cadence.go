@@ -5,12 +5,18 @@ package plugins
 //   - under pressure (warning and above), and
 //   - periodically, at least every nix.periodic_gc_interval, whatever the
 //     pressure (a plain GC, no generation deletion),
-// but never twice within nix.min_gc_interval, even at critical.
+// but never twice within nix.min_gc_interval, even at critical, and never
+// more than nix.max_freed_per_pass in one pass.
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
@@ -87,4 +93,50 @@ func nixGCDue(level CleanupLevel, cfg config.NixConfig, st nixGCState, now time.
 		return LevelWarning, "periodic"
 	}
 	return LevelNone, "not_due"
+}
+
+// nixDefaultMaxFreedPerPass is the bound an invalid max_freed_per_pass falls
+// back to (50 GiB, the retired lab weekly lane's cap).
+const nixDefaultMaxFreedPerPass = int64(50) << 30
+
+// nixParseMaxFreed reads max_freed_per_pass: bytes, or a number with a
+// binary K, M, G or T suffix as nix-collect-garbage --max-freed takes it.
+// Empty or 0 is unbounded.
+func nixParseMaxFreed(raw string) (int64, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, nil
+	}
+	shift := 0
+	switch strings.ToUpper(s[len(s)-1:]) {
+	case "K":
+		shift = 10
+	case "M":
+		shift = 20
+	case "G":
+		shift = 30
+	case "T":
+		shift = 40
+	}
+	if shift > 0 {
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 || n > (math.MaxInt64>>shift) {
+		return 0, fmt.Errorf("max_freed_per_pass %q is not a byte count", raw)
+	}
+	return n << shift, nil
+}
+
+// nixMaxFreedArgs returns the --max-freed bound for one GC pass.
+func nixMaxFreedArgs(cfg config.NixConfig, logger *slog.Logger) []string {
+	n, err := nixParseMaxFreed(cfg.MaxFreedPerPass)
+	if err != nil {
+		logger.Warn("using the default per-pass GC bound", "error", err, "bytes", nixDefaultMaxFreedPerPass)
+		n = nixDefaultMaxFreedPerPass
+	}
+	if n == 0 {
+		return nil
+	}
+	return []string{"--max-freed", strconv.FormatInt(n, 10)}
 }

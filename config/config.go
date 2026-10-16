@@ -749,6 +749,11 @@ type NixConfig struct {
 	// MinGCInterval is the least time between two Nix GC passes, applied
 	// even at critical (default 30m).
 	MinGCInterval string `yaml:"min_gc_interval"`
+	// MaxFreedPerPass bounds one Nix GC pass (nix-collect-garbage
+	// --max-freed): bytes, or a number with a binary K/M/G/T suffix. The next
+	// pass continues after MinGCInterval. Empty or "0" is unbounded; an
+	// invalid value uses the 50G default.
+	MaxFreedPerPass string `yaml:"max_freed_per_pass"`
 	// GCStateFile records the last Nix GC pass for the two intervals above,
 	// so they survive a daemon restart. Empty keeps it in memory only.
 	GCStateFile string `yaml:"gc_state_file"`
@@ -1095,8 +1100,9 @@ func DefaultConfig() *Config {
 			AgentTreePrefixes:                             []string{"claude-*", "codex*", ".tmp*"},
 			AgentTreeIdleAfter:                            "7d",
 			MinGCInterval:                                 "30m",
+			MaxFreedPerPass:                               "50G",
 			HookPinDir:                                    filepath.Join(home, ".local", "state", "tinyland-cleanup", "gcroots", "hook-pins"),
-			HookPinSessionComms:                           []string{"claude", "codex"},
+			HookPinSessionComms:                           []string{"claude", "codex", "pi", "opencode"},
 		},
 		Lima: LimaConfig{
 			VMNames: []string{"colima", "unified"},

@@ -382,6 +382,7 @@ go_test(
             "plugins/bazel_bases_linux_test.go",
             "plugins/github_runner_linux_test.go",
             "plugins/nix_process_argv_linux_test.go",
+            "plugins/nix_sessions_linux_test.go",
         ],
         "//conditions:default": ["plugins/github_runner_linux_test.go"],
     }),

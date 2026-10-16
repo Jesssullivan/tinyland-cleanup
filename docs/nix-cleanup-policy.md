@@ -70,10 +70,11 @@ nix:
   agent_tree_idle_after: 7d
   periodic_gc_interval: ""
   min_gc_interval: 30m
+  max_freed_per_pass: 50G
   gc_state_file: ""
   hook_pin_files: []
   hook_pin_dir: ~/.local/state/tinyland-cleanup/gcroots/hook-pins
-  hook_pin_session_comms: ["claude", "codex"]
+  hook_pin_session_comms: ["claude", "codex", "pi", "opencode"]
   hook_pin_required: false
 ```
 
@@ -83,17 +84,27 @@ is stale), then collects when due: under pressure (warning and above), or
 when `periodic_gc_interval` has passed since the last pass whatever the
 pressure (a plain GC). It never collects twice within `min_gc_interval`,
 even at critical, so a host above its critical line is not collected every
-poll. `gc_state_file` keeps the last pass across daemon restarts.
+poll. One pass frees at most `max_freed_per_pass` (default 50G, passed as
+`nix-collect-garbage --max-freed`; "0" is unbounded), so the first pass on a
+host with a large backlog does not delete it all at once inside nix-daemon;
+the next pass continues after `min_gc_interval`. `gc_state_file` keeps the
+last pass across daemon restarts.
 
 Hook-path safety. Claude Code and Codex snapshot their hook commands at
 session start, and a hook named by `/nix/store` path is executed from that
 path for the whole session without being held open, so Nix's runtime roots
-do not protect it. Before every pass the plugin roots each store path that a
-`hook_pin_files` file references, under `hook_pin_dir` (which must have a
+do not protect it. On every poll, whether or not a pass is due, the plugin
+roots each store path that a `hook_pin_files` file references, under `hook_pin_dir` (which must have a
 `gcroots` path component, so the reaper never lists it). A path the files no
 longer reference is released only once no live process named in
 `hook_pin_session_comms` started before it stopped being referenced; when
-sessions cannot be inspected every pin is kept. With `hook_pin_required` a
+sessions cannot be inspected every pin is kept. A name matches argv[0], the
+basename of a script's argv[1], or the comm, with a leading `.` and a
+`-wrapped`/`-unwrapped` suffix (Nix wrappers) ignored. Refreshing every poll
+means any path that stayed referenced for one poll interval is pinned, even
+when two switches replace hooks inside one GC gap. A session that predates
+the first refresh is covered only if its hook paths are still the current
+ones then. With `hook_pin_required` a
 pass whose pins could not be established does not collect.
 
 Root jobs (no sudo rule). The package ships units under

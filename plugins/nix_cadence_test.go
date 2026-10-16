@@ -141,3 +141,115 @@ func TestNixCleanupSkipsGCWhenRequiredHookPinsFail(t *testing.T) {
 		t.Fatalf("no GC may run without its hook pins: %q", got)
 	}
 }
+
+// Re-review N1: pins are refreshed every poll, so a hook path that two
+// switches replace inside one GC gap is still pinned while the session
+// started under it lives.
+func TestNixHookPinsRefreshEveryPollEvenWhenGCNotDue(t *testing.T) {
+	calls := fakeNixGC(t)
+	home := t.TempDir()
+	settings := filepath.Join(home, "settings.json")
+	write := func(ref string) {
+		t.Helper()
+		if err := os.WriteFile(settings, []byte(`{"command":"`+ref+`/bin/hook"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const (
+		p1 = "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-hook-1"
+		p2 = "/nix/store/1123456789abcdfghijklmnpqrsvwxyz-hook-2"
+		p3 = "/nix/store/2123456789abcdfghijklmnpqrsvwxyz-hook-3"
+	)
+	cfg := config.DefaultConfig()
+	cfg.Nix.SkipWhenDaemonBusy = false
+	cfg.Nix.HostMeasurePath = t.TempDir()
+	cfg.Nix.PeriodicGCInterval = "4h"
+	cfg.Nix.MinGCInterval = "30m"
+	cfg.Nix.GCStateFile = filepath.Join(t.TempDir(), "nix-gc-state.json")
+	cfg.Nix.HookPinFiles = []string{settings}
+	cfg.Nix.HookPinDir = filepath.Join(home, "gcroots", "hook-pins")
+	cfg.Nix.HookPinRequired = true
+
+	now := time.Now()
+	var starts []time.Time
+	p := NewNixPlugin()
+	p.now = func() time.Time { return now }
+	p.lastGCAttempt = now // a pass just ran: GC is not due for the whole test
+	p.hookValid = func(context.Context, string) bool { return true }
+	p.hookAddRoot = func(_ context.Context, link, storePath string) error { return os.Symlink(storePath, link) }
+	p.hookSessionStarts = func([]string) ([]time.Time, error) { return starts, nil }
+	pinned := func(ref string) bool {
+		dest, err := os.Readlink(filepath.Join(cfg.Nix.HookPinDir, filepath.Base(ref)))
+		return err == nil && dest == ref
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	poll := func(level CleanupLevel) {
+		now = now.Add(5 * time.Minute)
+		p.Cleanup(context.Background(), level, cfg, logger)
+	}
+
+	write(p1)
+	poll(LevelNone)
+	write(p2) // switch A
+	poll(LevelNone)
+	starts = []time.Time{now} // a session starts under A
+	write(p3)                 // switch B, inside the same GC gap
+	poll(LevelCritical)       // held by min_gc_interval, but pins refresh
+	if got := gcCalls(t, calls); len(got) != 0 {
+		t.Fatalf("no GC is due inside the gap: %q", got)
+	}
+	if !pinned(p2) {
+		t.Fatal("the middle hook path stays pinned while the session started under it lives")
+	}
+	if !pinned(p3) {
+		t.Fatal("the current hook path is pinned")
+	}
+	if pinned(p1) {
+		t.Fatal("a path no live session started under is released")
+	}
+}
+
+// Re-review N3: every pass is bounded by max_freed_per_pass.
+func TestNixCollectGarbageBoundsEachPass(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"50G", "--max-freed 53687091200"},
+		{"10737418240", "--max-freed 10737418240"},
+		{"512M", "--max-freed 536870912"},
+		{"0", ""},
+		{"", ""},
+		{"lots", "--max-freed 53687091200"}, // invalid: the default bound, never unbounded
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			calls := fakeNixGC(t)
+			cfg := config.DefaultConfig().Nix
+			cfg.HostMeasurePath = t.TempDir()
+			cfg.MaxFreedPerPass = tc.raw
+			p := NewNixPlugin()
+			p.collectGarbage(context.Background(), LevelWarning, nil, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if got := gcCalls(t, calls); len(got) != 1 || got[0] != "call:"+tc.want {
+				t.Fatalf("max_freed_per_pass %q: calls %q, want %q", tc.raw, got, "call:"+tc.want)
+			}
+		})
+	}
+	if got := config.DefaultConfig().Nix.MaxFreedPerPass; got != "50G" {
+		t.Fatalf("the default bound is 50G, got %q", got)
+	}
+}
+
+func TestNixCleanupBoundsTheFirstPassAtCritical(t *testing.T) {
+	calls := fakeNixGC(t)
+	cfg := config.DefaultConfig()
+	cfg.Nix.SkipWhenDaemonBusy = false
+	cfg.Nix.HostMeasurePath = t.TempDir()
+	cfg.Nix.MaxFreedPerPass = "1G"
+	p := NewNixPlugin()
+	p.Cleanup(context.Background(), LevelCritical, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got := gcCalls(t, calls)
+	if len(got) != 2 || got[0] != "call:--dry-run" || !strings.Contains(got[1], "--max-freed 1073741824") {
+		t.Fatalf("the critical pass is bounded: %q", got)
+	}
+}
