@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Darwin Nix GC readiness (lab R-C815).** `nix.gc_lock_file` serializes a
+  GC pass with a fallback collector through a shared flock(2) file, and
+  `nix.gc_defer_paths` defers a pass while a switch or delivery marker
+  exists. On Darwin, hook-pin session start times now come from `sysctl
+  kern.proc.uid` and `kern.procargs2`, so pins are released there as on
+  Linux instead of being kept forever.
 - **Nix GC cadence.** The nix plugin is level-independent: it collects under
   pressure and at least every `nix.periodic_gc_interval`, and never twice
   within `nix.min_gc_interval` (default 30m), even at critical.

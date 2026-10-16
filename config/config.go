@@ -772,6 +772,18 @@ type NixConfig struct {
 	// HookPinRequired refuses every Nix GC pass whose hook pins could not be
 	// established.
 	HookPinRequired bool `yaml:"hook_pin_required"`
+	// GCLockFile serializes Nix GC with the host's other store collectors.
+	// Before a pass the plugin takes a non-blocking flock(2) on this file
+	// (created 0600 if absent, in a 0700 directory; it must be a regular file
+	// the daemon user owns that no one else can read or write) and holds it
+	// until the pass ends. While another process holds it the pass is
+	// deferred to a later poll. Empty disables it.
+	GCLockFile string `yaml:"gc_lock_file"`
+	// GCDeferPaths defer a Nix GC pass while any of them exists: the mkdir
+	// locks and markers of switches, deliveries or other collectors. They are
+	// checked before the pass and again just before nix-collect-garbage.
+	// Nothing is created or removed.
+	GCDeferPaths []string `yaml:"gc_defer_paths"`
 }
 
 // ICloudConfig holds iCloud-specific cleanup settings (Darwin).
