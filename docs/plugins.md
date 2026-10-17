@@ -31,6 +31,7 @@ your config. The list below is the full registry.
 |---|---|
 | `github_runner` | GitHub Actions runner caches and work directories |
 | `yum` | DNF/YUM package caches |
+| `shm_scratch` | Off by default (`enable.shm_scratch`). Level-independent: removes top-level directories of tmpfs roots (default `/dev/shm`) idle past `shm_scratch.idle_after` (never under 24h) that no process holds by cwd, root, open file, memory mapping or command line; never files, other users' trees, Git trees or agent-session data; `mode: report` plans only (lab R-C856) |
 | `etcd` | Old etcd snapshots and WAL files; defrag when needed (disabled by default) |
 | `rke2` | RKE2/k3s containerd images, old pod logs, kubelet garbage (disabled by default) |
 

@@ -62,6 +62,10 @@ type Config struct {
 	// per-mount pressure instead of the host cleanup level.
 	BazelBases BazelBasesConfig `yaml:"bazel_bases"`
 
+	// ShmScratch configures the RAM-backed scratch reaper (lab R-C856): idle,
+	// unheld top-level directories of tmpfs roots such as /dev/shm.
+	ShmScratch ShmScratchConfig `yaml:"shm_scratch"`
+
 	// AgentSession extends the compiled-in TIN-5268 agent-session deny set.
 	// Configuration can only add to it; nothing can remove a compiled entry.
 	AgentSession AgentSessionConfig `yaml:"agent_session"`
@@ -202,6 +206,8 @@ type EnableFlags struct {
 	// When it is enabled in apply mode it owns output-base deletion and the
 	// bazel plugin keeps every output base it finds.
 	BazelBases bool `yaml:"bazel_bases"`
+	// ShmScratch for the RAM-backed scratch reaper (lab R-C856, Linux).
+	ShmScratch bool `yaml:"shm_scratch"`
 	// APFSSnapshots for APFS snapshot thinning (Darwin)
 	APFSSnapshots bool `yaml:"apfs_snapshots"`
 	// ArchiveLifecycle for retiring verified archive staging pre-images
@@ -535,6 +541,69 @@ type BazelBasesOwner struct {
 type BazelBasesKind struct {
 	IdleAfter         string `yaml:"idle_after"`
 	PressureIdleAfter string `yaml:"pressure_idle_after"`
+}
+
+// RAM-backed scratch reaper modes.
+const (
+	// ShmScratchModeReport plans only and removes nothing.
+	ShmScratchModeReport = "report"
+	// ShmScratchModeApply removes eligible directories.
+	ShmScratchModeApply = "apply"
+)
+
+// ShmScratchMinIdleAfter is the R-C856 floor: a tree idle for less than a
+// day is never touched.
+const ShmScratchMinIdleAfter = 24 * time.Hour
+
+// ShmScratchConfig configures the RAM-backed scratch reaper (lab R-C856,
+// TIN-5770). Top-level directories of each tmpfs root that have been idle
+// for idle_after and that no process holds (cwd, root, open file, memory
+// mapping or command line) are removed in apply mode. Files at the top level
+// are never touched.
+type ShmScratchConfig struct {
+	// Mode is "report" (plan only) or "apply" (remove eligible directories).
+	Mode string `yaml:"mode"`
+	// Roots are tmpfs directories whose top-level directories are inspected.
+	// A root on any other file system is skipped.
+	Roots []string `yaml:"roots"`
+	// IdleAfter is how long the newest change in a tree must be past (at
+	// least 24h, R-C856).
+	IdleAfter string `yaml:"idle_after"`
+	// MaxRootsPerCycle bounds the directories inspected per root per cycle
+	// (0 means no bound).
+	MaxRootsPerCycle int `yaml:"max_roots_per_cycle"`
+	// UninspectableOKComms are process names of this user whose fd tables may
+	// be unreadable without making the activity inventory incomplete.
+	UninspectableOKComms []string `yaml:"uninspectable_ok_comms"`
+}
+
+// Validate checks the shm_scratch section. It is called by LoadConfig when
+// the plugin is enabled, so a malformed policy refuses to load.
+func (c ShmScratchConfig) Validate() error {
+	switch c.Mode {
+	case ShmScratchModeReport, ShmScratchModeApply:
+	default:
+		return fmt.Errorf("shm_scratch.mode must be %q or %q, got %q", ShmScratchModeReport, ShmScratchModeApply, c.Mode)
+	}
+	if len(c.Roots) == 0 {
+		return fmt.Errorf("shm_scratch.roots must name at least one root")
+	}
+	for _, root := range c.Roots {
+		if !filepath.IsAbs(root) || filepath.Clean(root) == "/" {
+			return fmt.Errorf("shm_scratch root %q must be an absolute directory other than /", root)
+		}
+	}
+	idle, err := ParseDuration(c.IdleAfter)
+	if err != nil {
+		return fmt.Errorf("shm_scratch.idle_after: %w", err)
+	}
+	if idle < ShmScratchMinIdleAfter {
+		return fmt.Errorf("shm_scratch.idle_after %s is below the R-C856 floor %s", idle, ShmScratchMinIdleAfter)
+	}
+	if c.MaxRootsPerCycle < 0 {
+		return fmt.Errorf("shm_scratch.max_roots_per_cycle must not be negative")
+	}
+	return nil
 }
 
 // AgentSessionConfig extends the compiled-in TIN-5268 agent-session deny set.
@@ -1077,6 +1146,17 @@ func DefaultConfig() *Config {
 			OrphanStaleAfter:             "7d",
 			OrphanWorkspaceMountRoots:    defaultOrphanWorkspaceMountRoots(),
 		},
+		ShmScratch: ShmScratchConfig{
+			Mode:             ShmScratchModeReport,
+			Roots:            []string{"/dev/shm"},
+			IdleAfter:        "24h",
+			MaxRootsPerCycle: 256,
+			// The temp lane's reviewed list: same-user processes the kernel
+			// does not let this user inspect (the tailscaled SSH incubator,
+			// the systemd user manager and its (sd-pam) helper). None of
+			// them works inside /dev/shm.
+			UninspectableOKComms: []string{"tailscaled", "(sd-pam)", "sd-pam", "systemd"},
+		},
 		BazelBases: BazelBasesConfig{
 			Mode:                 BazelBasesModeReport,
 			Roots:                defaultBazelRoots(home),
@@ -1326,6 +1406,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Enable.BazelBases {
 		if err := config.BazelBases.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if config.Enable.ShmScratch {
+		if err := config.ShmScratch.Validate(); err != nil {
 			return nil, err
 		}
 	}
