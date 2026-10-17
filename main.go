@@ -1857,6 +1857,7 @@ func registerPlugins(registry *plugins.Registry) {
 	registry.Register(plugins.NewNixPlugin())
 	registry.Register(plugins.NewBazelPlugin())
 	registry.Register(plugins.NewBazelBasesPlugin())
+	registry.Register(plugins.NewShmScratchPlugin())
 	registry.Register(plugins.NewCachePlugin())
 
 	// Development artifact cleanup (all platforms)
