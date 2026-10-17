@@ -2,6 +2,7 @@ package rootjobs
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -222,11 +223,16 @@ func TestGCRootUnregisterRefusesPinsProfilesNonStoreAndMismatchedEntries(t *test
 	}
 }
 
-// Another user's out-link is refused: root's own profile links are owned by
-// uid 0 and point straight into the store.
+// Another user's out-link is refused. Root's profile links stand in for the
+// foreign link, and the test asserts the owner it reads from them, not uid 0.
+// That owner depends on the host. A Nix install made by a non-root user owns
+// all of /nix, root's profiles included: GloriousFlywheel runner images give
+// them uid 1001, and their unsandboxed nix build runs this test as nixbld1.
+// In a user namespace that does not map root, they read as the overflow uid.
 func TestGCRootUnregisterRefusesAnotherUsersLink(t *testing.T) {
 	matches, _ := filepath.Glob("/nix/var/nix/profiles/per-user/root/profile-*-link")
 	var foreign string
+	owner := -1
 	for _, m := range matches {
 		info, err := os.Lstat(m)
 		if err != nil {
@@ -234,8 +240,8 @@ func TestGCRootUnregisterRefusesAnotherUsersLink(t *testing.T) {
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
 		dest, _ := os.Readlink(m)
-		if ok && int(st.Uid) != os.Getuid() && strings.HasPrefix(dest, "/nix/store/") {
-			foreign = m
+		if ok && int(st.Uid) != os.Geteuid() && strings.HasPrefix(dest, "/nix/store/") {
+			foreign, owner = m, int(st.Uid)
 			break
 		}
 	}
@@ -246,8 +252,10 @@ func TestGCRootUnregisterRefusesAnotherUsersLink(t *testing.T) {
 	name := f.register(foreign, "")
 	f.writeList(time.Minute)
 	sum, out := f.run(false, "")
-	if sum.Removed != 0 || !f.registered(name) || !strings.Contains(out, "out-link is owned by uid 0") {
-		t.Fatalf("another user's link must be refused: %+v\n%s", sum, out)
+	// The list is created by this process, so its owner is the effective uid.
+	want := fmt.Sprintf("reason=out-link is owned by uid %d, not the list owner %d", owner, os.Geteuid())
+	if sum.Refused != 1 || sum.Removed != 0 || !f.registered(name) || !strings.Contains(out, want) {
+		t.Fatalf("another user's link must be refused with %q: %+v\n%s", want, sum, out)
 	}
 }
 

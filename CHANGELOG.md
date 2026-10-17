@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **The gcroot-unregister foreign-owner test reads the owner instead of
+  assuming uid 0.** `TestGCRootUnregisterRefusesAnotherUsersLink` uses
+  root's profile links as the foreign out-link and expected `owned by uid
+  0`. GloriousFlywheel runner images install Nix as uid 1001, so root's
+  profiles belong to uid 1001. Their unsandboxed `nix build` ran the test as
+  `nixbld1`. The helper refused the link correctly (`owned by uid 1001, not
+  the list owner 60801`), but the literal check failed the package's check
+  phase. Every `Nix package` CI run since #149 failed this way, as did lab's
+  x86_64 build. The test now asserts the owner it reads and exactly one
+  refusal. The refusal logic is unchanged.
 - **Active Nix work is an exact shape, not a "nix" prefix (lab R-C744,
   R-C797).** Only an exact client name with a store-writing argv shape
   defers a GC pass. `nixd`, `nixd-attrset-eval`, `nil`, `nix repl`, queries
