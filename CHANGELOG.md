@@ -20,6 +20,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **RAM-backed scratch reaper, `shm_scratch` (lab R-C856).** Off by
+  default. A level-independent Linux plugin that removes top-level
+  directories of tmpfs roots (default `/dev/shm`) whose newest change is
+  older than `shm_scratch.idle_after` (floor 24h) and that no process holds
+  through its cwd, root, an open file, a memory mapping or its command line.
+  An incomplete process inventory keeps everything; files, symlinks, other
+  users' trees, Git trees and agent-session data (TIN-5268) are never
+  touched; every check runs again just before removal; `mode: report` plans
+  only. On sting, 12 GiB of agent scratch in `/dev/shm` pinned 7.1 GiB of
+  RAM and kept the zram swap full.
+
 - **Darwin Nix GC readiness (lab R-C815).** `nix.gc_lock_file` serializes a
   GC pass with a fallback collector through a shared flock(2) file, and
   `nix.gc_defer_paths` defers a pass while a switch or delivery marker
