@@ -260,8 +260,10 @@ func rec(t *testing.T, state *cleanupState) byteProgressRecord {
 
 // TestPropertyByteBackoffSpacing simulates a daemon pinned under zero-yield
 // byte pressure for a random poll interval and duration. Once the no-progress
-// limit is reached, consecutive plugin runs are never closer than the backoff
-// interval and never further apart than the 30 minute cap plus one poll.
+// limit is reached, consecutive plugin runs are never closer than the
+// interval for that attempt (byteBackoffIntervalFor, which escalates from the
+// cooldown to the 30 minute cap) and never further apart than it plus one
+// poll.
 func TestPropertyByteBackoffSpacing(t *testing.T) {
 	property := func(pollMinutes, cycles uint8, cooldownMinutes uint16) bool {
 		poll := time.Duration(pollMinutes%30+1) * time.Minute
@@ -299,9 +301,16 @@ func TestPropertyByteBackoffSpacing(t *testing.T) {
 		if len(runs) < limit {
 			return false
 		}
+		// Run i starts with i no-progress attempts behind it, so it waits
+		// byteBackoffIntervalFor(i): the first engaged interval, doubled per
+		// further attempt and capped at byte_backoff_max (30m here).
 		for i := limit; i < len(runs); i++ {
 			gap := runs[i].Sub(runs[i-1])
-			if gap < interval || gap >= interval+poll {
+			want := d.byteBackoffIntervalFor(i)
+			if want < interval || want > 30*time.Minute {
+				return false
+			}
+			if gap < want || gap >= want+poll {
 				return false
 			}
 		}
