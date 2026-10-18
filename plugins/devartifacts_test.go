@@ -2637,3 +2637,53 @@ func TestRemoveDevArtifactPathWarnsOnceWhenUndeletableCacheIsFull(t *testing.T) 
 		t.Fatal("a path past the cache limit must not be remembered")
 	}
 }
+
+// Lab sting 2026-10-17: the deleting lanes walked the protected git
+// checkouts (about 7M files) and sized every node_modules there before
+// discarding it as protected. They now never enter a protected tree, and
+// what they delete is unchanged.
+func TestDeletingLanesDoNotWalkProtectedTrees(t *testing.T) {
+	p := NewDevArtifactsPlugin()
+	tmpDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	old := time.Now().Add(-60 * 24 * time.Hour)
+	makeProject := func(project string, files int) {
+		t.Helper()
+		for i := 0; i < files; i++ {
+			dir := filepath.Join(project, "node_modules", "pkg"+strconv.Itoa(1000+i))
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "index.js"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		pkg := filepath.Join(project, "package.json")
+		if err := os.WriteFile(pkg, []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(pkg, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	protectedRoot := filepath.Join(tmpDir, "git")
+	makeProject(filepath.Join(protectedRoot, "repo-a"), 200)
+	makeProject(filepath.Join(protectedRoot, "repo-b", "web"), 200)
+	makeProject(filepath.Join(tmpDir, "scratch", "proj"), 3)
+
+	budget := newDevArtifactScanBudget(config.DevArtifactsConfig{ScanMaxEntries: 100000})
+	freed := p.cleanNodeModules(context.Background(), tmpDir, 30*24*time.Hour, []string{protectedRoot}, newDevArtifactActivity(), newDevArtifactGitTracker(), logger, budget)
+	if freed == 0 || pathExists(filepath.Join(tmpDir, "scratch", "proj", "node_modules")) {
+		t.Fatal("the stale unprotected node_modules was not removed")
+	}
+	for _, kept := range []string{filepath.Join(protectedRoot, "repo-a", "node_modules"), filepath.Join(protectedRoot, "repo-b", "web", "node_modules")} {
+		if !pathExists(kept) {
+			t.Fatalf("protected %s was removed", kept)
+		}
+	}
+	// 800+ entries sit under the protected tree; the walk and the sizing of
+	// the unprotected project touch a few dozen.
+	if used := budget.entries + budget.sizingEntries; used > 50 {
+		t.Fatalf("the deleting lane spent %d budget entries; it walked the protected tree", used)
+	}
+}

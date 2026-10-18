@@ -315,6 +315,40 @@ dev_artifacts:
   sets no floor, so empty stale roots are reaped too; they cost an inode each.
   A negative value means the 1 MB default.
 
+## Bazel output bases: walk scope and early walks
+
+```yaml
+bazel_bases:
+  skip_paths:
+    - /srv/fast-local/jess/git
+    - /srv/fast-local/jess/estate
+  root_pressure:
+    - root: /srv/fast-local/jess
+      start_percent: 92
+      stop_percent: 90
+  early_walk_min_yield_mb: 256
+  early_walk_max_duty_percent: 20
+```
+
+- `skip_paths` are trees the discovery walk never enters, so nothing in them
+  is discovered or removed. Use them for large trees that hold no output base
+  worth a walk of every directory: a seat's git checkouts, or a migration
+  landing that must stay identical to its source. They assert no custody;
+  `held_paths` does.
+- `root_pressure` gives one root its own pressure start and stop lines. A
+  tree with an XFS project quota reports its project limit through statfs,
+  so its ruled fill can sit above the plugin-wide 70%.
+- Under pressure the plugin may walk again before `discovery_interval`. An
+  early walk that removes less than `early_walk_min_yield_mb` (default 256)
+  counts as empty and doubles the wait before the next one, and the wait is
+  never shorter than the last walk's own duration times `(100 - duty) /
+  duty` for `early_walk_max_duty_percent` (default 20). A 10-minute walk is
+  followed by at least 40 minutes without one.
+
+The `dev_artifacts` deleting lanes (node_modules, `.venv`, Rust `target`,
+Zig) never enter a directory covered by `protect_paths`; they skipped every
+artifact there anyway. Report and plan lanes still list protected artifacts.
+
 ## Source of Truth
 
 - Example config: [`config/default.yaml`](https://github.com/Jesssullivan/tinyland-cleanup/blob/main/config/default.yaml)
