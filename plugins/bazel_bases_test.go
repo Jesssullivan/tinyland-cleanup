@@ -756,12 +756,18 @@ func TestBazelBasesPressureWithNoBaseOnTheMountKeepsTheInterval(t *testing.T) {
 	if bbExists(base) {
 		t.Fatal("the early walk did not reap the base that had passed its pressure window")
 	}
-	if f.plugin.emptyWalks != 0 {
-		t.Fatalf("a walk that removed a base left emptyWalks at %d", f.plugin.emptyWalks)
+	// The base held 64 KiB, under early_walk_min_yield_mb: the walk relieved
+	// nothing, so it counts as empty, after the empty walk that kept the base,
+	// and the next early walk waits 5m x 2^2 (lab sting 2026-10-17).
+	if f.plugin.emptyWalks != 2 {
+		t.Fatalf("a walk that removed only a 64 KiB base left emptyWalks at %d, want 2", f.plugin.emptyWalks)
+	}
+	if got := f.plugin.earlyGap(pol); got != 4*bbPressureMinInterval {
+		t.Fatalf("early gap after two empty walks is %s, want %s", got, 4*bbPressureMinInterval)
 	}
 
 	// A walk that was cut short knows too little to skip the early walk.
-	now = now.Add(6 * time.Minute)
+	now = now.Add(21 * time.Minute)
 	f.plugin.earlyAt, f.plugin.lastPartial = map[uint64]time.Time{}, true
 	if !f.plugin.due(pol, true) {
 		t.Fatal("a partial walk suppressed the early pressure walk")
@@ -983,5 +989,150 @@ func TestBBMeasureTreeRefusesForeignOwnedEntries(t *testing.T) {
 	}
 	if _, _, _, err := bbMeasureTree(context.Background(), filepath.Join(dir, "base"), time.Time{}, os.Getuid()); err != nil {
 		t.Fatalf("own tree: %v", err)
+	}
+}
+
+// Lab sting 2026-10-17: the walk covered /srv/fast-local/jess/git (7M freshly
+// landed files) and the estate landing, which held 1.5 GiB of the reaper's
+// 324 GiB lifetime yield, and removed two bases from inside the landing.
+func TestBazelBasesSkipPathsAreNotWalked(t *testing.T) {
+	f := newBBFixture(t)
+	git := filepath.Join(f.root, "git")
+	landing := filepath.Join(f.root, "estate")
+	f.cfg.BazelBases.SkipPaths = []string{git, landing}
+	inGit := filepath.Join(git, "repo", "worktrees", "w1", ".artifacts", "out")
+	inLanding := filepath.Join(landing, "neo-full", "git", "w2", "out")
+	outside := filepath.Join(f.root, "cache", "bazel", "output", "b1")
+	bbMakeBase(t, inGit, 4096, 72*time.Hour)
+	bbMakeBase(t, inLanding, 4096, 72*time.Hour)
+	bbMakeBase(t, outside, 4096, 72*time.Hour)
+	c := f.run()
+	if !bbExists(inGit) || !bbExists(inLanding) {
+		t.Fatal("a base inside skip_paths was removed")
+	}
+	if bbExists(outside) {
+		t.Fatal("the base outside skip_paths was not reaped")
+	}
+	for _, p := range bbRowPaths(c) {
+		if strings.HasPrefix(p, git) || strings.HasPrefix(p, landing) {
+			t.Fatalf("a base inside skip_paths was discovered: %s", p)
+		}
+	}
+	found := false
+	for _, sk := range c.Skipped {
+		if strings.Contains(sk.Reason, "skip_paths") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no skip_paths entry in the cycle's skipped list: %+v", c.Skipped)
+	}
+}
+
+func TestBazelBasesRootPressureOverridesTheRootsLines(t *testing.T) {
+	f := newBBFixture(t)
+	other := filepath.Join(f.dir, "other")
+	bbMkdir(t, other)
+	f.cfg.BazelBases.Roots = []string{f.root, other}
+	f.cfg.BazelBases.RootPressure = []config.BazelBasesRootPressure{{Root: f.root, StartPercent: 92, StopPercent: 90}}
+	pol, err := f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(pct uint64) bbUsage { return bbUsage{BytesTotal: 100, BytesUsed: pct} }
+	// The project tree sits at its ruled fill (90%): not pressure for its
+	// own lines, pressure for the plugin-wide 70.
+	if f.plugin.pressureState(f.root, 1, at(90), pol) {
+		t.Fatal("90% is under the root's own 92% start line")
+	}
+	if !f.plugin.pressureState(other, 2, at(90), pol) {
+		t.Fatal("90% is over the plugin-wide 70% start line for another root")
+	}
+	if !f.plugin.pressureState(f.root, 1, at(93), pol) {
+		t.Fatal("93% is over the root's own 92% start line")
+	}
+	// Hysteresis on the root's own stop line, once a cycle has recorded the
+	// device as pressured.
+	f.plugin.pressured[1] = true
+	if !f.plugin.pressureState(f.root, 1, at(91), pol) {
+		t.Fatal("91% is above the root's 90% stop line after pressure started")
+	}
+	if f.plugin.pressureState(f.root, 1, at(89), pol) {
+		t.Fatal("89% is below the root's 90% stop line")
+	}
+}
+
+func TestBazelBasesEarlyWalksKeepTheirDutyShare(t *testing.T) {
+	f := newBBFixture(t)
+	pol, err := f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.plugin.lastWalk = 10 * time.Minute
+	if got := f.plugin.earlyGap(pol); got != 40*time.Minute {
+		t.Fatalf("after a 10 minute walk at the 20%% default duty the gap is %s, want 40m", got)
+	}
+	f.cfg.BazelBases.EarlyWalkMaxDutyPercent = 50
+	pol, err = f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.plugin.earlyGap(pol); got != 10*time.Minute {
+		t.Fatalf("at 50%% duty the gap is %s, want 10m", got)
+	}
+	f.plugin.lastWalk = 30 * time.Second
+	if got := f.plugin.earlyGap(pol); got != bbPressureMinInterval {
+		t.Fatalf("a short walk keeps the %s minimum, got %s", bbPressureMinInterval, got)
+	}
+}
+
+func TestBazelBasesEarlyWalkYieldFloor(t *testing.T) {
+	f := newBBFixture(t)
+	pol, err := f.plugin.policy(f.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol.earlyMinYield != 256<<20 {
+		t.Fatalf("default early walk yield floor %d, want 256 MiB", pol.earlyMinYield)
+	}
+	f.plugin.noteWork(&bbCycle{Apply: true, Removed: 1, RemovedBytes: 45 << 20}, pol.earlyMinYield)
+	f.plugin.noteWork(&bbCycle{Apply: true, Removed: 1, RemovedBytes: 45 << 20}, pol.earlyMinYield)
+	if f.plugin.emptyWalks != 2 {
+		t.Fatalf("two 45 MiB removals left emptyWalks at %d, want 2", f.plugin.emptyWalks)
+	}
+	f.plugin.noteWork(&bbCycle{Apply: true, Removed: 1, RemovedBytes: 3 << 30}, pol.earlyMinYield)
+	if f.plugin.emptyWalks != 0 {
+		t.Fatalf("a 3 GiB removal left emptyWalks at %d, want 0", f.plugin.emptyWalks)
+	}
+}
+
+func TestBazelBasesWalkScopeConfigIsValidated(t *testing.T) {
+	base := config.DefaultConfig().BazelBases
+	base.Mode = config.BazelBasesModeApply
+	base.Roots = []string{"/srv/fast-local/jess"}
+	cases := map[string]func(c *config.BazelBasesConfig){
+		"pressure root not a root": func(c *config.BazelBasesConfig) {
+			c.RootPressure = []config.BazelBasesRootPressure{{Root: "/home/jess", StartPercent: 92, StopPercent: 90}}
+		},
+		"stop above start": func(c *config.BazelBasesConfig) {
+			c.RootPressure = []config.BazelBasesRootPressure{{Root: "/srv/fast-local/jess", StartPercent: 90, StopPercent: 92}}
+		},
+		"relative skip path":  func(c *config.BazelBasesConfig) { c.SkipPaths = []string{"git"} },
+		"skip path is a root": func(c *config.BazelBasesConfig) { c.SkipPaths = []string{"/srv/fast-local/jess/"} },
+		"duty over 100":       func(c *config.BazelBasesConfig) { c.EarlyWalkMaxDutyPercent = 101 },
+	}
+	for name, mutate := range cases {
+		c := base
+		c.RootPressure, c.SkipPaths = nil, nil
+		mutate(&c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: Validate accepted it", name)
+		}
+	}
+	ok := base
+	ok.SkipPaths = []string{"/srv/fast-local/jess/git", "~/estate"}
+	ok.RootPressure = []config.BazelBasesRootPressure{{Root: "/srv/fast-local/jess", StartPercent: 92, StopPercent: 90}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("a valid walk scope was refused: %v", err)
 	}
 }

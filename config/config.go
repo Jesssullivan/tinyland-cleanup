@@ -486,6 +486,12 @@ type BazelBasesConfig struct {
 	BasesOnlyRoots []string `yaml:"bases_only_roots"`
 	// HeldPaths are never walked and never removed (R-C606 held copies).
 	HeldPaths []string `yaml:"held_paths"`
+	// SkipPaths are trees the walk never enters, so nothing inside them is
+	// discovered or removed. They are for large trees that hold no output
+	// base worth a walk of every directory in them: a seat's git checkouts,
+	// a migration landing that must stay identical to its source. Unlike
+	// HeldPaths they assert no custody, only walk scope.
+	SkipPaths []string `yaml:"skip_paths"`
 	// SkipDirNames are directory names never descended into. ".git" is required.
 	SkipDirNames []string `yaml:"skip_dir_names"`
 	// SkipNameGlobs are base-name globs (backup, transfer, evidence, archive,
@@ -506,6 +512,19 @@ type BazelBasesConfig struct {
 	// PressureStopPercent releases pressure once both byte and inode use are
 	// below it (R-C645: 60).
 	PressureStopPercent int `yaml:"pressure_stop_percent"`
+	// RootPressure overrides the pressure start and stop percentages for the
+	// file system a root's bases sit on. A tree with an XFS project quota
+	// reports its project limit through statfs, so its own ruled lines can
+	// differ from the other roots'.
+	RootPressure []BazelBasesRootPressure `yaml:"root_pressure"`
+	// EarlyWalkMinYieldMB is the least an early pressure walk must remove
+	// to count as productive. A walk that removes less counts as empty and
+	// doubles the wait before the next early walk. Zero uses 256.
+	EarlyWalkMinYieldMB int `yaml:"early_walk_min_yield_mb"`
+	// EarlyWalkMaxDutyPercent bounds the share of wall time early pressure
+	// walks may take: after a walk the next early walk waits at least the
+	// walk's own duration times (100 - duty) / duty. Zero uses 20.
+	EarlyWalkMaxDutyPercent int `yaml:"early_walk_max_duty_percent"`
 	// SiblingUserRoot names a run's own output user root beside a base; it is
 	// removed with the base only when it holds nothing but that base's install.
 	SiblingUserRoot string `yaml:"sibling_user_root"`
@@ -540,6 +559,13 @@ type BazelBasesConfig struct {
 	// Kinds carries per-kind idle overrides. They may lengthen a window, never
 	// shorten it below the R-C645 floors.
 	Kinds map[string]BazelBasesKind `yaml:"kinds"`
+}
+
+// BazelBasesRootPressure is one root's own pressure lines.
+type BazelBasesRootPressure struct {
+	Root         string `yaml:"root"`
+	StartPercent int    `yaml:"start_percent"`
+	StopPercent  int    `yaml:"stop_percent"`
 }
 
 // BazelBasesOwner labels output bases by path glob.
@@ -682,6 +708,34 @@ func (c BazelBasesConfig) Validate() error {
 	}
 	if c.PressureStopPercent <= 0 || c.PressureStartPercent <= c.PressureStopPercent || c.PressureStartPercent > 100 {
 		return fmt.Errorf("bazel_bases needs 0 < pressure_stop_percent (%d) < pressure_start_percent (%d) <= 100", c.PressureStopPercent, c.PressureStartPercent)
+	}
+	roots := map[string]bool{}
+	for _, r := range c.Roots {
+		roots[filepath.Clean(r)] = true
+	}
+	for _, rp := range c.RootPressure {
+		if !roots[filepath.Clean(rp.Root)] {
+			return fmt.Errorf("bazel_bases.root_pressure root %q is not one of bazel_bases.roots", rp.Root)
+		}
+		if rp.StopPercent <= 0 || rp.StartPercent <= rp.StopPercent || rp.StartPercent > 100 {
+			return fmt.Errorf("bazel_bases.root_pressure %s needs 0 < stop_percent (%d) < start_percent (%d) <= 100", rp.Root, rp.StopPercent, rp.StartPercent)
+		}
+	}
+	for _, sp := range c.SkipPaths {
+		if !filepath.IsAbs(sp) && !strings.HasPrefix(sp, "~/") {
+			return fmt.Errorf("bazel_bases.skip_paths entry %q must be absolute or start with ~/", sp)
+		}
+		for r := range roots {
+			if filepath.Clean(sp) == r {
+				return fmt.Errorf("bazel_bases.skip_paths entry %q is a root; drop the root instead", sp)
+			}
+		}
+	}
+	if c.EarlyWalkMinYieldMB < 0 {
+		return fmt.Errorf("bazel_bases.early_walk_min_yield_mb must not be negative, got %d", c.EarlyWalkMinYieldMB)
+	}
+	if c.EarlyWalkMaxDutyPercent < 0 || c.EarlyWalkMaxDutyPercent > 100 {
+		return fmt.Errorf("bazel_bases.early_walk_max_duty_percent must be 0-100, got %d", c.EarlyWalkMaxDutyPercent)
 	}
 	hasGit := false
 	for _, name := range c.SkipDirNames {

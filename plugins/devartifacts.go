@@ -3305,7 +3305,7 @@ func (p *DevArtifactsPlugin) cleanNodeModules(ctx context.Context, scanPath stri
 	var totalFreed int64
 	budget := optionalDevArtifactScanBudget(budgets)
 
-	p.findArtifactDirs(ctx, scanPath, "node_modules", "package.json", func(dir string, size int64) {
+	p.findArtifactDirsOutside(ctx, scanPath, "node_modules", "package.json", protectPaths, func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
@@ -3349,7 +3349,7 @@ func (p *DevArtifactsPlugin) cleanPythonVenvs(ctx context.Context, scanPath stri
 	pythonMarkers := []string{"pyproject.toml", "setup.py", "requirements.txt"}
 	budget := optionalDevArtifactScanBudget(budgets)
 
-	p.findArtifactDirs(ctx, scanPath, ".venv", "", func(dir string, size int64) {
+	p.findArtifactDirsOutside(ctx, scanPath, ".venv", "", protectPaths, func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
@@ -3478,7 +3478,7 @@ func (p *DevArtifactsPlugin) cleanRustTargets(ctx context.Context, scanPath stri
 	var totalFreed int64
 	budget := optionalDevArtifactScanBudget(budgets)
 
-	p.findArtifactDirs(ctx, scanPath, "target", "Cargo.toml", func(dir string, size int64) {
+	p.findArtifactDirsOutside(ctx, scanPath, "target", "Cargo.toml", protectPaths, func(dir string, size int64) {
 		if p.isProtected(dir, protectPaths) {
 			return
 		}
@@ -3520,7 +3520,7 @@ func (p *DevArtifactsPlugin) cleanZigArtifacts(ctx context.Context, scanPath str
 	budget := optionalDevArtifactScanBudget(budgets)
 
 	for _, artifactName := range []string{".zig-cache", "zig-out"} {
-		p.findArtifactDirs(ctx, scanPath, artifactName, "build.zig", func(dir string, size int64) {
+		p.findArtifactDirsOutside(ctx, scanPath, artifactName, "build.zig", protectPaths, func(dir string, size int64) {
 			if p.isProtected(dir, protectPaths) {
 				return
 			}
@@ -3728,8 +3728,30 @@ func (p *DevArtifactsPlugin) cleanLMStudioModels(ctx context.Context, level Clea
 // Callback receives the artifact dir path and its size.
 // Limits directory depth to 4 levels to avoid excessive scanning.
 func (p *DevArtifactsPlugin) findArtifactDirs(ctx context.Context, scanPath string, targetName string, markerFile string, callback func(dir string, size int64), budgets ...*devArtifactScanBudget) {
+	p.findArtifactDirsOutside(ctx, scanPath, targetName, markerFile, nil, callback, budgets...)
+}
+
+// findArtifactDirsOutside is findArtifactDirs that never enters a directory
+// covered by protectPaths (the same literal prefix match as isProtected).
+// The deleting lanes use it. They skip every protected artifact anyway, so
+// walking and sizing a protected tree only spent the shared scan budget: on
+// sting (2026-10-17) the lanes walked /srv/fast-local/jess/git, about 7M
+// freshly landed files, and sized each node_modules there before discarding
+// it as protected. A directory under a protected prefix holds only protected
+// artifacts, so what the lanes delete is unchanged. Report and plan lanes
+// keep walking protected trees, which they list as protected.
+func (p *DevArtifactsPlugin) findArtifactDirsOutside(ctx context.Context, scanPath string, targetName string, markerFile string, protectPaths []string, callback func(dir string, size int64), budgets ...*devArtifactScanBudget) {
 	budget := optionalDevArtifactScanBudget(budgets)
 	roots := p.devArtifactWorkspaceRoots(scanPath, targetName, markerFile)
+	if len(protectPaths) > 0 {
+		unprotected := roots[:0:0]
+		for _, root := range roots {
+			if !p.isProtected(root, protectPaths) {
+				unprotected = append(unprotected, root)
+			}
+		}
+		roots = unprotected
+	}
 	key := devArtifactWorkspaceCursorKey(scanPath, targetName, markerFile)
 	selectedRoots := roots
 	if budget != nil {
@@ -3752,7 +3774,7 @@ func (p *DevArtifactsPlugin) findArtifactDirs(ctx context.Context, scanPath stri
 			rootBudget = pool.child(0)
 		}
 		rootCtx, cancel := rootBudget.context(ctx)
-		p.findArtifactDirsInRoot(rootCtx, scanPath, root, targetName, markerFile, callback, rootBudget)
+		p.findArtifactDirsInRoot(rootCtx, scanPath, root, targetName, markerFile, protectPaths, callback, rootBudget)
 		cancel()
 		if budget != nil {
 			pool.done(rootBudget)
@@ -3813,7 +3835,7 @@ func devArtifactWorkspaceCursorKey(scanPath string, targetName string, markerFil
 	return filepath.Clean(scanPath) + "|" + targetName + "|" + markerFile
 }
 
-func (p *DevArtifactsPlugin) findArtifactDirsInRoot(ctx context.Context, scanPath string, root string, targetName string, markerFile string, callback func(dir string, size int64), budget *devArtifactScanBudget) {
+func (p *DevArtifactsPlugin) findArtifactDirsInRoot(ctx context.Context, scanPath string, root string, targetName string, markerFile string, protectPaths []string, callback func(dir string, size int64), budget *devArtifactScanBudget) {
 	scanDepth := strings.Count(scanPath, string(os.PathSeparator))
 
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -3832,6 +3854,9 @@ func (p *DevArtifactsPlugin) findArtifactDirsInRoot(ctx context.Context, scanPat
 
 		if !info.IsDir() {
 			return nil
+		}
+		if len(protectPaths) > 0 && p.isProtected(path, protectPaths) {
+			return filepath.SkipDir
 		}
 
 		// Skip hidden directories other than .venv

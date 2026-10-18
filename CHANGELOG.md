@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Early bazel_bases walks keep a duty share (lab sting, 2026-10-17).** One
+  removal of any size reset the wait before the next early pressure walk to
+  5 minutes, so on sting walks of 90 s to 25 min ran back to back, each
+  removing one 45 MiB-3 GiB base. An early walk now counts as empty unless
+  it removes `early_walk_min_yield_mb` (default 256), and the next one waits
+  at least the last walk's duration times `(100 - duty) / duty`
+  (`early_walk_max_duty_percent`, default 20).
+- **dev_artifacts deleting lanes skip protected trees.** The node_modules,
+  `.venv`, Rust `target` and Zig lanes no longer walk or size directories
+  under `protect_paths`, which they never delete from. On sting they walked
+  and sized the protected git checkouts on every run.
 - **Byte backoff measures the gated plugins only (lab sting, 2026-10-17).**
   Bytes from a level-independent plugin (the nix plugin's GC of `/nix`,
   `bazel_bases`) no longer count as byte progress, and a cycle in which only
@@ -53,6 +64,8 @@ All notable changes to this project will be documented in this file.
   only. On sting, 12 GiB of agent scratch in `/dev/shm` pinned 7.1 GiB of
   RAM and kept the zram swap full.
 
+- **bazel_bases walk scope.** `skip_paths` (trees never walked) and
+  `root_pressure` (per-root pressure start and stop lines).
 - **Escalating byte backoff.** While byte backoff is engaged, every ladder
   attempt that frees less than `byte_progress_min_mb` doubles the interval,
   up to `policy.byte_backoff_max`; progress resets it. With the defaults

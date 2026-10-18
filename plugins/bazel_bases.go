@@ -277,9 +277,13 @@ type BazelBasesPlugin struct {
 	// lastPartial is set when the last walk was cut short or a base's device
 	// could not be read, so earlyAt may be missing a device.
 	lastPartial bool
-	// emptyWalks counts consecutive apply cycles that removed nothing. Each
-	// one doubles the wait before the next early walk.
+	// emptyWalks counts consecutive apply cycles that removed less than
+	// early_walk_min_yield_mb. Each one doubles the wait before the next
+	// early walk.
 	emptyWalks int
+	// lastWalk is how long the last cycle (walk, inventory and removals)
+	// took; earlyGap keeps early walks to their duty share of wall time.
+	lastWalk time.Duration
 }
 
 // NewBazelBasesPlugin creates the plugin with the host environment.
@@ -399,13 +403,31 @@ type bbPolicy struct {
 	rootMounts    map[string]string
 	basesOnly     []string
 	held          []string
+	skip          []string
 	skipNames     map[string]bool
+	rootPressure  map[string]bbPressureLines
+	earlyMinYield int64
+	earlyDuty     int
 	idle          time.Duration
 	pressureIdle  time.Duration
 	basesOnlyIdle time.Duration
 	interval      time.Duration
 	deny          *agentSessionDeny
 }
+
+// bbPressureLines are the start and stop percentages for one root.
+type bbPressureLines struct {
+	start, stop float64
+}
+
+const (
+	// bbDefaultEarlyMinYieldMB is the least an early pressure walk must
+	// remove to count as productive (the daemon's byte_progress_min_mb).
+	bbDefaultEarlyMinYieldMB = 256
+	// bbDefaultEarlyDutyPercent bounds early pressure walks to this share
+	// of wall time.
+	bbDefaultEarlyDutyPercent = 20
+)
 
 func (p *BazelBasesPlugin) policy(cfg *config.Config) (*bbPolicy, error) {
 	bb := cfg.BazelBases
@@ -429,6 +451,21 @@ func (p *BazelBasesPlugin) policy(cfg *config.Config) (*bbPolicy, error) {
 	}
 	for _, h := range bb.HeldPaths {
 		pol.held = append(pol.held, filepath.Clean(expandAgentSessionHome(h, home)))
+	}
+	for _, sp := range bb.SkipPaths {
+		pol.skip = append(pol.skip, filepath.Clean(expandAgentSessionHome(sp, home)))
+	}
+	pol.rootPressure = map[string]bbPressureLines{}
+	for _, rp := range bb.RootPressure {
+		pol.rootPressure[filepath.Clean(expandAgentSessionHome(rp.Root, home))] = bbPressureLines{start: float64(rp.StartPercent), stop: float64(rp.StopPercent)}
+	}
+	pol.earlyMinYield = int64(bbDefaultEarlyMinYieldMB) << 20
+	if bb.EarlyWalkMinYieldMB > 0 {
+		pol.earlyMinYield = int64(bb.EarlyWalkMinYieldMB) << 20
+	}
+	pol.earlyDuty = bbDefaultEarlyDutyPercent
+	if bb.EarlyWalkMaxDutyPercent > 0 {
+		pol.earlyDuty = bb.EarlyWalkMaxDutyPercent
 	}
 	for _, n := range bb.SkipDirNames {
 		pol.skipNames[n] = true
@@ -454,6 +491,25 @@ func (pol *bbPolicy) heldBy(path string) string {
 		}
 	}
 	return ""
+}
+
+// skippedBy returns the skip_paths entry that keeps the walk out of path.
+func (pol *bbPolicy) skippedBy(path string) string {
+	for _, sp := range pol.skip {
+		if pathInsideRoot(path, sp) {
+			return sp
+		}
+	}
+	return ""
+}
+
+// pressureLines returns the start and stop percentages for root: its own
+// root_pressure row, else the plugin-wide pair.
+func (pol *bbPolicy) pressureLines(root string) bbPressureLines {
+	if lines, ok := pol.rootPressure[root]; ok {
+		return lines
+	}
+	return bbPressureLines{start: float64(pol.cfg.PressureStartPercent), stop: float64(pol.cfg.PressureStopPercent)}
 }
 
 func (pol *bbPolicy) basesOnlyRoot(path string) string {
@@ -523,12 +579,21 @@ func (pol *bbPolicy) windows(kind string) (time.Duration, time.Duration) {
 const bbPressureMinInterval = 5 * time.Minute
 
 // earlyGap is the least time between the last walk and an early pressure
-// walk: bbPressureMinInterval, doubled for every consecutive apply cycle that
-// removed nothing.
+// walk: bbPressureMinInterval, doubled for every consecutive apply cycle
+// that removed less than early_walk_min_yield_mb, and never less than the
+// last walk's own duration times (100 - duty) / duty, so early walks take at
+// most early_walk_max_duty_percent of wall time. On sting (2026-10-17) walks
+// of 90 s to 25 min ran back to back, each removing one 45 MiB-3 GiB base,
+// because a single removal reset the wait to 5 minutes.
 func (p *BazelBasesPlugin) earlyGap(pol *bbPolicy) time.Duration {
 	gap := bbPressureMinInterval
 	for i := 0; i < p.emptyWalks && gap < pol.interval; i++ {
 		gap *= 2
+	}
+	if duty := pol.earlyDuty; duty > 0 && duty < 100 && p.lastWalk > 0 {
+		if floor := p.lastWalk * time.Duration(100-duty) / time.Duration(duty); floor > gap {
+			gap = floor
+		}
 	}
 	return gap
 }
@@ -570,7 +635,7 @@ func (p *BazelBasesPlugin) due(pol *bbPolicy, apply bool) bool {
 		if err != nil {
 			continue
 		}
-		if !p.pressureState(dev, u, pol) {
+		if !p.pressureState(r, dev, u, pol) {
 			continue
 		}
 		if p.earlyAt == nil || p.lastPartial {
@@ -585,7 +650,7 @@ func (p *BazelBasesPlugin) due(pol *bbPolicy, apply bool) bool {
 
 // noteWork records, for due's pressure rule, when an early walk could next
 // remove something on each device, and whether this cycle removed anything.
-func (p *BazelBasesPlugin) noteWork(cycle *bbCycle) {
+func (p *BazelBasesPlugin) noteWork(cycle *bbCycle, minYield int64) {
 	early := map[uint64]time.Time{}
 	partial := cycle.Partial
 	sooner := func(dev uint64, at time.Time) {
@@ -607,16 +672,16 @@ func (p *BazelBasesPlugin) noteWork(cycle *bbCycle) {
 	}
 	p.earlyAt = early
 	p.lastPartial = partial
-	if cycle.Apply && cycle.Removed == 0 {
+	if cycle.Apply && cycle.RemovedBytes < minYield {
 		p.emptyWalks++
 	} else {
 		p.emptyWalks = 0
 	}
 }
 
-func (p *BazelBasesPlugin) pressureState(dev uint64, u bbUsage, pol *bbPolicy) bool {
-	start := float64(pol.cfg.PressureStartPercent)
-	stop := float64(pol.cfg.PressureStopPercent)
+func (p *BazelBasesPlugin) pressureState(root string, dev uint64, u bbUsage, pol *bbPolicy) bool {
+	lines := pol.pressureLines(root)
+	start, stop := lines.start, lines.stop
 	hi := u.bytesPct() >= start || u.inodesPct() >= start
 	if hi {
 		return true
@@ -691,9 +756,11 @@ func (p *BazelBasesPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg 
 	if !p.due(pol, apply) {
 		return result
 	}
+	walkStart := p.env.now()
 	cycle := p.run(ctx, pol, apply, logger)
 	p.lastDiscovery = p.env.now()
-	p.noteWork(cycle)
+	p.lastWalk = p.lastDiscovery.Sub(walkStart)
+	p.noteWork(cycle, pol.earlyMinYield)
 	if err := p.writeReceipts(pol, cycle); err != nil {
 		logger.Warn("bazel_bases: receipt write failed", "error", err)
 	}
@@ -759,7 +826,7 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 			continue
 		}
 		usageByDev[dev] = u
-		pressureByDev[dev] = p.pressureState(dev, u, pol)
+		pressureByDev[dev] = p.pressureState(b.Root, dev, u, pol)
 		devPath[dev] = b.Root
 		cycle.Mounts[b.Root] = bbDev{Path: b.Root, FSType: u.FSType, BytesPercent: round2(u.bytesPct()),
 			InodePercent: round2(u.inodesPct()), Inodes: u.InodesCounted, Pressure: pressureByDev[dev]}
@@ -921,7 +988,7 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 		if err != nil {
 			continue
 		}
-		p.pressured[dev] = p.pressureState(dev, u, pol)
+		p.pressured[dev] = p.pressureState(devPath[dev], dev, u, pol)
 		if d, ok := cycle.Mounts[devPath[dev]]; ok {
 			d.After = &bbDev{Path: devPath[dev], BytesPercent: round2(u.bytesPct()), InodePercent: round2(u.inodesPct()),
 				Inodes: u.InodesCounted, Pressure: p.pressured[dev]}
@@ -1412,6 +1479,10 @@ func (p *BazelBasesPlugin) discover(ctx context.Context, pol *bbPolicy, cycle *b
 			}
 			if h := pol.heldBy(path); h != "" {
 				skip(path, "held copy (R-C606): "+h)
+				continue
+			}
+			if sp := pol.skippedBy(path); sp != "" {
+				skip(path, "skip_paths "+sp+"; not walked")
 				continue
 			}
 			if c := deny.carveoutForLiteral(path); c != "" {
