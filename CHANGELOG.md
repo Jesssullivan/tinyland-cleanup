@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Byte backoff measures the gated plugins only (lab sting, 2026-10-17).**
+  Bytes from a level-independent plugin (the nix plugin's GC of `/nix`,
+  `bazel_bases`) no longer count as byte progress, and a cycle in which only
+  level-independent plugins ran no longer counts as a cleanup attempt. A
+  host free-space delta counts only in a cycle where a ladder plugin ran.
+  On sting every hourly Nix GC released byte backoff on a full
+  `/srv/fast-local` and re-armed a critical cycle of every plugin. Reports
+  carry `ladder_bytes_freed` and each plugin's `level_independent`.
+- **A mount's band keeps global steps out of it.** A global moderate or
+  aggressive threshold applies to a monitored mount only when it lies inside
+  the mount's own warning-to-critical band. A mount with warning 92 read as
+  moderate from the global 85, below its own warning line.
 - **The gcroot-unregister foreign-owner test reads the owner instead of
   assuming uid 0.** `TestGCRootUnregisterRefusesAnotherUsersLink` uses
   root's profile links as the foreign out-link and expected `owned by uid
@@ -41,6 +53,13 @@ All notable changes to this project will be documented in this file.
   only. On sting, 12 GiB of agent scratch in `/dev/shm` pinned 7.1 GiB of
   RAM and kept the zram swap full.
 
+- **Escalating byte backoff.** While byte backoff is engaged, every ladder
+  attempt that frees less than `byte_progress_min_mb` doubles the interval,
+  up to `policy.byte_backoff_max`; progress resets it. With the defaults
+  (30m cooldown, 30m maximum) the interval is unchanged.
+- **Per-mount ladder and target.** `monitored_mounts[].threshold_moderate`,
+  `threshold_aggressive` and `target_used_percent`. A mount's set thresholds
+  must ascend; `--target-used-percent` replaces every mount's target.
 - **Darwin Nix GC readiness (lab R-C815).** `nix.gc_lock_file` serializes a
   GC pass with a fallback collector through a shared flock(2) file, and
   `nix.gc_defer_paths` defers a pass while a switch or delivery marker

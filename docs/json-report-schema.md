@@ -25,7 +25,7 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `byte_no_progress_count` (int, optional) — consecutive cleanup cycles under byte pressure without `byte_progress_min_mb` of reclaim
 - `byte_backoff` (bool, optional) — byte backoff engaged this cycle
 - `byte_backoff_reason` (string, optional) — `no_progress` when engaged; `below_emergency_floor` when the limit was reached but free space is under the floor
-- `byte_backoff_seconds` (int64, optional) — per-plugin interval applied while engaged
+- `byte_backoff_seconds` (int64, optional) — per-plugin interval applied while engaged; it doubles with each further ladder attempt that makes no progress, up to `byte_backoff_max`
 - `emergency_free_bytes` (uint64, optional) — free-space floor below which byte backoff never engages
 
 ### Inode state
@@ -38,7 +38,7 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `inode_backoff` (bool, optional) — inode circuit breaker engaged this cycle
 
 ### Target and policy
-- `target_used_percent` (int) — configured max used % after cleanup (`target_free`)
+- `target_used_percent` (int) — configured max used % after cleanup: the monitored mount's `target_used_percent`, else `target_free`
 - `target_free_bytes` (uint64), `target_free_deficit_bytes` (int64), `target_free_met` (bool)
 - `minimum_free_bytes` (uint64, optional), `minimum_free_deficit_bytes` (int64, optional), `minimum_free_met` (bool)
 - `cooldown_seconds` (int64, optional)
@@ -51,6 +51,7 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `planned_estimated_bytes_freed`, `planned_required_free_bytes` (int64, optional) — dry-run aggregates
 - `planned_targets` (int, optional)
 - `total_bytes_freed` (int64), `total_items_cleaned` (int)
+- `ladder_bytes_freed` (int64) — the part of `total_bytes_freed` freed by plugins the level ladder gates; the plugin side of byte progress
 - `cycle_duration_ms` (int64) — wall-clock duration of this cycle
 - `next_cycle_at` (string, optional, RFC3339) — daemon mode only: when the next cycle starts (this cycle's completion plus `poll_interval`)
 - `next_retry_at` (string, optional, RFC3339) — earliest `retry_at` or `suppressed_until` across this cycle's plugins
@@ -71,6 +72,7 @@ are omitted when empty. The source of truth is the `cycleReport`,
 ## pluginCycleReport
 - `name`, `description` (string); `level` (string); `dry_run`, `would_run` (bool)
 - `ran` (bool) — `Cleanup` was actually invoked this cycle (never true in dry-run); `would_run` is eligibility, `ran` is the outcome
+- `level_independent` (bool, optional) — the plugin runs outside the level ladder (never held back by cooldown, byte backoff or zero yield) and is not a cleanup attempt for byte backoff
 - `skip_reason` (string, optional) — e.g. `dry_run`, `cooldown`, `byte_backoff`, `zero_yield_backoff`, `target_free_met`, `plugin_wedged`
 - `bytes_freed`, `estimated_bytes_freed`, `command_bytes_freed`, `host_bytes_freed` (int64); `items_cleaned` (int)
 - `cooldown_remaining_seconds` (int64, optional); `error` (string, optional)

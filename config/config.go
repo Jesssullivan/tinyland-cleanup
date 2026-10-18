@@ -137,8 +137,20 @@ type MountConfig struct {
 	Label string `yaml:"label"`
 	// ThresholdWarning overrides the global warning threshold
 	ThresholdWarning int `yaml:"threshold_warning,omitempty"`
+	// ThresholdModerate overrides the global moderate threshold. Unset, the
+	// global value applies only when it lies inside this mount's band
+	// (warning..critical); outside it the mount has no moderate step.
+	ThresholdModerate int `yaml:"threshold_moderate,omitempty"`
+	// ThresholdAggressive overrides the global aggressive threshold, with the
+	// same band rule as ThresholdModerate.
+	ThresholdAggressive int `yaml:"threshold_aggressive,omitempty"`
 	// ThresholdCritical overrides the global critical threshold
 	ThresholdCritical int `yaml:"threshold_critical,omitempty"`
+	// TargetUsedPercent overrides the global target_free (a maximum used
+	// percentage) while this mount is the cycle's monitored path: cleanup
+	// stops with target_free_met once the mount is at or below it, and the
+	// report's deficit is measured against it. Zero uses target_free.
+	TargetUsedPercent int `yaml:"target_used_percent,omitempty"`
 	// ThresholdInodeWarning overrides the global inode warning threshold
 	ThresholdInodeWarning int `yaml:"threshold_inode_warning,omitempty"`
 	// ThresholdInodeCritical overrides the global inode critical threshold
@@ -1414,8 +1426,49 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+	for _, mount := range config.MonitoredMounts {
+		if err := mount.Validate(); err != nil {
+			return nil, err
+		}
+	}
 
 	return config, nil
+}
+
+// Validate checks a monitored mount's own thresholds: each one set is a
+// percentage from 1 to 100, the byte ladder ascends (warning <= moderate <=
+// aggressive <= critical, among those set), and target_used_percent is 1-99.
+func (m MountConfig) Validate() error {
+	name := m.Label
+	if name == "" {
+		name = m.Path
+	}
+	ladder := []struct {
+		key   string
+		value int
+	}{
+		{"threshold_warning", m.ThresholdWarning},
+		{"threshold_moderate", m.ThresholdModerate},
+		{"threshold_aggressive", m.ThresholdAggressive},
+		{"threshold_critical", m.ThresholdCritical},
+	}
+	prevKey, prev := "", 0
+	for _, step := range ladder {
+		if step.value == 0 {
+			continue
+		}
+		if step.value < 0 || step.value > 100 {
+			return fmt.Errorf("monitored_mounts %s: %s %d is not a percentage from 1 to 100", name, step.key, step.value)
+		}
+		if step.value < prev {
+			return fmt.Errorf("monitored_mounts %s: %s %d is below %s %d; the ladder must ascend", name, step.key, step.value, prevKey, prev)
+		}
+		prevKey, prev = step.key, step.value
+	}
+	if m.TargetUsedPercent < 0 || m.TargetUsedPercent >= 100 {
+		return fmt.Errorf("monitored_mounts %s: target_used_percent %d is not from 1 to 99", name, m.TargetUsedPercent)
+	}
+	return nil
 }
 
 // SaveConfig saves configuration to a YAML file.
