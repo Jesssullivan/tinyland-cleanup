@@ -2686,4 +2686,12 @@ func TestDeletingLanesDoNotWalkProtectedTrees(t *testing.T) {
 	if used := budget.entries + budget.sizingEntries; used > 50 {
 		t.Fatalf("the deleting lane spent %d budget entries; it walked the protected tree", used)
 	}
+
+	// Control: the report-and-plan walk, which keeps listing protected
+	// artifacts, still walks and sizes the protected tree.
+	control := newDevArtifactScanBudget(config.DevArtifactsConfig{ScanMaxEntries: 100000})
+	p.findArtifactDirs(context.Background(), tmpDir, "node_modules", "package.json", func(string, int64) {}, control)
+	if used := control.entries + control.sizingEntries; used < 400 {
+		t.Fatalf("the unpruned walk spent only %d entries; the budget does not count what the test measures", used)
+	}
 }

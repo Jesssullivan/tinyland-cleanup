@@ -757,14 +757,17 @@ func TestBazelBasesPressureWithNoBaseOnTheMountKeepsTheInterval(t *testing.T) {
 		t.Fatal("the early walk did not reap the base that had passed its pressure window")
 	}
 	// The base held 64 KiB, under early_walk_min_yield_mb: the walk relieved
-	// nothing, so it counts as empty and the next early walk waits twice as
-	// long (lab sting 2026-10-17).
-	if f.plugin.emptyWalks != 1 {
-		t.Fatalf("a walk that removed only a 64 KiB base left emptyWalks at %d, want 1", f.plugin.emptyWalks)
+	// nothing, so it counts as empty, after the empty walk that kept the base,
+	// and the next early walk waits 5m x 2^2 (lab sting 2026-10-17).
+	if f.plugin.emptyWalks != 2 {
+		t.Fatalf("a walk that removed only a 64 KiB base left emptyWalks at %d, want 2", f.plugin.emptyWalks)
+	}
+	if got := f.plugin.earlyGap(pol); got != 4*bbPressureMinInterval {
+		t.Fatalf("early gap after two empty walks is %s, want %s", got, 4*bbPressureMinInterval)
 	}
 
 	// A walk that was cut short knows too little to skip the early walk.
-	now = now.Add(11 * time.Minute)
+	now = now.Add(21 * time.Minute)
 	f.plugin.earlyAt, f.plugin.lastPartial = map[uint64]time.Time{}, true
 	if !f.plugin.due(pol, true) {
 		t.Fatal("a partial walk suppressed the early pressure walk")
