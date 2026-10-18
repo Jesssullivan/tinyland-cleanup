@@ -393,11 +393,12 @@ func levelIndependent(p plugins.Plugin) bool {
 // plugin and appends its report. It returns bytes freed and items cleaned.
 func (d *daemon) runLevelIndependentPlugin(ctx context.Context, report *cycleReport, p plugins.Plugin, level plugins.CleanupLevel) (int64, int) {
 	pluginReport := pluginCycleReport{
-		Name:        p.Name(),
-		Description: p.Description(),
-		Level:       level.String(),
-		DryRun:      d.dryRun,
-		WouldRun:    true,
+		Name:             p.Name(),
+		Description:      p.Description(),
+		Level:            level.String(),
+		DryRun:           d.dryRun,
+		WouldRun:         true,
+		LevelIndependent: true,
 	}
 	if d.dryRun {
 		pluginReport.SkipReason = "dry_run"
@@ -597,7 +598,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		report.ByteBackoff, report.ByteBackoffReason = d.byteBackoffActive(report)
 	}
 	if report.ByteBackoff {
-		interval := d.byteBackoffInterval()
+		interval := d.byteBackoffIntervalFor(report.ByteNoProgressCount)
 		report.ByteBackoffSeconds = int64(interval / time.Second)
 		attrs := []any{
 			"path", report.MonitorPath,
@@ -667,6 +668,11 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 
 	var totalFreed int64
 	var totalItems int
+	// ladderFreed counts only the plugins the level ladder gates. Byte
+	// backoff measures whether those plugins relieve the pressure, so bytes a
+	// level-independent plugin freed (a Nix GC on /nix, a bazel_bases
+	// removal) never release it: those plugins run every cycle anyway.
+	var ladderFreed int64
 	for _, p := range enabledPlugins {
 		if levelIndependent(p) {
 			// Never held back by target_free_met, zero yield or cooldown.
@@ -803,6 +809,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 			)
 			totalFreed += result.BytesFreed
 			totalItems += result.ItemsCleaned
+			ladderFreed += result.BytesFreed
 		}
 
 		d.updateHostFreeAfter(&report, beforeStats, beforeErr)
@@ -810,6 +817,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 
 	report.TotalBytesFreed = totalFreed
 	report.TotalItemsCleaned = totalItems
+	report.LadderBytesFreed = ladderFreed
 	report.NextRetryAt = nextRetryAt(report.Plugins)
 
 	d.updateHostFreeAfter(&report, beforeStats, beforeErr)
@@ -843,7 +851,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		if beforeLevel != monitor.LevelNone || byteBackoffWasEngaged ||
 			state.byteNoProgressPending(report.MonitorPath) {
 			state.recordByteProgress(report.MonitorPath, report.HostFreeAfterBytes, report.HostByteLevel,
-				int(beforeLevel), now, d.byteProgressMade(report), anyPluginRan(report.Plugins),
+				int(beforeLevel), now, d.byteProgressMade(report), anyLadderPluginRan(report.Plugins),
 				// A forced run is exempt from backoff; it does not release it.
 				report.ByteBackoff || (report.ForcedLevel && byteBackoffWasEngaged))
 			stateDirty = true
@@ -959,12 +967,16 @@ type cycleReport struct {
 	// PlannedRequiredFreeBytes is the largest free-space preflight requirement across plugin plans.
 	PlannedRequiredFreeBytes int64 `json:"planned_required_free_bytes,omitempty"`
 	// PlannedTargets is the total number of dry-run cleanup targets.
-	PlannedTargets    int                 `json:"planned_targets,omitempty"`
-	TotalBytesFreed   int64               `json:"total_bytes_freed"`
-	TotalItemsCleaned int                 `json:"total_items_cleaned"`
-	Mounts            []mountReport       `json:"mounts"`
-	PluginFilter      []string            `json:"plugin_filter,omitempty"`
-	Plugins           []pluginCycleReport `json:"plugins"`
+	PlannedTargets    int   `json:"planned_targets,omitempty"`
+	TotalBytesFreed   int64 `json:"total_bytes_freed"`
+	TotalItemsCleaned int   `json:"total_items_cleaned"`
+	// LadderBytesFreed is the part of TotalBytesFreed freed by plugins the
+	// level ladder gates (every plugin that is not level-independent). It is
+	// the plugin side of byte progress.
+	LadderBytesFreed int64               `json:"ladder_bytes_freed"`
+	Mounts           []mountReport       `json:"mounts"`
+	PluginFilter     []string            `json:"plugin_filter,omitempty"`
+	Plugins          []pluginCycleReport `json:"plugins"`
 }
 
 type mountReport struct {
@@ -997,6 +1009,10 @@ type pluginCycleReport struct {
 	Description string `json:"description"`
 	Level       string `json:"level"`
 	DryRun      bool   `json:"dry_run"`
+	// LevelIndependent marks a plugin that runs outside the level ladder
+	// (R-C645): never held back by cooldown, byte backoff or zero yield, and
+	// not counted as a cleanup attempt for byte backoff.
+	LevelIndependent bool `json:"level_independent,omitempty"`
 	// WouldRun reports eligibility: the plugin was not skipped by target,
 	// cooldown, or filter. In a real cleanup cycle it is a precondition, not
 	// an outcome; Ran is the outcome.
@@ -1200,6 +1216,8 @@ func (d *daemon) checkMounts() monitor.CleanupLevel {
 
 func (d *daemon) monitorForMount(mount config.MountConfig) *monitor.DiskMonitor {
 	if mount.ThresholdWarning <= 0 &&
+		mount.ThresholdModerate <= 0 &&
+		mount.ThresholdAggressive <= 0 &&
 		mount.ThresholdCritical <= 0 &&
 		mount.ThresholdInodeWarning <= 0 &&
 		mount.ThresholdInodeCritical <= 0 &&
@@ -1216,6 +1234,16 @@ func (d *daemon) monitorForMount(mount config.MountConfig) *monitor.DiskMonitor 
 	}
 	if mount.ThresholdCritical > 0 {
 		critical = mount.ThresholdCritical
+	}
+	if mount.ThresholdModerate > 0 {
+		moderate = mount.ThresholdModerate
+	} else {
+		moderate = withinMountBand(moderate, warning, critical)
+	}
+	if mount.ThresholdAggressive > 0 {
+		aggressive = mount.ThresholdAggressive
+	} else {
+		aggressive = withinMountBand(aggressive, moderate, critical)
 	}
 
 	inodeWarning := d.config.InodeThresholds.Warning
@@ -1244,6 +1272,41 @@ func (d *daemon) monitorForMount(mount config.MountConfig) *monitor.DiskMonitor 
 		mountMonitor.InodeFreeFloor = mount.InodeFreeFloor
 	}
 	return mountMonitor
+}
+
+// withinMountBand keeps a global intermediate threshold for a mount only when
+// it lies inside the mount's own band (low..critical). Outside it the step is
+// moved to critical, where levelForPercent never reaches it: a mount that sets
+// warning 92 and critical 95 has a warning band from 92 to 95, not a global
+// moderate at 85 and aggressive at 90 that would act below its warning line.
+// Mounts whose band contains the global steps keep them unchanged.
+func withinMountBand(step, low, critical int) int {
+	if step < low || step > critical {
+		return critical
+	}
+	return step
+}
+
+// mountConfigForPath returns the monitored mount configured for path, if any.
+func (d *daemon) mountConfigForPath(path string) *config.MountConfig {
+	if d.config == nil {
+		return nil
+	}
+	for i := range d.config.MonitoredMounts {
+		if d.config.MonitoredMounts[i].Path == path {
+			return &d.config.MonitoredMounts[i]
+		}
+	}
+	return nil
+}
+
+// targetUsedPercent is the used-percentage target for the cycle's monitored
+// path: the mount's own target_used_percent, else the global target_free.
+func (d *daemon) targetUsedPercent(path string) int {
+	if mount := d.mountConfigForPath(path); mount != nil && mount.TargetUsedPercent > 0 {
+		return mount.TargetUsedPercent
+	}
+	return d.config.TargetFree
 }
 
 func (d *daemon) inodeLevelForPath(path string, stats *monitor.DiskStats) monitor.CleanupLevel {
@@ -1382,7 +1445,7 @@ func (d *daemon) pluginCooldown(report cycleReport, level monitor.CleanupLevel) 
 		return d.cleanupCooldown(), "cooldown", true
 	}
 	if report.ByteBackoff {
-		return d.byteBackoffInterval(), "byte_backoff", true
+		return d.byteBackoffIntervalFor(report.ByteNoProgressCount), "byte_backoff", true
 	}
 	return 0, "", false
 }
@@ -1408,9 +1471,17 @@ func (d *daemon) byteBackoffActive(report cycleReport) (bool, string) {
 	return true, "no_progress"
 }
 
-// byteProgressMade reports whether a cycle relieved byte pressure: enough
-// bytes were freed by plugins or appeared on the host, or the byte level
-// dropped or cleared.
+// byteProgressMade reports whether a cycle relieved byte pressure: the byte
+// level dropped or cleared, the ladder plugins freed enough bytes, or enough
+// bytes appeared on the monitored path in a cycle where a ladder plugin ran.
+//
+// Level-independent plugins do not count. They run every cycle whatever the
+// level, so their bytes say nothing about whether the gated plugins help:
+// before this, every Nix GC pass (which frees /nix, not the monitored path)
+// released byte backoff on a full /srv/fast-local and re-armed a critical
+// cycle of every plugin (lab sting, 2026-10-17). For the same reason a free
+// space delta in a cycle where every ladder plugin was held back is another
+// writer's churn, not progress.
 func (d *daemon) byteProgressMade(report cycleReport) bool {
 	before := parseLevel(report.HostByteLevel)
 	after := parseLevel(report.HostByteLevelAfter)
@@ -1418,12 +1489,18 @@ func (d *daemon) byteProgressMade(report cycleReport) bool {
 		return true
 	}
 	minBytes := d.byteProgressMinBytes()
-	return report.TotalBytesFreed >= minBytes || report.HostFreeDeltaBytes >= minBytes
+	if report.LadderBytesFreed >= minBytes {
+		return true
+	}
+	return anyLadderPluginRan(report.Plugins) && report.HostFreeDeltaBytes >= minBytes
 }
 
-func anyPluginRan(reports []pluginCycleReport) bool {
+// anyLadderPluginRan reports whether a plugin the level ladder gates ran this
+// cycle. Byte backoff counts these runs as cleanup attempts; a cycle in which
+// only level-independent plugins ran attempted nothing it could back off.
+func anyLadderPluginRan(reports []pluginCycleReport) bool {
 	for _, plugin := range reports {
-		if plugin.Ran {
+		if plugin.Ran && !plugin.LevelIndependent {
 			return true
 		}
 	}
@@ -1459,8 +1536,8 @@ func (d *daemon) byteBackoffMax() time.Duration {
 	return duration
 }
 
-// byteBackoffInterval is the per-plugin interval while byte backoff is
-// engaged: the configured cooldown, capped at byte_backoff_max, or the cap
+// byteBackoffInterval is the first per-plugin interval once byte backoff
+// engages: the configured cooldown, capped at byte_backoff_max, or the cap
 // itself when no cooldown is configured.
 func (d *daemon) byteBackoffInterval() time.Duration {
 	limit := d.byteBackoffMax()
@@ -1469,6 +1546,28 @@ func (d *daemon) byteBackoffInterval() time.Duration {
 		return limit
 	}
 	return cooldown
+}
+
+// byteBackoffIntervalFor is the per-plugin interval while byte backoff is
+// engaged for a path whose ladder plugins have made noProgress consecutive
+// attempts without progress. It starts at byteBackoffInterval when backoff
+// engages and doubles with every further attempt that frees less than
+// byte_progress_min_mb, up to byte_backoff_max; any attempt that makes
+// progress resets the count and so the interval. A mount whose deficit the
+// enabled plugins cannot touch therefore converges to one attempt per
+// byte_backoff_max instead of one per cooldown. With the default
+// byte_backoff_max (30m, equal to the default cooldown) the interval does
+// not grow.
+func (d *daemon) byteBackoffIntervalFor(noProgress int) time.Duration {
+	limit := d.byteBackoffMax()
+	interval := d.byteBackoffInterval()
+	for steps := noProgress - d.byteNoProgressLimit(); steps > 0 && interval < limit; steps-- {
+		interval *= 2
+	}
+	if interval > limit {
+		interval = limit
+	}
+	return interval
 }
 
 func (d *daemon) emergencyFreeBytes() uint64 {
@@ -1657,12 +1756,13 @@ func (d *daemon) updateTargetFreeStatus(report *cycleReport, stats *monitor.Disk
 		}
 	}
 
-	targetFreeBytes, ok := targetFreeBytes(stats.Total, d.config.TargetFree)
+	targetUsed := d.targetUsedPercent(report.MonitorPath)
+	targetFreeBytes, ok := targetFreeBytes(stats.Total, targetUsed)
 	if !ok {
 		return
 	}
 
-	report.TargetUsedPercent = d.config.TargetFree
+	report.TargetUsedPercent = targetUsed
 	report.TargetFreeBytes = targetFreeBytes
 	if stats.Free >= targetFreeBytes {
 		report.TargetFreeDeficitBytes = 0
@@ -1698,6 +1798,11 @@ func applyTargetUsedPercentOverride(cfg *config.Config, targetUsedPercent int) e
 		return fmt.Errorf("invalid target-used-percent %d: expected 1-99", targetUsedPercent)
 	}
 	cfg.TargetFree = targetUsedPercent
+	// The flag is an operator's target for this run on every mount, so it
+	// replaces each mount's own target_used_percent too.
+	for i := range cfg.MonitoredMounts {
+		cfg.MonitoredMounts[i].TargetUsedPercent = 0
+	}
 	return nil
 }
 

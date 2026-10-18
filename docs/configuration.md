@@ -49,6 +49,31 @@ monitored_mounts:
     inode_free_floor: 1000000
 ```
 
+A mount can carry its whole byte ladder and its own target. This suits a
+directory tree with an XFS project quota, where statfs reports the project's
+soft limit as the size and the tree's own ruled lines are what matter, not
+the volume's:
+
+```yaml
+monitored_mounts:
+  - path: /srv/fast-local/jess
+    label: devseat-177
+    threshold_warning: 90
+    threshold_moderate: 92
+    threshold_aggressive: 95
+    threshold_critical: 98
+    target_used_percent: 92
+```
+
+- Set thresholds must ascend (warning <= moderate <= aggressive <=
+  critical); a descending ladder is a config error.
+- A global moderate or aggressive step applies to a mount only when it falls
+  inside the mount's own band (its warning to its critical). Outside the band
+  the mount has no such step. A mount with warning 92 and critical 98 is
+  therefore report-only from 92 to 98, not moderate from the global 85.
+- `target_used_percent` replaces `target_free` while that mount is the
+  cycle's monitored path. `--target-used-percent` replaces both.
+
 ## Cleanup policy
 
 ```yaml
@@ -78,14 +103,27 @@ Under byte pressure, critical level and an unmet `minimum_free_gb` runway both
 bypass cooldown, so every plugin runs every poll interval. When nothing is
 reclaimable that becomes a scan storm. Byte backoff stops it:
 
-- A cleanup cycle under byte pressure counts as **no progress** when plugins
-  freed less than `byte_progress_min_mb` MiB, the host free-space delta is
-  below the same amount, and the byte level did not drop.
+- A cleanup cycle under byte pressure counts as **no progress** when the
+  ladder plugins freed less than `byte_progress_min_mb` MiB, the byte level
+  did not drop, and, in a cycle where a ladder plugin ran, the host
+  free-space delta is below the same amount.
+- Ladder plugins are every plugin that is not level-independent. Bytes a
+  level-independent plugin frees (the nix plugin's GC of `/nix`,
+  `bazel_bases`) never count: those plugins run every cycle whatever the
+  level, so their yield says nothing about whether the gated plugins help.
+  A free-space delta in a cycle where every ladder plugin was held back is
+  another writer's churn and does not count either.
 - After `byte_no_progress_limit` consecutive no-progress cycles, byte backoff
   engages. Each plugin then runs at most once per `min(cooldown,
   byte_backoff_max)`, or once per `byte_backoff_max` when no cooldown is set.
   Skipped plugins report `skip_reason: byte_backoff` and `retry_at`.
-- Cycles in which every plugin was held back do not advance the counter.
+- Every further ladder attempt that makes no progress doubles that interval,
+  up to `byte_backoff_max`; an attempt that makes progress resets it. A
+  mount whose deficit the enabled plugins cannot touch converges to one
+  attempt per `byte_backoff_max`. With the default `byte_backoff_max` (30m,
+  the default cooldown) the interval does not grow; raise it (for example to
+  6h) to let it.
+- Cycles in which no ladder plugin ran do not advance the counter.
 - Backoff releases on progress, when the byte level rises (an escalation earns
   a fresh attempt), and when pressure clears.
 - It never engages while free space is below `emergency_free_gb` GiB, for
