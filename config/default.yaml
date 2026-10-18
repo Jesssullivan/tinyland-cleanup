@@ -92,6 +92,7 @@ enable:
   dev_artifacts: true   # Rebuildable workspace artifacts
   bazel: true           # Bazel output base and cache cleanup planning
   bazel_bases: false    # Structural Bazel/omux output-base reaper (R-C644/R-C645)
+  shm_scratch: false    # Idle, unheld /dev/shm directories (lab R-C856, Linux)
   archive_lifecycle: true  # Retire verified archive staging pre-images
 
 # GitHub Actions runner settings (Linux only)
@@ -302,6 +303,18 @@ bazel_bases:
   lsof: ""              # required on Darwin (open-file inventory); optional second witness on Linux
   git: ""               # empty: git from PATH
   receipt_dir: ~/.local/state/tinyland-cleanup/bazel-bases
+
+# RAM-backed scratch reaper (lab R-C856, Linux). A top-level directory of a
+# tmpfs root is removed in apply mode when its newest change is older than
+# idle_after (never under 24h) and no process holds it (cwd, root, open file,
+# memory mapping or command line). Files at the top level are never touched.
+shm_scratch:
+  mode: report          # report (plan only) | apply
+  roots:
+    - /dev/shm
+  idle_after: 24h       # R-C856 floor: never shorter
+  max_roots_per_cycle: 256
+  uninspectable_ok_comms: [tailscaled, "(sd-pam)", sd-pam, systemd]
 
 agent_session:
   extra_paths: []           # added to the compiled TIN-5268 deny set
