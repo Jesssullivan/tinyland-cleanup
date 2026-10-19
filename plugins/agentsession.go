@@ -15,13 +15,15 @@ package plugins
 // CONTAINS a denied tree is refused as well (ancestor refusal).
 //
 // The per-repository directory names (.claude, .codex, ...) are matched
-// anywhere except in copies a package or a build reproduces: below a
-// node_modules element, or inside a Bazel output base's generated areas
+// anywhere except in copies a package or a build reproduces: an npm
+// package's own directory, or inside a Bazel output base's generated areas,
+// and then only when the directory holds no session signature
 // (agentSessionGeneratedCopy). The home-relative, uid, absolute and temp
 // stores have no such exception.
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -50,8 +52,8 @@ var agentSessionHomeRelative = []string{
 
 // agentSessionDirNames are per-repository session directories: a path element
 // with one of these names is session data wherever it appears, except in a
-// copy that a package manager or a Bazel build put there
-// (agentSessionGeneratedCopy).
+// copy that a package manager or a Bazel build put there that holds no
+// session signature (agentSessionGeneratedCopy).
 var agentSessionDirNames = []string{
 	".claude", ".codex", ".crush", ".fuzzybot", ".gstack", ".pi", ".kimi*",
 	".junie", ".opencode", ".cmux*", ".tmux*",
@@ -439,21 +441,28 @@ func isAgentSessionDir(path string) bool {
 }
 
 // agentSessionGeneratedCopy reports whether a session-named directory at path
-// is a file tree that a package or a build reproduces, not anyone's session:
+// is a file tree that a package or a build reproduces, not anyone's session.
+// It must have one of two shapes:
 //
-//   - a node_modules element lies above it: the directory ships inside an
-//     npm package (cytoscape, nanoid, resolve and dockerode publish a
-//     .claude directory) and every install or build copies it again;
-//   - it lies inside a generated area (bazelGeneratedAreas) of a Bazel output
-//     base: a fetched external repository (external/<repo>+/.claude), the
-//     execroot and its bazel-out, or an action sandbox. An output base is
-//     recognised by structure, exactly as bazel_bases discovers one
-//     (bbIsOutputBase); a working-tree directory that is merely named
-//     external or execroot does not qualify.
+//   - an npm package's own directory: path is node_modules/<pkg>/<name> or
+//     node_modules/@<scope>/<pkg>/<name>, where <pkg> is a real directory
+//     holding a package.json (cytoscape, nanoid, resolve and dockerode publish
+//     a .claude directory, and every install or build copies it again);
+//   - inside a generated area (bazelGeneratedAreas) of a Bazel output base: a
+//     fetched external repository (external/<repo>+/.claude), the execroot
+//     and its bazel-out, or an action sandbox. The base must pass
+//     bbIsGeneratedOutputBase, which is stricter than discovery, and the area
+//     must be a real directory that is not itself a git repository.
+//
+// And it must hold no session signature (agentSessionSignature): a Bazel
+// test or a tool that ran an agent inside a sandbox or a package writes
+// worktrees/, projects/, sessions/ or transcripts there, and those stay
+// session data wherever they are.
 //
 // Lab sting 2026-10-19: the name rule alone kept nine output bases (134 GiB,
 // idle 55-93 h) for such copies, and every build would pin a new base the
-// same way.
+// same way. Independent review 2026-10-19 (honey probes) narrowed the first
+// cut, which accepted any node_modules ancestor and a name-only base test.
 //
 // Only the path as given is judged. deniedBelow also judges the
 // symlink-resolved path, so a node_modules or external entry that links into
@@ -461,26 +470,118 @@ func isAgentSessionDir(path string) bool {
 // symlinks.
 func agentSessionGeneratedCopy(path string) bool {
 	path = filepath.Clean(path)
-	for q := filepath.Dir(path); ; q = filepath.Dir(q) {
-		if filepath.Base(q) == "node_modules" {
-			return true
-		}
-		if filepath.Dir(q) == q {
-			break
-		}
+	if !agentSessionPackageCopy(path) && !agentSessionBazelCopy(path) {
+		return false
 	}
+	return !agentSessionSignature(path)
+}
+
+// agentSessionPackageCopy reports the npm package shape:
+// .../node_modules/<pkg>/<name> or .../node_modules/@<scope>/<pkg>/<name>.
+func agentSessionPackageCopy(path string) bool {
+	pkg := filepath.Dir(path)
+	name := filepath.Base(pkg)
+	if name == "" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "@") {
+		return false
+	}
+	parent := filepath.Dir(pkg)
+	if scope := filepath.Base(parent); strings.HasPrefix(scope, "@") && len(scope) > 1 {
+		parent = filepath.Dir(parent)
+	}
+	if filepath.Base(parent) != "node_modules" {
+		return false
+	}
+	if !bbIsRealDir(pkg) {
+		return false
+	}
+	return bbIsRegular(filepath.Join(pkg, "package.json"))
+}
+
+// agentSessionBazelCopy reports a path inside a generated area of a Bazel
+// output base.
+func agentSessionBazelCopy(path string) bool {
 	for q := filepath.Dir(path); ; q = filepath.Dir(q) {
 		parent := filepath.Dir(q)
 		if parent == q {
-			break
+			return false
 		}
-		if bazelGeneratedAreas[filepath.Base(q)] {
-			if names, err := bbReadNames(parent); err == nil && bbIsOutputBase(parent, names) {
-				return true
-			}
+		if bazelGeneratedAreas[filepath.Base(q)] && bbIsRealDir(q) && !bbExistsLstat(filepath.Join(q, ".git")) &&
+			bbIsGeneratedOutputBase(parent) {
+			return true
 		}
 	}
-	return false
+}
+
+// bbIsGeneratedOutputBase is the structure the agent-session exception
+// requires of an output base, stricter than discovery (bbIsOutputBase):
+// execroot, external and server are real directories, lock is a regular
+// file, and DO_NOT_BUILD_HERE or javalog.properties is a regular file. A
+// seat directory that merely holds repositories named execroot or server
+// and a lock file does not qualify.
+func bbIsGeneratedOutputBase(dir string) bool {
+	for _, d := range []string{"execroot", "external", "server"} {
+		if !bbIsRealDir(filepath.Join(dir, d)) {
+			return false
+		}
+	}
+	if !bbIsRegular(filepath.Join(dir, "lock")) {
+		return false
+	}
+	return bbIsRegular(filepath.Join(dir, "DO_NOT_BUILD_HERE")) || bbIsRegular(filepath.Join(dir, "javalog.properties"))
+}
+
+// agentSessionSignatureNames and agentSessionSignatureGlobs are entries only
+// a real agent session writes: Claude's worktrees and projects, Codex's
+// sessions, transcripts and session databases.
+var (
+	agentSessionSignatureNames = map[string]bool{"worktrees": true, "projects": true, "sessions": true}
+	agentSessionSignatureGlobs = []string{"*.jsonl", "*.sqlite", "*.sqlite3", "*.sqlite-*", "*.db"}
+)
+
+// agentSessionSignatureScanLimit bounds the entries agentSessionSignature
+// reads; a larger directory counts as holding a signature.
+const agentSessionSignatureScanLimit = 10000
+
+// agentSessionSignature reports whether the session-named directory at path
+// holds a session signature at any depth. A path that is not a real
+// directory, a directory that cannot be read in full, or one with more than
+// agentSessionSignatureScanLimit entries counts as holding one.
+func agentSessionSignature(path string) bool {
+	if !bbIsRealDir(path) {
+		return true
+	}
+	found, n := false, 0
+	err := filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			found = true
+			return filepath.SkipAll
+		}
+		if p == path {
+			return nil
+		}
+		if n++; n > agentSessionSignatureScanLimit || agentSessionSignatureNames[d.Name()] {
+			found = true
+			return filepath.SkipAll
+		}
+		for _, g := range agentSessionSignatureGlobs {
+			if ok, _ := filepath.Match(g, d.Name()); ok {
+				found = true
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	return found || err != nil
+}
+
+func bbIsRealDir(p string) bool {
+	st, err := os.Lstat(p)
+	return err == nil && st.IsDir()
+}
+
+func bbExistsLstat(p string) bool {
+	_, err := os.Lstat(p)
+	return err == nil
 }
 
 func uniquePaths(paths ...string) []string {

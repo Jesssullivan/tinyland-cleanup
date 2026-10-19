@@ -1687,6 +1687,11 @@ func bbGuard(ctx context.Context, path, root string, mounts []string, mountErr e
 	if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
 		return "holds a .git entry (a git repository or work tree)"
 	}
+	if nested, err := bbNestedGitRoot(ctx, path); err != nil {
+		return "nested git scan incomplete: " + err.Error()
+	} else if nested != "" {
+		return "holds git root " + nested + " outside the areas Bazel generates"
+	}
 	if mountErr != nil || mounts == nil {
 		return "mount table unreadable"
 	}
@@ -1721,6 +1726,60 @@ func bbGuard(ctx context.Context, path, root string, mounts []string, mountErr e
 		}
 	}
 	return ""
+}
+
+// bbNestedGitScanLimit bounds the entries bbNestedGitRoot reads.
+const bbNestedGitScanLimit = 200000
+
+// bbNestedGitRoot returns a .git entry inside base that marks a repository
+// or work tree Bazel did not generate: one anywhere below the base's
+// top-level directories other than its generated areas (bazelGeneratedAreas),
+// or at the top of a generated area itself (a repository merely named
+// execroot or external). The generated areas are not searched further: a
+// fetched repository may carry .git, and the execroot links the workspace's.
+// Symlinks are not followed.
+func bbNestedGitRoot(ctx context.Context, base string) (string, error) {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return "", err
+	}
+	n := 0
+	for _, e := range entries {
+		p := filepath.Join(base, e.Name())
+		if bazelGeneratedAreas[e.Name()] {
+			if bbExistsLstat(filepath.Join(p, ".git")) {
+				return filepath.Join(p, ".git"), nil
+			}
+			continue
+		}
+		if !e.IsDir() {
+			continue
+		}
+		found := ""
+		err := filepath.WalkDir(p, func(q string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if n++; n > bbNestedGitScanLimit {
+				return errors.New("more than " + strconv.Itoa(bbNestedGitScanLimit) + " entries")
+			}
+			if d.Name() == ".git" {
+				found = q
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		if found != "" {
+			return found, nil
+		}
+	}
+	return "", nil
 }
 
 func bbGitEnv() []string {

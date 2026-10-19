@@ -27,15 +27,23 @@ All notable changes to this project will be documented in this file.
   `nanoid@3.3.12`, `resolve@1.22.12`, `dockerode@4.0.10` under
   `execroot/_main/bazel-out/.../node_modules/`) and that a fetched
   repository carries (`external/spear_resumes+/.claude`). A session-named
-  directory no longer counts when a `node_modules` element lies above it,
-  or when it lies inside `execroot/`, `external/`, `sandbox/` or
-  `bazel-out/` of a directory that is an output base by the same structural
-  test `bazel_bases` discovers bases with. The symlink-resolved path is
-  still judged, so a `node_modules` link into a real working tree stays
-  denied. The home-relative stores, uid and absolute stores, temp names and
-  a working tree's own `.claude` are denied as before. The same rule applies
-  in the `deny` checks, the `bazel_bases` measuring walk, `shm_scratch` and
-  the shared temp sweeps.
+  directory no longer counts when it is an npm package's own directory
+  (`node_modules/<pkg>/` or `node_modules/@<scope>/<pkg>/` with a
+  `package.json`), or lies inside `execroot/`, `external/`, `sandbox/` or
+  `bazel-out/` of an output base whose `execroot`, `external` and `server`
+  are directories and whose `lock` and `DO_NOT_BUILD_HERE` or
+  `javalog.properties` are regular files, and then only when it holds no
+  session signature (`worktrees`, `projects`, `sessions`, `*.jsonl`,
+  `*.sqlite*`, `*.db`). The symlink-resolved path is still judged, so a
+  `node_modules` link into a real working tree stays denied. The
+  home-relative stores, uid and absolute stores, temp names and a working
+  tree's own `.claude` are denied as before. The same rule applies in the
+  `deny` checks, the `bazel_bases` measuring walk, `shm_scratch` and the
+  shared temp sweeps (operator ruling 2026-10-19, "Approve narrowing").
+- **bazel_bases keeps a base candidate holding a nested git root.** Beside
+  the top-level `.git` check, a `.git` anywhere under a candidate's
+  non-generated directories, or at the top of `execroot/`, `external/` or
+  `sandbox/` (a repository merely named so), keeps it whole.
 - **Early bazel_bases walks keep a duty share (lab sting, 2026-10-17).** One
   removal of any size reset the wait before the next early pressure walk to
   5 minutes, so on sting walks of 90 s to 25 min ran back to back, each
