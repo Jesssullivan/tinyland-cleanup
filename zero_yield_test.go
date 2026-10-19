@@ -273,32 +273,67 @@ func TestRecordPluginRunPreservesZeroYieldFields(t *testing.T) {
 // TIN-3342 criterion 4: 24 simulated hours at 95% used with the
 // minimum_free_gb runway unmet and nothing reclaimable, at a 5 minute poll,
 // with byte backoff and zero-yield suppression at their defaults. v0.4.1 runs
-// the plugin every cycle (288 runs); here it runs a handful of times.
+// the plugin every cycle (288 runs). The mount is critical, so since the
+// operator ruling of 2026-10-19 ("Quota pressure retries") mount pressure
+// lifts suppression, but at most once per zero_yield_pressure_min_interval
+// (1h): the plugin is retried hourly and never spins.
 func TestZeroYieldSoakUnderPinnedBytePressure(t *testing.T) {
-	runs := soakRuns(t, 5*time.Minute, 24*time.Hour)
-	if len(runs) > soakRunBound(defaultPolicyForTest(), 24*time.Hour) {
-		t.Fatalf("zero-yield plugin ran %d times in 24h, want at most %d: %v",
-			len(runs), soakRunBound(defaultPolicyForTest(), 24*time.Hour), runs)
+	policy := defaultPolicyForTest()
+	runs := soakRuns(t, bytePressureStats(25, 95), 5*time.Minute, 24*time.Hour)
+	if bound := soakRunBound(policy, policy.pressureCap(), 24*time.Hour); len(runs) > bound {
+		t.Fatalf("zero-yield plugin ran %d times in 24h under pressure, want at most %d: %v", len(runs), bound, runs)
+	}
+	if len(runs) < 20 {
+		t.Fatalf("mount pressure must retry the plugin about hourly, got %d runs: %v", len(runs), runs)
+	}
+	for i := policy.limit; i < len(runs); i++ {
+		if gap := runs[i].Sub(runs[i-1]); gap < policy.base {
+			t.Fatalf("run %d came %s after the last one, under the %s base: %v", i, gap, policy.base, runs)
+		}
+	}
+	t.Logf("zero-yield plugin ran %d times in 24h at a 5m poll under pressure (every cycle would be 288): %v", len(runs), runs)
+}
+
+// At warning, below the mount-pressure line, the full backoff applies: the
+// plugin runs a handful of times in 24 hours.
+func TestZeroYieldSoakAtWarningKeepsTheFullBackoff(t *testing.T) {
+	policy := defaultPolicyForTest()
+	runs := soakRuns(t, bytePressureStats(25, 82), 5*time.Minute, 24*time.Hour)
+	if bound := soakRunBound(policy, policy.max, 24*time.Hour); len(runs) > bound {
+		t.Fatalf("zero-yield plugin ran %d times in 24h at warning, want at most %d: %v", len(runs), bound, runs)
 	}
 	if len(runs) < 3 {
 		t.Fatalf("the plugin must still be retried, got %d runs", len(runs))
 	}
-	t.Logf("zero-yield plugin ran %d times in 24h at a 5m poll (every cycle would be 288): %v", len(runs), runs)
 }
 
 func defaultPolicyForTest() zeroYieldPolicy {
-	return zeroYieldPolicy{limit: defaultZeroYieldLimit, base: defaultZeroYieldBackoffBase, max: defaultZeroYieldBackoffMax}
+	return zeroYieldPolicy{limit: defaultZeroYieldLimit, base: defaultZeroYieldBackoffBase, max: defaultZeroYieldBackoffMax,
+		pressureMin: defaultZeroYieldPressureMinInterval}
 }
 
-// soakRunBound is the most runs the schedule allows over horizon: the runs up
-// to the limit, the doubling steps up to the cap, then one run per cap, plus
-// one for the run in progress at the end.
-func soakRunBound(policy zeroYieldPolicy, horizon time.Duration) int {
-	steps := int(math.Ceil(math.Log2(float64(policy.max) / float64(policy.base))))
-	return policy.limit + steps + int(math.Ceil(float64(horizon)/float64(policy.max))) + 1
+// pressureCap is the longest a plugin waits between runs while mount
+// pressure lifts suppression.
+func (p zeroYieldPolicy) pressureCap() time.Duration {
+	if p.pressureMin < p.max {
+		return p.pressureMin
+	}
+	return p.max
 }
 
-func soakRuns(t *testing.T, poll, horizon time.Duration) []time.Time {
+// soakRunBound is the most runs the schedule allows over horizon when the
+// wait between runs is capped at limitCap: the runs up to the limit, the
+// doubling steps up to the cap, then one run per cap, plus one for the run
+// in progress at the end.
+func soakRunBound(policy zeroYieldPolicy, limitCap, horizon time.Duration) int {
+	steps := int(math.Ceil(math.Log2(float64(limitCap) / float64(policy.base))))
+	if steps < 0 {
+		steps = 0
+	}
+	return policy.limit + steps + int(math.Ceil(float64(horizon)/float64(limitCap))) + 1
+}
+
+func soakRuns(t *testing.T, stats *monitor.DiskStats, poll, horizon time.Duration) []time.Time {
 	t.Helper()
 	var output bytes.Buffer
 	d := newTestDaemonWithPlugins(t, &output, &reportingPlugin{name: "dev-artifacts"})
@@ -306,7 +341,7 @@ func soakRuns(t *testing.T, poll, horizon time.Duration) []time.Time {
 	d.config.TargetFree = 70
 	clock := &fakeClock{t: time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)}
 	d.now = clock.Now
-	d.diskStats = sequenceDiskStats(t, bytePressureStats(25, 95))
+	d.diskStats = sequenceDiskStats(t, stats)
 	var runs []time.Time
 	for end := clock.Now().Add(horizon); clock.Now().Before(end); clock.Advance(poll) {
 		if pluginRan(runByteCycle(t, d, &output)) {
@@ -317,14 +352,14 @@ func soakRuns(t *testing.T, poll, horizon time.Duration) []time.Time {
 }
 
 // TestPropertyZeroYieldSoak generalises the soak over the poll interval: the
-// run count stays within the schedule's bound, and once suppressed the plugin
-// is never retried sooner than the base interval.
+// run count stays within the schedule's bound under pinned pressure, and once
+// suppressed the plugin is never retried sooner than the base interval.
 func TestPropertyZeroYieldSoak(t *testing.T) {
 	policy := defaultPolicyForTest()
 	property := func(pollMinutes uint8) bool {
 		poll := time.Duration(pollMinutes%26+5) * time.Minute
-		runs := soakRuns(t, poll, 24*time.Hour)
-		if len(runs) > soakRunBound(policy, 24*time.Hour) || len(runs) < policy.limit {
+		runs := soakRuns(t, bytePressureStats(25, 95), poll, 24*time.Hour)
+		if len(runs) > soakRunBound(policy, policy.pressureCap(), 24*time.Hour) || len(runs) < policy.limit {
 			return false
 		}
 		for i := policy.limit; i < len(runs); i++ {
