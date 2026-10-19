@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Package and Bazel-generated `.claude` copies no longer pin output bases
+  (lab sting, 2026-10-19).** The TIN-5268 per-repository name rule counted a
+  `.claude` (or `.codex`, `.pi`, ...) directory as session data wherever it
+  appeared, so `bazel_bases` kept nine bases idle 55-93 h (134 GiB) for the
+  `.claude` directories that npm packages ship (`cytoscape@3.34.1`,
+  `nanoid@3.3.12`, `resolve@1.22.12`, `dockerode@4.0.10` under
+  `execroot/_main/bazel-out/.../node_modules/`) and that a fetched
+  repository carries (`external/spear_resumes+/.claude`). A session-named
+  directory no longer counts when a `node_modules` element lies above it,
+  or when it lies inside `execroot/`, `external/`, `sandbox/` or
+  `bazel-out/` of a directory that is an output base by the same structural
+  test `bazel_bases` discovers bases with. The symlink-resolved path is
+  still judged, so a `node_modules` link into a real working tree stays
+  denied. The home-relative stores, uid and absolute stores, temp names and
+  a working tree's own `.claude` are denied as before. The same rule applies
+  in the `deny` checks, the `bazel_bases` measuring walk, `shm_scratch` and
+  the shared temp sweeps.
 - **Early bazel_bases walks keep a duty share (lab sting, 2026-10-17).** One
   removal of any size reset the wait before the next early pressure walk to
   5 minutes, so on sting walks of 90 s to 25 min ran back to back, each

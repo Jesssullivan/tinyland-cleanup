@@ -500,10 +500,11 @@ func TestBazelBasesNeverTouchesAgentSessionData(t *testing.T) {
 	bbMakeBase(t, tmuxBase, 4096, 96*time.Hour)
 	repoClaude := filepath.Join(f.root, "repo", ".claude", "worktrees", "w", "out")
 	bbMakeBase(t, repoClaude, 4096, 96*time.Hour)
-	// A base that contains a per-repository session directory is kept whole.
+	// A base that contains a per-repository session directory outside its
+	// generated areas (agentSessionGeneratedCopy) is kept whole.
 	holder := filepath.Join(f.root, "holder", "out")
 	bbMakeBase(t, holder, 4096, 96*time.Hour)
-	bbWrite(t, filepath.Join(holder, "execroot", "_main", ".claude", "settings.json"), 10)
+	bbWrite(t, filepath.Join(holder, ".claude", "settings.json"), 10)
 	bbAge(t, holder, 96*time.Hour)
 	// The carve-out: an omux run's base under the Codex store goes; the
 	// receipt beside it and the transcripts elsewhere in the store stay.
@@ -789,7 +790,7 @@ func TestBazelBasesPressureWithOnlyAKeptBaseKeepsTheInterval(t *testing.T) {
 	f.plugin.env.now = func() time.Time { return now }
 	base := filepath.Join(f.root, "a", "out")
 	bbMakeBase(t, base, 64*1024, 100*time.Hour)
-	bbMkdir(t, filepath.Join(base, "execroot", "_main", ".claude"))
+	bbMkdir(t, filepath.Join(base, ".claude"))
 	bbAge(t, base, 100*time.Hour)
 	walks := 0
 	polls := int(2 * time.Hour / (5 * time.Minute))
@@ -855,7 +856,7 @@ func TestBazelBasesLateMeasureKeepsAgentSessionDirectory(t *testing.T) {
 	f.cfg.BazelBases.MaxSecondsPerCycle = 2
 	base := filepath.Join(f.root, "late", "out")
 	bbMakeBase(t, base, 4096, 13*time.Hour)
-	session := filepath.Join(base, "execroot", "_main", ".claude", "projects", "s.jsonl")
+	session := filepath.Join(base, ".claude", "projects", "s.jsonl")
 	bbWrite(t, session, 16)
 	bbAge(t, base, 13*time.Hour)
 	calls := 0
@@ -959,7 +960,7 @@ func TestBazelBasesApplyMeasuresUnmeasuredRowAndKeepsSessionData(t *testing.T) {
 	f := newBBFixture(t)
 	base := filepath.Join(f.root, "unmeasured", "out")
 	bbMakeBase(t, base, 4096, 13*time.Hour)
-	session := filepath.Join(base, "external", "repo", ".pi", "session.jsonl")
+	session := filepath.Join(base, ".pi", "session.jsonl")
 	bbWrite(t, session, 16)
 	bbAge(t, base, 13*time.Hour)
 	pol, err := f.plugin.policy(f.cfg)

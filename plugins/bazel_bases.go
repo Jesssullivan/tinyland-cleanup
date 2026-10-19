@@ -1353,7 +1353,7 @@ func bbMeasureTree(ctx context.Context, root string, deadline time.Time, uid int
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return context.DeadlineExceeded
 		}
-		if d.IsDir() && path != root && isAgentSessionDirName(d.Name()) {
+		if d.IsDir() && path != root && isAgentSessionDir(path) {
 			denied = path
 			return filepath.SkipAll
 		}

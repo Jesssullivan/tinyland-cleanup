@@ -13,6 +13,12 @@ package plugins
 // denied at its physical path as well as its literal one. A path is denied
 // when it, or any ancestor, is a denied tree; a removal of a directory that
 // CONTAINS a denied tree is refused as well (ancestor refusal).
+//
+// The per-repository directory names (.claude, .codex, ...) are matched
+// anywhere except in copies a package or a build reproduces: below a
+// node_modules element, or inside a Bazel output base's generated areas
+// (agentSessionGeneratedCopy). The home-relative, uid, absolute and temp
+// stores have no such exception.
 
 import (
 	"fmt"
@@ -43,10 +49,19 @@ var agentSessionHomeRelative = []string{
 }
 
 // agentSessionDirNames are per-repository session directories: a path element
-// with one of these names is session data wherever it appears.
+// with one of these names is session data wherever it appears, except in a
+// copy that a package manager or a Bazel build put there
+// (agentSessionGeneratedCopy).
 var agentSessionDirNames = []string{
 	".claude", ".codex", ".crush", ".fuzzybot", ".gstack", ".pi", ".kimi*",
 	".junie", ".opencode", ".cmux*", ".tmux*",
+}
+
+// bazelGeneratedAreas are the directories of a Bazel output base that the
+// build itself creates and rewrites: the execution root, fetched external
+// repositories, action sandboxes and output trees.
+var bazelGeneratedAreas = map[string]bool{
+	"execroot": true, "external": true, "sandbox": true, "bazel-out": true,
 }
 
 // agentSessionUIDPatterns are host-wide harness and multiplexer stores; %d is
@@ -262,8 +277,8 @@ func resolvedOrSelf(p string) string {
 
 // denied reports why path is agent-session data: it or an ancestor matches a
 // pattern or lies in a resolved store, or one of its elements is a
-// per-repository session directory. Both the literal and the physical path
-// are checked.
+// per-repository session directory (isAgentSessionDir). Both the literal and
+// the physical path are checked.
 func (d *agentSessionDeny) denied(path string) (string, bool) {
 	return d.deniedBelow(path, "")
 }
@@ -312,7 +327,7 @@ func (d *agentSessionDeny) deniedPath(p, boundary string) (string, bool) {
 				return "agent-session store " + pattern + " (TIN-5268)", true
 			}
 		}
-		if isAgentSessionDirName(filepath.Base(q)) {
+		if isAgentSessionDir(q) {
 			return "agent-session directory " + q + " (TIN-5268)", true
 		}
 		if d.rootSet[q] {
@@ -406,11 +421,63 @@ func (d *agentSessionDeny) leadsToCarveout(path string) bool {
 }
 
 // isAgentSessionDirName reports whether a directory name is a per-repository
-// session directory.
+// session directory name. isAgentSessionDir is the full rule.
 func isAgentSessionDirName(name string) bool {
 	for _, glob := range agentSessionDirNames {
 		if ok, _ := filepath.Match(glob, name); ok {
 			return true
+		}
+	}
+	return false
+}
+
+// isAgentSessionDir reports whether the directory at path is a per-repository
+// session directory: it has a session directory name and is not a generated
+// copy. Every walk that applies the name rule goes through here.
+func isAgentSessionDir(path string) bool {
+	return isAgentSessionDirName(filepath.Base(path)) && !agentSessionGeneratedCopy(path)
+}
+
+// agentSessionGeneratedCopy reports whether a session-named directory at path
+// is a file tree that a package or a build reproduces, not anyone's session:
+//
+//   - a node_modules element lies above it: the directory ships inside an
+//     npm package (cytoscape, nanoid, resolve and dockerode publish a
+//     .claude directory) and every install or build copies it again;
+//   - it lies inside a generated area (bazelGeneratedAreas) of a Bazel output
+//     base: a fetched external repository (external/<repo>+/.claude), the
+//     execroot and its bazel-out, or an action sandbox. An output base is
+//     recognised by structure, exactly as bazel_bases discovers one
+//     (bbIsOutputBase); a working-tree directory that is merely named
+//     external or execroot does not qualify.
+//
+// Lab sting 2026-10-19: the name rule alone kept nine output bases (134 GiB,
+// idle 55-93 h) for such copies, and every build would pin a new base the
+// same way.
+//
+// Only the path as given is judged. deniedBelow also judges the
+// symlink-resolved path, so a node_modules or external entry that links into
+// a real working tree stays denied at its physical path; walks never follow
+// symlinks.
+func agentSessionGeneratedCopy(path string) bool {
+	path = filepath.Clean(path)
+	for q := filepath.Dir(path); ; q = filepath.Dir(q) {
+		if filepath.Base(q) == "node_modules" {
+			return true
+		}
+		if filepath.Dir(q) == q {
+			break
+		}
+	}
+	for q := filepath.Dir(path); ; q = filepath.Dir(q) {
+		parent := filepath.Dir(q)
+		if parent == q {
+			break
+		}
+		if bazelGeneratedAreas[filepath.Base(q)] {
+			if names, err := bbReadNames(parent); err == nil && bbIsOutputBase(parent, names) {
+				return true
+			}
 		}
 	}
 	return false
