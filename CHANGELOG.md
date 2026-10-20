@@ -14,14 +14,22 @@ All notable changes to this project will be documented in this file.
   `nanoid@3.3.12`, `resolve@1.22.12`, `dockerode@4.0.10` under
   `execroot/_main/bazel-out/.../node_modules/`) and that a fetched
   repository carries (`external/spear_resumes+/.claude`). A session-named
-  directory no longer counts when it is an npm package's own directory
-  (`node_modules/<pkg>/` or `node_modules/@<scope>/<pkg>/` with a
-  `package.json`), or lies inside `execroot/`, `external/`, `sandbox/` or
-  `bazel-out/` of an output base whose `execroot`, `external` and `server`
-  are directories and whose `lock` and `DO_NOT_BUILD_HERE` or
-  `javalog.properties` are regular files, and then only when it holds no
-  session signature (`worktrees`, `projects`, `sessions`, `*.jsonl`,
-  `*.sqlite*`, `*.db`). The symlink-resolved path is still judged, so a
+  directory now counts as such a copy in exactly two shapes:
+  - an npm package's own directory, `node_modules/<pkg>/` or
+    `node_modules/@<scope>/<pkg>/`, where `<pkg>` has a `package.json` and
+    no `.git` (the four packages publish `.claude/settings.local.json`);
+  - a fetched repository's own `.claude` at `<base>/external/<repo>/` in an
+    output base whose `execroot`, `external` and `server` are directories
+    and whose `lock` and `DO_NOT_BUILD_HERE` or `javalog.properties` are
+    regular files, with no `.git` in `external/` or `<repo>`.
+
+  Either way it must hold no session signature: `worktrees`, `projects`,
+  `sessions`, `file-history`, `todos`, `plans`, `shell-snapshots`,
+  `qa-reports`, `memory`, `resurrect`, `*.jsonl`, `*.sqlite*` or `*.db`. The
+  external shape also rejects `settings.local.json`, `agents` and
+  `commands`. Every other place in an execroot, `bazel-out` or sandbox,
+  every clone, and every session name other than `.claude` outside the npm
+  package shape stay denied. The symlink-resolved path is still judged, so a
   `node_modules` link into a real working tree stays denied. The
   home-relative stores, uid and absolute stores, temp names and a working
   tree's own `.claude` are denied as before. The same rule applies in the

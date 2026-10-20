@@ -15,9 +15,9 @@ import (
 // that a fetched external repository carries (external/spear_resumes+).
 // Those copies are reproduced by every build; they are nobody's session.
 // The TIN-5268 name rule no longer counts a session-named directory that is
-// an npm package's own directory or lies in an output base's generated
-// areas, unless it holds a session signature. Everything else it denied
-// stays denied.
+// an npm package's own directory, or a fetched external repository's own
+// .claude, unless it holds a session signature. Everything else it denied
+// stays denied, including every other place in an execroot or sandbox.
 
 // bbPackage makes dir an npm package directory (a real directory holding a
 // package.json) and returns it.
@@ -39,19 +39,27 @@ func TestAgentSessionDenyIgnoresPackageAndBazelGeneratedCopies(t *testing.T) {
 	// DO_NOT_BUILD_HERE.
 	base := filepath.Join(dir, "cache", "bazel", "_bazel_u", "0123abcd")
 	bbMakeBase(t, base, 16, time.Hour)
+	// What the four packages publish: .claude/settings.local.json (resolve
+	// also .claude/notes.md).
 	rulesJS := bbPackage(t, filepath.Join(base, "execroot", "_main", "bazel-out", "k8-fastbuild", "bin", "node_modules",
 		".aspect_rules_js", "cytoscape@3.34.1", "node_modules", "cytoscape"))
-	bbWrite(t, filepath.Join(rulesJS, ".claude", "settings.json"), 8)
-	bbWrite(t, filepath.Join(base, "external", "spear_resumes+", ".claude", "settings.json"), 8)
+	bbWrite(t, filepath.Join(rulesJS, ".claude", "settings.local.json"), 8)
+	// What spear_resumes tracks: .claude/skills/.
+	bbWrite(t, filepath.Join(base, "external", "spear_resumes+", ".claude", "skills", "spear-resume", "SKILL.md"), 8)
+	// Elsewhere in the execroot or a sandbox nothing is a copy.
 	bbWrite(t, filepath.Join(base, "execroot", "_main", ".claude", "settings.json"), 8)
 	bbWrite(t, filepath.Join(base, "sandbox", "linux-sandbox", "7", "execroot", "_main", ".codex", "config.toml"), 8)
 	// A working tree whose own .claude sits beside its node_modules.
 	ws := filepath.Join(dir, "git", "app")
 	bbMkdir(t, filepath.Join(ws, ".claude", "worktrees", "w"))
 	cytoscape := bbPackage(t, filepath.Join(ws, "node_modules", "cytoscape"))
-	bbWrite(t, filepath.Join(cytoscape, ".claude", "settings.json"), 8)
+	bbWrite(t, filepath.Join(cytoscape, ".claude", "settings.local.json"), 8)
+	resolve := bbPackage(t, filepath.Join(ws, "node_modules", "resolve"))
+	bbWrite(t, filepath.Join(resolve, ".claude", "notes.md"), 8)
 	scoped := bbPackage(t, filepath.Join(ws, "node_modules", "@acme", "ui"))
 	bbWrite(t, filepath.Join(scoped, ".claude", "commands", "x.md"), 8)
+	pkgCodex := bbPackage(t, filepath.Join(ws, "node_modules", "tool"))
+	bbWrite(t, filepath.Join(pkgCodex, ".codex", "config.toml"), 8)
 	// Package-like places that are not a package's own directory.
 	bbWrite(t, filepath.Join(ws, "node_modules", ".claude", "x"), 8)
 	bbWrite(t, filepath.Join(ws, "node_modules", ".cache", ".claude", "x"), 8)
@@ -83,6 +91,8 @@ func TestAgentSessionDenyIgnoresPackageAndBazelGeneratedCopies(t *testing.T) {
 		filepath.Join(ws, "node_modules", "missing", ".claude", "x"),
 		filepath.Join(lookalike, "external", "vendored", ".claude", "x"),
 		filepath.Join(base, "external", "never-fetched", ".claude", "x"),
+		filepath.Join(base, "execroot", "_main", ".claude", "settings.json"),
+		filepath.Join(base, "sandbox", "linux-sandbox", "7", "execroot", "_main", ".codex", "config.toml"),
 		filepath.Join(dir, "git", "other", ".codex", "x"),
 		"/tmp/tmux-1000/default",
 		"/run/user/1000/tmux-1000/default",
@@ -95,12 +105,12 @@ func TestAgentSessionDenyIgnoresPackageAndBazelGeneratedCopies(t *testing.T) {
 		}
 	}
 	for _, p := range []string{
-		filepath.Join(cytoscape, ".claude", "settings.json"),
+		filepath.Join(cytoscape, ".claude", "settings.local.json"),
+		filepath.Join(resolve, ".claude", "notes.md"),
 		filepath.Join(scoped, ".claude", "commands", "x.md"),
-		filepath.Join(rulesJS, ".claude", "settings.json"),
-		filepath.Join(base, "external", "spear_resumes+", ".claude", "settings.json"),
-		filepath.Join(base, "execroot", "_main", ".claude", "settings.json"),
-		filepath.Join(base, "sandbox", "linux-sandbox", "7", "execroot", "_main", ".codex", "config.toml"),
+		filepath.Join(pkgCodex, ".codex", "config.toml"),
+		filepath.Join(rulesJS, ".claude", "settings.local.json"),
+		filepath.Join(base, "external", "spear_resumes+", ".claude", "skills", "spear-resume", "SKILL.md"),
 	} {
 		if why, denied := d.denied(p); denied {
 			t.Errorf("%s is a generated copy but is denied: %s", p, why)
@@ -145,8 +155,43 @@ func TestAgentSessionDenyKeepsSessionsInPackageAndBazelShapedPlaces(t *testing.T
 	bbMakeBase(t, gitArea, 16, time.Hour)
 	bbMkdir(t, filepath.Join(gitArea, "external", ".git"))
 	bbWrite(t, filepath.Join(gitArea, "external", "r", ".claude", "settings.json"), 8)
+	// Round 2, probe 1: a git clone at node_modules/<pkg> (package.json and
+	// .git) whose .claude holds only configuration.
+	var round2 []string
+	clone := bbPackage(t, filepath.Join(dir, "src", "node_modules", "cloned"))
+	bbWrite(t, filepath.Join(clone, ".git", "HEAD"), 8)
+	for _, rel := range []string{"settings.local.json", "plans/p.md", "agents/a.md", "commands/c.md"} {
+		round2 = append(round2, filepath.Join(clone, ".claude", rel))
+		bbWrite(t, round2[len(round2)-1], 8)
+	}
+	wtClone := bbPackage(t, filepath.Join(dir, "src", "node_modules", "worktree-clone"))
+	bbWrite(t, filepath.Join(wtClone, ".git"), 8) // a linked work tree's .git file
+	round2 = append(round2, filepath.Join(wtClone, ".claude", "settings.local.json"))
+	bbWrite(t, round2[len(round2)-1], 8)
+	// Round 2, probe 2: real tool data in package-shaped directories.
+	for i, rel := range []string{
+		".claude/file-history/f", ".claude/todos/t.json", ".claude/plans/p.md", ".claude/shell-snapshots/s.sh",
+		".gstack/qa-reports/r.md", ".junie/memory/m.md", ".tmux/resurrect/last.txt",
+	} {
+		pkg := bbPackage(t, filepath.Join(dir, "deps", "node_modules", "p"+string(rune('a'+i))))
+		round2 = append(round2, filepath.Join(pkg, rel))
+		bbWrite(t, round2[len(round2)-1], 8)
+	}
+	// Round 2, probe 3: a config-only .claude in a repo cloned under the
+	// execroot's _tmp, and configuration in a fetched repository's .claude.
+	for _, rel := range []string{
+		"execroot/_main/_tmp/9c1e/repo/.claude/settings.local.json",
+		"execroot/_main/_tmp/9c1e/repo/.claude/commands/c.md",
+		"external/fetched+/.claude/settings.local.json",
+		"external/agents+/.claude/agents/a.md",
+		"external/codexrepo+/.codex/config.toml",
+		"external/gstackrepo+/.gstack/browse.json",
+	} {
+		round2 = append(round2, filepath.Join(base, rel))
+		bbWrite(t, round2[len(round2)-1], 8)
+	}
 
-	for _, p := range []string{
+	for _, p := range append(round2,
 		worktree,
 		filepath.Join(seat, "execroot", ".claude", "settings.local.json"),
 		filepath.Join(seat, "external", "x", ".claude", "settings.json"),
@@ -155,7 +200,7 @@ func TestAgentSessionDenyKeepsSessionsInPackageAndBazelShapedPlaces(t *testing.T
 		db,
 		filepath.Join(projects, ".claude", "projects", "p", "x.json"),
 		filepath.Join(gitArea, "external", "r", ".claude", "settings.json"),
-	} {
+	) {
 		if _, denied := d.denied(p); !denied {
 			t.Errorf("%s is session data but is not denied", p)
 		}
@@ -212,7 +257,7 @@ func TestBazelBasesReapsBasesWhoseOnlySessionNamesAreGeneratedCopies(t *testing.
 	bbAge(t, npm, 60*time.Hour)
 	ext := filepath.Join(f.root, "cache", "_bazel_u", "ext")
 	bbMakeBase(t, ext, 4096, 60*time.Hour)
-	bbWrite(t, filepath.Join(ext, "external", "spear_resumes+", ".claude", "settings.json"), 32)
+	bbWrite(t, filepath.Join(ext, "external", "spear_resumes+", ".claude", "skills", "spear-resume", "SKILL.md"), 32)
 	bbAge(t, ext, 60*time.Hour)
 	// The same copy beside a session directory outside the generated areas
 	// keeps the base.
@@ -228,6 +273,13 @@ func TestBazelBasesReapsBasesWhoseOnlySessionNamesAreGeneratedCopies(t *testing.
 	rollout := filepath.Join(hosted, "execroot", "_main", "_tmp", "4f2a", "home", ".codex", "sessions", "2026", "rollout.jsonl")
 	bbWrite(t, rollout, 32)
 	bbAge(t, hosted, 60*time.Hour)
+	// Round 2, probe 3: a config-only .claude in a repo cloned under the
+	// execroot's _tmp keeps its base.
+	tmpClone := filepath.Join(f.root, "cache", "_bazel_u", "tmpclone")
+	bbMakeBase(t, tmpClone, 4096, 60*time.Hour)
+	cloned := filepath.Join(tmpClone, "execroot", "_main", "_tmp", "9c1e", "repo", ".claude", "settings.local.json")
+	bbWrite(t, cloned, 32)
+	bbAge(t, tmpClone, 60*time.Hour)
 	// Probe 2: a seat holding repositories named execroot and server and a
 	// lock file is discovered as a base and must be kept whole.
 	seat := filepath.Join(f.root, "seat")
@@ -270,6 +322,9 @@ func TestBazelBasesReapsBasesWhoseOnlySessionNamesAreGeneratedCopies(t *testing.
 	}
 	if r := bbRowFor(t, cycle, hosted); r.Decision != "keep" || !strings.Contains(r.Reason, "agent-session") || !bbExists(rollout) {
 		t.Errorf("a base holding a hosted agent run: %q (%s)", r.Decision, r.Reason)
+	}
+	if r := bbRowFor(t, cycle, tmpClone); r.Decision != "keep" || !strings.Contains(r.Reason, "agent-session") || !bbExists(cloned) {
+		t.Errorf("a base holding a clone's .claude under _tmp: %q (%s)", r.Decision, r.Reason)
 	}
 	if r := bbRowFor(t, cycle, seat); r.Decision != "keep" || !strings.Contains(r.Reason, "git root") {
 		t.Errorf("seat with repositories named execroot and server: %q (%s)", r.Decision, r.Reason)
@@ -331,18 +386,23 @@ func TestTempSweepAndShmScratchIgnorePackageCopiesOnly(t *testing.T) {
 	sessionFile := filepath.Join(tmp, "build", ".claude", "old.json")
 	worktreeFile := filepath.Join(tmp, "build", "node_modules", "app", ".claude", "worktrees", "w", "old.go")
 	bbPackage(t, filepath.Join(tmp, "build", "node_modules", "app"))
+	// Round 2, probe 1: a clone's config-only .claude under node_modules.
+	clone := bbPackage(t, filepath.Join(tmp, "build", "node_modules", "cloned"))
+	bbMkdir(t, filepath.Join(clone, ".git"))
+	cloneFile := filepath.Join(clone, ".claude", "settings.local.json")
 	bbWrite(t, copyFile, 64)
 	bbWrite(t, sessionFile, 64)
 	bbWrite(t, worktreeFile, 64)
+	bbWrite(t, cloneFile, 64)
 	old := time.Now().Add(-72 * time.Hour)
-	for _, p := range []string{copyFile, sessionFile, worktreeFile} {
+	for _, p := range []string{copyFile, sessionFile, worktreeFile, cloneFile} {
 		_ = os.Chtimes(p, old, old)
 	}
 	deleteOldFilesSameDevice(tmp, time.Hour)
 	if bbExists(copyFile) {
 		t.Error("the temp sweep still treats a package's .claude as session data")
 	}
-	if !bbExists(sessionFile) || !bbExists(worktreeFile) {
+	if !bbExists(sessionFile) || !bbExists(worktreeFile) || !bbExists(cloneFile) {
 		t.Fatal("the temp sweep aged out session data (TIN-5268)")
 	}
 
