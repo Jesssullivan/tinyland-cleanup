@@ -522,6 +522,9 @@ func TestBazelBasesNeverTouchesAgentSessionData(t *testing.T) {
 		"repo":     bbManifest(t, filepath.Join(f.root, "repo", ".claude")),
 		"holder":   bbManifest(t, holder),
 	}
+	// Reading the manifest refreshed the holder's atimes; age it again so it
+	// is kept for the session directory it holds, not for a recent use.
+	bbAge(t, holder, 96*time.Hour)
 	f.usage = func(string) (bbUsage, error) {
 		return bbUsage{BytesTotal: 100, BytesUsed: 99, InodesTotal: 100, InodesUsed: 99, InodesCounted: true}, nil
 	}
@@ -537,6 +540,10 @@ func TestBazelBasesNeverTouchesAgentSessionData(t *testing.T) {
 		if before[k] != after[k] {
 			t.Errorf("agent-session tree %s changed under 99%% pressure: %v", k, bbRowPaths(cycle))
 		}
+	}
+	if r := bbRowFor(t, cycle, holder); r.Decision != "keep" ||
+		!strings.Contains(r.Reason, "agent-session directory "+filepath.Join(holder, "execroot", "_main", ".claude")) {
+		t.Errorf("holder kept for the wrong reason: %q (%s)", r.Decision, r.Reason)
 	}
 	if bbExists(omuxBase) {
 		t.Errorf("the carved-out omux base was not reaped: %v", bbRowPaths(cycle))

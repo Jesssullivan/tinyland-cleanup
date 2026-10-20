@@ -20,8 +20,9 @@ package plugins
 //   - only directories owned by this user, whose every entry is this user's
 //     and on the root's device, with no .git anywhere;
 //   - never agent-session data (TIN-5268: claude-*, codex*, .tmp*, pi-* at
-//     the top, a session directory such as .claude inside, or anything the
-//     compiled deny set covers);
+//     the top, a session directory such as .claude inside that is not a
+//     package or Bazel-generated copy, or anything the compiled deny set
+//     covers);
 //   - idle means the newest modification time in the tree (ctime when an
 //     mtime is in the future) is older than idle_after;
 //   - no live holder: no process of any user this daemon can inspect has its
@@ -317,7 +318,7 @@ func (p *ShmScratchPlugin) keepReason(ctx context.Context, path string, info os.
 		if d.Name() == ".git" {
 			return errors.New("contains .git: Git-owner custody")
 		}
-		if walked != path && d.IsDir() && isAgentSessionDirName(d.Name()) {
+		if walked != path && d.IsDir() && isAgentSessionDir(walked) {
 			return errors.New("contains agent-session directory " + d.Name() + " (TIN-5268)")
 		}
 		fi, err := d.Info()
