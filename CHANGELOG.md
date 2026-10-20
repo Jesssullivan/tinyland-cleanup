@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Mount pressure lifts zero-yield backoff, at most hourly (lab sting,
+  2026-10-19; operator ruling 2026-10-19, "Quota pressure retries").** The
+  bazel, cache, dev-artifacts, archive-lifecycle and podman plugins sat in
+  `zero_yield_backoff` for 6h while sting's dev-seat project quota
+  (`sting-devseat-177`, `/srv/fast-local/jess`) was at moderate or
+  critical: only a higher level, a config change, the host's
+  `emergency_free_gb` floor or cleared pressure lifted it. Now any monitored
+  mount at moderate or higher lifts it too (`zero_yield_lifted:
+  mount_pressure`), but only once `policy.zero_yield_pressure_min_interval`
+  (default `1h`, never under `5m`) has passed since the plugin's last run, so
+  a plugin that keeps reclaiming nothing under pressure cannot run every
+  poll. The default lives in code, so hosts whose rendered config omits the
+  key get it.
 - **Package and Bazel-generated `.claude` copies no longer pin output bases
   (lab sting, 2026-10-19).** The TIN-5268 per-repository name rule counted a
   `.claude` (or `.codex`, `.pi`, ...) directory as session data wherever it

@@ -52,6 +52,9 @@ type zeroYieldPolicy struct {
 	limit int
 	base  time.Duration
 	max   time.Duration
+	// pressureMin is the least time between a plugin's runs that mount
+	// pressure lifts suppression for.
+	pressureMin time.Duration
 }
 
 // zeroYieldBackoff returns how long a plugin is suppressed after count
@@ -314,6 +317,19 @@ func (s *cleanupState) recordPluginYield(plugin string, zeroYield bool, now time
 	}
 	s.Plugins[plugin] = record
 	return record
+}
+
+// pluginLastRun returns when plugin last ran, or the zero time when it never
+// did or the record is unreadable.
+func (s *cleanupState) pluginLastRun(plugin string) time.Time {
+	if s == nil || s.Plugins == nil {
+		return time.Time{}
+	}
+	last, err := time.Parse(time.RFC3339, s.Plugins[plugin].LastRun)
+	if err != nil {
+		return time.Time{}
+	}
+	return last
 }
 
 // liftZeroYieldSuppression clears every plugin's zero-yield retry time and

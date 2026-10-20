@@ -1170,7 +1170,8 @@ darwin_dev_caches:
 func TestZeroYieldPolicyDefaultsAndOverrides(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Policy.ZeroYieldLimit != 2 || cfg.Policy.ZeroYieldBackoffBase != "30m" ||
-		cfg.Policy.ZeroYieldBackoffMax != "6h" || len(cfg.Policy.ZeroYieldExemptPlugins) != 0 {
+		cfg.Policy.ZeroYieldBackoffMax != "6h" || len(cfg.Policy.ZeroYieldExemptPlugins) != 0 ||
+		cfg.Policy.ZeroYieldPressureMinInterval != "1h" {
 		t.Fatalf("unexpected zero-yield defaults: %+v", cfg.Policy)
 	}
 
@@ -1180,6 +1181,7 @@ policy:
   zero_yield_limit: -1
   zero_yield_backoff_base: 10m
   zero_yield_backoff_max: 2h
+  zero_yield_pressure_min_interval: 20m
   zero_yield_exempt_plugins: [nix-gc]
 `
 	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
@@ -1191,7 +1193,7 @@ policy:
 	}
 	if cfg.Policy.ZeroYieldLimit != -1 || cfg.Policy.ZeroYieldBackoffBase != "10m" ||
 		cfg.Policy.ZeroYieldBackoffMax != "2h" || len(cfg.Policy.ZeroYieldExemptPlugins) != 1 ||
-		cfg.Policy.ZeroYieldExemptPlugins[0] != "nix-gc" {
+		cfg.Policy.ZeroYieldExemptPlugins[0] != "nix-gc" || cfg.Policy.ZeroYieldPressureMinInterval != "20m" {
 		t.Fatalf("zero-yield overrides not applied: %+v", cfg.Policy)
 	}
 }

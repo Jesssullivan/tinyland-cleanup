@@ -311,7 +311,9 @@ type PolicyConfig struct {
 	// starts at ZeroYieldBackoffBase and doubles with each further zero-yield
 	// run up to ZeroYieldBackoffMax. Suppression lifts early when the cleanup
 	// level rises above the plugin's last run, when the configuration or
-	// binary version changes, or when free space is below EmergencyFreeGB.
+	// binary version changes, when free space is below EmergencyFreeGB, or,
+	// at most once per ZeroYieldPressureMinInterval, while a monitored mount
+	// is at moderate or higher.
 	// Zero uses the built-in default; a negative value disables suppression.
 	ZeroYieldLimit int `yaml:"zero_yield_limit"`
 	// ZeroYieldBackoffBase is the first suppression interval. Empty or invalid
@@ -320,6 +322,13 @@ type PolicyConfig struct {
 	// ZeroYieldBackoffMax caps the suppression interval. Empty or invalid uses
 	// the built-in default.
 	ZeroYieldBackoffMax string `yaml:"zero_yield_backoff_max"`
+	// ZeroYieldPressureMinInterval bounds how often mount pressure lifts
+	// zero-yield suppression. While any monitored mount is at moderate or
+	// higher, a suppressed plugin runs again once this long has passed since
+	// its last run, instead of waiting out its full backoff (operator ruling
+	// 2026-10-19, "Quota pressure retries"). Empty or invalid uses the
+	// built-in default (1h); values under 5m are raised to 5m.
+	ZeroYieldPressureMinInterval string `yaml:"zero_yield_pressure_min_interval"`
 	// ZeroYieldExemptPlugins lists plugins that are never suppressed, in
 	// addition to the plugins that declare themselves safety-critical
 	// (apfs-snapshots).
@@ -1149,7 +1158,9 @@ func DefaultConfig() *Config {
 			ZeroYieldLimit:       2,
 			ZeroYieldBackoffBase: "30m",
 			ZeroYieldBackoffMax:  "6h",
-			LogRepeatWindow:      "1h",
+			// Operator ruling 2026-10-19 ("Quota pressure retries").
+			ZeroYieldPressureMinInterval: "1h",
+			LogRepeatWindow:              "1h",
 		},
 		LogFile: logFile,
 		Enable: EnableFlags{

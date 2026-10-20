@@ -82,7 +82,16 @@ const (
 	defaultZeroYieldLimit       = 2
 	defaultZeroYieldBackoffBase = 30 * time.Minute
 	defaultZeroYieldBackoffMax  = 6 * time.Hour
+	// Mount pressure lifts suppression at most once per this interval since
+	// the plugin's last run (operator ruling 2026-10-19), never more often
+	// than the floor.
+	defaultZeroYieldPressureMinInterval = time.Hour
+	minZeroYieldPressureMinInterval     = 5 * time.Minute
 )
+
+// zeroYieldLiftMountPressure is the zero_yield_lifted reason for a monitored
+// mount at moderate or higher.
+const zeroYieldLiftMountPressure = "mount_pressure"
 
 func main() {
 	// Privileged one-shot modes run as root from packaging/systemd units
@@ -703,7 +712,19 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		if stateErr == nil && zeroYield.limit > 0 {
 			until, count, lifted, suppressed := state.zeroYieldSuppression(p.Name(), pluginLevel, now, digest)
 			if suppressed {
-				if exempt := d.zeroYieldExemption(p, report, beforeErr == nil); exempt != "" {
+				exempt := d.zeroYieldExemption(p, report, beforeErr == nil)
+				if exempt == zeroYieldLiftMountPressure {
+					// Mount pressure lifts suppression at most once per
+					// pressure interval, so a plugin that keeps reclaiming
+					// nothing under pressure cannot run every poll.
+					if next := state.pluginLastRun(p.Name()).Add(zeroYield.pressureMin); now.Before(next) {
+						exempt = ""
+						if next.Before(until) {
+							until = next
+						}
+					}
+				}
+				if exempt != "" {
 					lifted = exempt
 				} else {
 					pluginReport.WouldRun = false
@@ -1037,9 +1058,9 @@ type pluginCycleReport struct {
 	// zero yield: it is skipped until then unless conditions change.
 	SuppressedUntil string `json:"suppressed_until,omitempty"`
 	// ZeroYieldLifted names why a suppressed plugin ran anyway: level_rose,
-	// config_changed, operator_run, below_emergency_floor or free_unknown
-	// (safety_critical or exempt_plugin only for a retry time recorded before
-	// the plugin became exempt).
+	// config_changed, operator_run, below_emergency_floor, free_unknown or
+	// mount_pressure (safety_critical or exempt_plugin only for a retry time
+	// recorded before the plugin became exempt).
 	ZeroYieldLifted string `json:"zero_yield_lifted,omitempty"`
 	Error           string `json:"error,omitempty"`
 	// Wedged is set when the plugin watchdog intervened: deadline_cancelled
@@ -1581,12 +1602,19 @@ func (d *daemon) emergencyFreeBytes() uint64 {
 // uses the default; a negative limit disables suppression (limit 0).
 func (d *daemon) zeroYieldPolicy() zeroYieldPolicy {
 	policy := zeroYieldPolicy{
-		limit: defaultZeroYieldLimit,
-		base:  defaultZeroYieldBackoffBase,
-		max:   defaultZeroYieldBackoffMax,
+		limit:       defaultZeroYieldLimit,
+		base:        defaultZeroYieldBackoffBase,
+		max:         defaultZeroYieldBackoffMax,
+		pressureMin: defaultZeroYieldPressureMinInterval,
 	}
 	if d.config == nil {
 		return policy
+	}
+	if duration, err := time.ParseDuration(d.config.Policy.ZeroYieldPressureMinInterval); err == nil && duration > 0 {
+		policy.pressureMin = duration
+	}
+	if policy.pressureMin < minZeroYieldPressureMinInterval {
+		policy.pressureMin = minZeroYieldPressureMinInterval
 	}
 	switch limit := d.config.Policy.ZeroYieldLimit; {
 	case limit < 0:
@@ -1634,6 +1662,26 @@ func (d *daemon) zeroYieldExemption(p plugins.Plugin, report cycleReport, freeKn
 	if floor := d.emergencyFreeBytes(); floor > 0 && report.HostFreeBeforeBytes < floor {
 		return "below_emergency_floor"
 	}
+	if pressuredMount(report) != "" {
+		return zeroYieldLiftMountPressure
+	}
+	return ""
+}
+
+// pressuredMount returns the label of the first monitored mount in the
+// cycle's assessment at moderate or higher, or "". Project-quota trees
+// (sting-devseat-177 on /srv/fast-local/jess) are monitored mounts like any
+// other: statfs reports their project limit.
+func pressuredMount(report cycleReport) string {
+	for _, m := range report.Mounts {
+		if m.Error != "" || parseLevel(m.Level) < monitor.LevelModerate {
+			continue
+		}
+		if m.Label != "" {
+			return m.Label
+		}
+		return m.Path
+	}
 	return ""
 }
 
@@ -1660,7 +1708,7 @@ func (d *daemon) zeroYieldPermanentExemption(p plugins.Plugin) string {
 // and digest.
 func zeroYieldRecurringLift(reason string) bool {
 	switch reason {
-	case "operator_run", "below_emergency_floor", "free_unknown":
+	case "operator_run", "below_emergency_floor", "free_unknown", zeroYieldLiftMountPressure:
 		return true
 	}
 	return false
