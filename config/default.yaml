@@ -224,7 +224,9 @@ nix:
   # max_busy_deferrals consecutive deferrals or max_busy_deferral_duration
   # from the first one, the pass runs anyway behind the hook-path pins and
   # the serialization lock (0 / "0" disables either bound). A failed process
-  # inspection still defers and is never released by these bounds.
+  # inspection defers under the same bounds. Hook-path pins, serialization
+  # markers and the GC lock are never bypassed; past the bound their
+  # deferrals are logged at ERROR.
   max_busy_deferrals: 72
   max_busy_deferral_duration: 6h
   max_gc_duration: 20m

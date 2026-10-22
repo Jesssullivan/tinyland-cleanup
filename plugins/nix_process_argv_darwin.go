@@ -36,9 +36,25 @@ func nixDarwinProcessMissing(pid int, err error) bool {
 		return false
 	}
 
-	// kern.procargs2 returns EINVAL both when proc_find cannot find the PID and
-	// for some existing processes without readable argument state.
-	return errors.Is(unix.Kill(pid, 0), unix.ESRCH)
+	// kern.procargs2 returns EINVAL when proc_find cannot find the PID, for a
+	// zombie, and for any process owned by another user (issue #160). A
+	// missing PID and a zombie have both exited and hold no store paths; an
+	// existing, live process keeps its EINVAL for the caller to classify.
+	if errors.Is(unix.Kill(pid, 0), unix.ESRCH) {
+		return true
+	}
+	return nixDarwinProcessZombie(pid)
+}
+
+// nixDarwinSZomb is XNU's SZOMB process state (bsd/sys/proc.h).
+const nixDarwinSZomb = 5
+
+func nixDarwinProcessZombie(pid int) bool {
+	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || info == nil {
+		return false
+	}
+	return int(info.Proc.P_pid) == pid && info.Proc.P_stat == nixDarwinSZomb
 }
 
 func decodeNixDarwinProcessArgv(raw []byte) ([]string, error) {

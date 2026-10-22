@@ -103,3 +103,25 @@ func TestNixProcessArgvDarwinMapsMissingProcess(t *testing.T) {
 		t.Fatalf("nixProcessArgv error = %v, want os.ErrNotExist", err)
 	}
 }
+
+// Issue #160: kern.procargs2 returns EINVAL for a zombie, and kill(pid, 0)
+// still succeeds for one. A zombie holds no store paths, so it reads as gone.
+func TestNixProcessArgvDarwinMapsZombieToMissing(t *testing.T) {
+	command := exec.Command("/usr/bin/true")
+	if err := command.Start(); err != nil {
+		t.Fatalf("start child: %v", err)
+	}
+	pid := command.Process.Pid
+	t.Cleanup(func() { _ = command.Wait() })
+
+	deadline := time.Now().Add(10 * time.Second)
+	for !nixDarwinProcessZombie(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("child %d never became a zombie", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := nixProcessArgv(pid); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nixProcessArgv(zombie) error = %v, want os.ErrNotExist", err)
+	}
+}

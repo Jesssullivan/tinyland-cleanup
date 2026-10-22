@@ -330,24 +330,90 @@ func TestNixBusyDeferralIsBoundedByDuration(t *testing.T) {
 	}
 }
 
-// A failed inspection is not active work and is never released by the
-// deferral bound: it still fails closed, and it is counted.
-func TestNixInspectionFailureIsNeverReleasedByTheBound(t *testing.T) {
+// A failed inspection defers like active work, and like active work it is
+// bounded: a process the daemon cannot inspect (issue #160: a root-owned
+// interpreter on Darwin) cannot hold GC off forever, even at critical.
+func TestNixInspectionFailureIsReleasedByTheBound(t *testing.T) {
 	p, cfg, calls, now := busyCleanupFixture(t)
-	cfg.Nix.MaxBusyDeferrals = 1
-	cfg.Nix.MaxBusyDeferralDuration = "1m"
+	cfg.Nix.MaxBusyDeferrals = 3
+	cfg.Nix.MaxBusyDeferralDuration = ""
+	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
+		return nil, nixProcessInspection{}, errors.New("inspect candidate pid 47544 (/bin/bash, uid 0): invalid argument")
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for i := 1; i <= 3; i++ {
+		p.Cleanup(context.Background(), LevelCritical, cfg, logger)
+		if got := gcCalls(t, calls); len(got) != 0 {
+			t.Fatalf("deferral %d must not collect: %q", i, got)
+		}
+		st := loadNixGCState(cfg.Nix.GCStateFile)
+		if st.DeferredPasses != i || !strings.HasPrefix(st.LastDeferral, "process_inspection_failed: ") || !strings.Contains(st.LastDeferral, "pid 47544") {
+			t.Fatalf("after deferral %d state = %+v", i, st)
+		}
+		*now = now.Add(10 * time.Minute)
+	}
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, logger)
+	if plan.Metadata["busy_deferral_released_by"] != "max_busy_deferrals=3" || !plan.WouldRun {
+		t.Fatalf("plan must report the release: %+v %+v", plan.Metadata, plan.SkipReason)
+	}
+	before := len(gcCalls(t, calls))
+	p.Cleanup(context.Background(), LevelCritical, cfg, logger)
+	got := gcCalls(t, calls)
+	if len(got) != before+2 || !strings.HasPrefix(got[len(got)-1], "call:--max-freed") {
+		t.Fatalf("the pass after the bound runs a dry-run and a GC: %q", got)
+	}
+	if st := loadNixGCState(cfg.Nix.GCStateFile); st.DeferredPasses != 0 {
+		t.Fatalf("an attempted pass resets the deferral run: %+v", st)
+	}
+}
+
+// Below the bound a failed inspection still fails closed.
+func TestNixInspectionFailureDefersBelowTheBound(t *testing.T) {
+	p, cfg, calls, now := busyCleanupFixture(t)
+	cfg.Nix.MaxBusyDeferrals = 0
+	cfg.Nix.MaxBusyDeferralDuration = "6h"
 	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
 		return nil, nixProcessInspection{}, errors.New("ps: not found")
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 5; i++ {
+		p.Cleanup(context.Background(), LevelCritical, cfg, logger)
+		*now = now.Add(time.Hour)
+	}
+	if got := gcCalls(t, calls); len(got) != 0 {
+		t.Fatalf("inside six hours an inspection failure defers: %q", got)
+	}
+	*now = now.Add(time.Hour)
+	p.Cleanup(context.Background(), LevelCritical, cfg, logger)
+	if got := gcCalls(t, calls); len(got) != 2 {
+		t.Fatalf("six hours after the first deferral the pass runs: %q", got)
+	}
+}
+
+// A serialization marker is never bypassed by the bound, but each deferral
+// it causes is counted, so a stale marker shows in the GC state.
+func TestNixMarkerDeferralIsCountedButNeverBypassed(t *testing.T) {
+	p, cfg, calls, now := busyCleanupFixture(t)
+	cfg.Nix.GCLockFile = filepath.Join(t.TempDir(), "serialized-gc.lock")
+	marker := filepath.Join(t.TempDir(), "hm-switch.lock.d")
+	if err := os.Mkdir(marker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Nix.GCDeferPaths = []string{marker}
+	cfg.Nix.MaxBusyDeferrals = 2
+	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
+		return nil, nixProcessInspection{}, nil
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for i := 0; i < 5; i++ {
 		p.Cleanup(context.Background(), LevelCritical, cfg, logger)
 		*now = now.Add(10 * time.Minute)
 	}
 	if got := gcCalls(t, calls); len(got) != 0 {
-		t.Fatalf("an inspection failure must never collect: %q", got)
+		t.Fatalf("a marker is never bypassed: %q", got)
 	}
-	if st := loadNixGCState(cfg.Nix.GCStateFile); st.DeferredPasses != 4 || st.LastDeferral != "process_inspection_failed" {
+	st := loadNixGCState(cfg.Nix.GCStateFile)
+	if st.DeferredPasses != 5 || !strings.Contains(st.LastDeferral, "serialized_operation") || !strings.Contains(st.LastDeferral, "hm-switch.lock.d") {
 		t.Fatalf("state = %+v", st)
 	}
 }

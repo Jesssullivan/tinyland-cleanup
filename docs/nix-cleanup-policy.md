@@ -31,12 +31,26 @@ The Nix plan includes:
   `nixd-attrset-eval`, `nil`, `nix repl`, queries and nix-direnv hooks never
   defer a pass (Nix's collector already honours the temp roots of every
   daemon client);
-- `deferred_passes` and `deferred_since`: the due passes active work has
-  deferred since the last attempted pass. After `max_busy_deferrals`
-  (default 72) consecutive deferrals, or `max_busy_deferral_duration`
-  (default 6h) from the first, the next pass runs anyway, still behind the
+- `deferred_passes` and `deferred_since`: the due passes deferred since the
+  last attempted pass, whatever the cause; the GC state file's
+  `last_deferral` names the latest cause. Active work and a failed process
+  inspection defer a due pass, but after `max_busy_deferrals` (default 72)
+  consecutive deferrals, or `max_busy_deferral_duration` (default 6h) from
+  the first, the next pass runs anyway, at any level, still behind the
   hook-path pins and the serialization lock, and the daemon logs it at
-  ERROR. A failed process inspection still defers and is never released;
+  ERROR. Required hook-path pins, a serialization marker and the GC lock are
+  never bypassed; their deferrals are counted, and once the run passes the
+  bound each one is logged at ERROR so a stale marker or a stuck lock holder
+  shows up;
+- process inspection on Darwin: `kern.procargs2` refuses another user's
+  process and a zombie with EINVAL. A zombie or an exited PID is skipped. An
+  interpreter (`bash`, `sh`, `python`, ...) whose argv cannot be read is
+  judged by the command line the setuid `ps` reports: one that names a Nix
+  client anywhere stays busy, one that names none (a root watchdog script,
+  for example) is skipped and logged at DEBUG. A process whose comm names a
+  Nix client stays busy whether or not its argv is readable. Only when
+  neither source is readable does the inspection fail, and that failure is
+  bounded as above;
 - protected `nix_active_work`, `nix_process_inspection`, or
   `nix_store_contention` targets when cleanup is deferred before mutation;
 - `retry_after` metadata derived from `daemon_busy_backoff` so operators can
