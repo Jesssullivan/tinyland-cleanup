@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Darwin process inspection no longer holds Nix GC off without bound
+  (issue #160, lab TIN-5770).** On petting-zoo-mini every due pass, periodic
+  and pressure alike, deferred while `/nix` filled to 99%: `kern.procargs2`
+  returns EINVAL for another user's process and for a zombie, so a root
+  LaunchDaemon `/bin/bash` watchdog failed the whole active-Nix-process
+  inspection, and a failed inspection was never released. Now a zombie or
+  exited PID is skipped; an interpreter whose argv is unreadable is judged by
+  the setuid `ps` command line (naming a Nix client anywhere keeps it busy,
+  naming none skips it at DEBUG); a comm that names a Nix client stays busy
+  as before. A failed inspection falls under `max_busy_deferrals` /
+  `max_busy_deferral_duration` like active work. Hook-pin, serialization
+  marker and GC-lock deferrals are now counted in the GC state
+  (`last_deferral` names the cause) and logged at ERROR past the bound, but
+  are never bypassed. The inspection error names the process UID.
 - **Mount pressure lifts zero-yield backoff, at most hourly (lab sting,
   2026-10-19; operator ruling 2026-10-19, "Quota pressure retries").** The
   bazel, cache, dev-artifacts, archive-lifecycle and podman plugins sat in

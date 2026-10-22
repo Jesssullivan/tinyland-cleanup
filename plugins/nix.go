@@ -142,7 +142,10 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		plan.Warnings = append(plan.Warnings, inspection.warning())
 	}
 	if err != nil {
-		if cfg.Nix.SkipWhenDaemonBusy {
+		if released, bound := nixBusyDeferralBound(cfg.Nix, gcState, p.clock()); released && cfg.Nix.SkipWhenDaemonBusy {
+			plan.Metadata["busy_deferral_released_by"] = bound
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("process inspection is failing and due passes have been deferred %d times; %s releases the next pass, which runs behind the hook-path pins and the serialization lock", gcState.DeferredPasses, bound))
+		} else if cfg.Nix.SkipWhenDaemonBusy {
 			nixDeferPlan(&plan,
 				"nix_process_inspection_failed",
 				"Nix cleanup is deferred because active process inspection failed",
@@ -280,24 +283,39 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		logger.Debug("Nix GC not due", "reason", why, "last_gc_attempt", st.LastGCAttempt)
 		return result
 	}
-	if pinErr != nil && cfg.Nix.HookPinRequired {
-		logger.Warn("skipping Nix GC: hook-path pins could not be established", "error", pinErr)
+	// The hook-path pins, the serialization markers and the GC lock are
+	// safety invariants: no deferral bound bypasses them. Each deferral is
+	// still counted in the GC state, and once the run of deferrals passes
+	// the bound it is logged at ERROR so a stuck marker, a foreign lock
+	// holder or failing pins are visible instead of silently holding the
+	// store's GC off (issue #160).
+	deferUnbypassable := func(below slog.Level, reason, msg string, attrs ...any) CleanupResult {
+		now := p.clock()
+		st.recordDeferral(now, reason)
+		saveState()
+		attrs = append(attrs, "deferred_passes", st.DeferredPasses, "deferred_since", st.FirstDeferredAt)
+		if exceeded, bound := nixBusyDeferralBound(cfg.Nix, st, now); exceeded {
+			attrs = append(attrs, "bound", bound)
+			logger.Error(msg+"; the deferral bound is exceeded and this cause is never bypassed, so it needs clearing", attrs...)
+		} else {
+			logger.Log(ctx, below, msg, attrs...)
+		}
 		return result
+	}
+	if pinErr != nil && cfg.Nix.HookPinRequired {
+		return deferUnbypassable(slog.LevelWarn, "hook_pins_unavailable", "skipping Nix GC: hook-path pins could not be established", "error", pinErr)
 	}
 	// R-C815: a switch, a delivery or another collector in progress defers
 	// the pass; it is retried on a later poll and not counted as an attempt.
 	if marker, deferred := nixGCDeferredBy(cfg.Nix); deferred {
-		logger.Info("deferring Nix GC: a serialized operation is in progress", "marker", marker)
-		return result
+		return deferUnbypassable(slog.LevelInfo, "serialized_operation: "+marker, "deferring Nix GC: a serialized operation is in progress", "marker", marker)
 	}
 	release, lockErr := nixAcquireGCLock(cfg.Nix)
 	if errors.Is(lockErr, errNixGCLockHeld) {
-		logger.Info("deferring Nix GC: another collector holds the serialization lock", "lock", nixGCLockPath(cfg.Nix))
-		return result
+		return deferUnbypassable(slog.LevelInfo, "gc_lock_held", "deferring Nix GC: another collector holds the serialization lock", "lock", nixGCLockPath(cfg.Nix))
 	}
 	if lockErr != nil {
-		logger.Warn("skipping Nix GC: the serialization lock is unusable", "error", lockErr)
-		return result
+		return deferUnbypassable(slog.LevelWarn, "gc_lock_unusable", "skipping Nix GC: the serialization lock is unusable", "error", lockErr)
 	}
 	defer release()
 	if cfg.Nix.SkipWhenDaemonBusy && p.isNixAvailable() {
@@ -316,11 +334,12 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 	return gcResult
 }
 
-// busyGate defers a due pass while active Nix work is detected, but never
-// past nixBusyDeferralBound: no single process can hold the store's GC off
-// indefinitely. A pass the bound releases still runs behind the hook-path
-// pins and the serialization lock. A failed process inspection always
-// defers. It returns whether the pass may run, updating st's deferral run.
+// busyGate defers a due pass while active Nix work is detected or process
+// inspection fails, but never past nixBusyDeferralBound: no single process,
+// readable or not, can hold the store's GC off indefinitely (issue #160). A
+// pass the bound releases still runs behind the hook-path pins and the
+// serialization lock. It returns whether the pass may run, updating st's
+// deferral run.
 func (p *NixPlugin) busyGate(ctx context.Context, cfg config.NixConfig, st *nixGCState, logger *slog.Logger) bool {
 	inspect := p.activeWork
 	if inspect == nil {
@@ -333,8 +352,20 @@ func (p *NixPlugin) busyGate(ctx context.Context, cfg config.NixConfig, st *nixG
 			"count", inspection.MalformedRows,
 			"samples", strings.Join(inspection.MalformedSamples, " | "))
 	}
+	if len(inspection.UnreadableArgvSkipped) > 0 {
+		logger.Debug("interpreters with unreadable argv name no Nix client; not deferring for them",
+			"processes", strings.Join(inspection.UnreadableArgvSkipped, ", "))
+	}
 	if err != nil {
-		st.recordDeferral(now, "process_inspection_failed")
+		if released, bound := nixBusyDeferralBound(cfg, *st, now); released {
+			logger.Error("running Nix GC despite failing process inspection: the deferral bound is reached",
+				"error", err,
+				"bound", bound,
+				"deferred_passes", st.DeferredPasses,
+				"deferred_since", st.FirstDeferredAt)
+			return true
+		}
+		st.recordDeferral(now, "process_inspection_failed: "+err.Error())
 		logger.Warn("could not inspect active Nix processes", "error", err,
 			"deferred_passes", st.DeferredPasses, "deferred_since", st.FirstDeferredAt)
 		return false
@@ -908,6 +939,8 @@ func (p *NixPlugin) activeNixProcesses(ctx context.Context) ([]string, nixProces
 	if err != nil {
 		return nil, inspection, err
 	}
+	snapshots = nixFillPSArgsFallback(psCtx, snapshots, nixProcessPSArgs)
+	inspection.UnreadableArgvSkipped = nixUnreadableArgvSkipped(snapshots)
 	reasons, err := nixBusyProcessReasons(snapshots)
 	if err != nil {
 		return nil, inspection, err
@@ -1527,6 +1560,12 @@ type nixProcessSnapshot struct {
 	ParentComm string
 	Argv       []string
 	ArgvErr    error
+	// PSArgs is the whitespace-split command line ps reports when argv
+	// itself could not be read (Darwin's kern.procargs2 refuses another
+	// user's process; macOS ps is setuid and still can). It loses argument
+	// boundaries, so it only decides whether an interpreter names a Nix
+	// client anywhere on its command line (issue #160).
+	PSArgs []string
 }
 
 type nixProcessArgvReader func(int) ([]string, error)
@@ -1545,6 +1584,10 @@ type nixProcessInspection struct {
 	// process. Without a usable PID they cannot be inspected, so they defer
 	// the pass the same way an unreadable argv does.
 	MalformedCandidates []string
+	// UnreadableArgvSkipped names interpreter processes whose argv could not
+	// be read but whose ps command line names no Nix client, so they did not
+	// fail the inspection (issue #160). Logged at debug.
+	UnreadableArgvSkipped []string
 }
 
 const nixProcessMalformedSampleLimit = 3
@@ -1634,9 +1677,18 @@ func nixBusyProcessReasons(processes []nixProcessSnapshot) ([]string, error) {
 				// stays busy.
 				add(command)
 			case nixProcessInterpreterName(process.Comm) != "":
-				// An interpreter may be running a client script; without
-				// argv it cannot be told apart, so inspection fails closed.
-				return nil, fmt.Errorf("inspect candidate pid %d (%s): %w", process.PID, process.Comm, process.ArgvErr)
+				// An interpreter may be running a client script. Without
+				// argv, ps's command line decides: one that names a Nix
+				// client anywhere stays busy, one that names none is not a
+				// client script (issue #160). With neither, inspection
+				// fails closed; nixBusyDeferralBound bounds that deferral.
+				if process.PSArgs != nil {
+					if client := nixPSArgsClient(process.PSArgs); client != "" {
+						add(client)
+					}
+					continue
+				}
+				return nil, fmt.Errorf("inspect candidate pid %d (%s, uid %s): %w", process.PID, process.Comm, nixProcessUIDLabel(process), process.ArgvErr)
 			}
 			// An unknown Nix-prefixed name (nixd-attrset-ev, ...) is not a
 			// known client and is not build work.
@@ -1682,6 +1734,93 @@ func nixBusyProcessReasons(processes []nixProcessSnapshot) ([]string, error) {
 
 	sort.Strings(reasons)
 	return reasons, nil
+}
+
+// nixProcessPSArgsReader reads a process's ps command line, whitespace
+// split. It returns os.ErrNotExist once the process has exited or is a
+// zombie.
+type nixProcessPSArgsReader func(ctx context.Context, pid int) ([]string, error)
+
+var errNixPSArgsUnavailable = errors.New("ps reports no command line")
+
+func nixProcessPSArgs(ctx context.Context, pid int) ([]string, error) {
+	output, err := commandContext(ctx, "ps", "-ww", "-o", "stat=,args=", "-p", strconv.Itoa(pid)).Output()
+	fields := strings.Fields(string(output))
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(fields) == 0 {
+			// ps -p exits non-zero with no row for a PID that is gone.
+			return nil, os.ErrNotExist
+		}
+		return nil, err
+	}
+	if len(fields) == 0 || strings.HasPrefix(fields[0], "Z") {
+		return nil, os.ErrNotExist
+	}
+	args := fields[1:]
+	if len(args) == 0 || args[0] == "<defunct>" {
+		return nil, os.ErrNotExist
+	}
+	if len(args) == 1 && strings.HasPrefix(args[0], "(") && strings.HasSuffix(args[0], ")") {
+		// ps could not read the arguments either and printed (comm).
+		return nil, errNixPSArgsUnavailable
+	}
+	return args, nil
+}
+
+// nixFillPSArgsFallback reads ps's command line for each interpreter whose
+// argv could not be read, and drops the ones that have exited meanwhile.
+func nixFillPSArgsFallback(ctx context.Context, snapshots []nixProcessSnapshot, read nixProcessPSArgsReader) []nixProcessSnapshot {
+	if read == nil {
+		return snapshots
+	}
+	kept := make([]nixProcessSnapshot, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.ArgvErr != nil && nixBusyProcessCommandName(snapshot.Comm) == "" && nixProcessInterpreterName(snapshot.Comm) != "" {
+			args, err := read(ctx, snapshot.PID)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err == nil {
+				snapshot.PSArgs = args
+			}
+		}
+		kept = append(kept, snapshot)
+	}
+	return kept
+}
+
+// nixPSArgsClient returns the first Nix client named anywhere on a lossy ps
+// command line. Scanning every token, payloads included, over-matches on
+// purpose: a false busy only defers a pass.
+func nixPSArgsClient(args []string) string {
+	for _, arg := range args {
+		if command := nixBusyProcessCommandName(arg); command != "" {
+			return command
+		}
+	}
+	return ""
+}
+
+func nixUnreadableArgvSkipped(snapshots []nixProcessSnapshot) []string {
+	var skipped []string
+	for _, snapshot := range snapshots {
+		if snapshot.ArgvErr == nil || snapshot.PSArgs == nil || nixBusyProcessCommandName(snapshot.Comm) != "" {
+			continue
+		}
+		if nixProcessInterpreterName(snapshot.Comm) == "" || nixPSArgsClient(snapshot.PSArgs) != "" {
+			continue
+		}
+		skipped = append(skipped, fmt.Sprintf("pid %d (%s, uid %s)", snapshot.PID, snapshot.Comm, nixProcessUIDLabel(snapshot)))
+	}
+	return skipped
+}
+
+func nixProcessUIDLabel(process nixProcessSnapshot) string {
+	if process.UIDUnknown {
+		return "unknown"
+	}
+	return strconv.FormatUint(uint64(process.UID), 10)
 }
 
 func nixBusyProcessCommandName(raw string) string {

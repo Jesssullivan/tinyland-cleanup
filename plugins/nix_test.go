@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -563,6 +564,114 @@ func TestNixProcessSnapshotsFailClosedOnArgvReadError(t *testing.T) {
 	_, err = nixBusyProcessReasons(snapshots)
 	if err == nil || !strings.Contains(err.Error(), "argv unavailable") {
 		t.Fatalf("expected argv inspection error, got %v", err)
+	}
+}
+
+// Issue #160: Darwin's kern.procargs2 returns EINVAL for another user's
+// process. A root-owned bash whose ps command line names no Nix client is not
+// a client script and must not fail the inspection.
+func TestNixUnreadableRootInterpreterWithoutNixClientIsSkipped(t *testing.T) {
+	output := "55302 1 0 /bin/bash\n"
+	snapshots, _, err := nixProcessSnapshots(context.Background(), output, func(int) ([]string, error) {
+		return nil, errors.New("read argv for process 55302: invalid argument")
+	}, nil)
+	if err != nil {
+		t.Fatalf("nixProcessSnapshots: %v", err)
+	}
+	snapshots = nixFillPSArgsFallback(context.Background(), snapshots, func(_ context.Context, pid int) ([]string, error) {
+		if pid != 55302 {
+			t.Fatalf("unexpected pid %d", pid)
+		}
+		return []string{"/bin/bash", "/Library/Tinyland/libexec/tinyland-ssd-failstop/watchdog.sh"}, nil
+	})
+	reasons, err := nixBusyProcessReasons(snapshots)
+	if err != nil || len(reasons) != 0 {
+		t.Fatalf("busy reasons = %v, %v; a root watchdog is not Nix work", reasons, err)
+	}
+	if skipped := nixUnreadableArgvSkipped(snapshots); len(skipped) != 1 || !strings.Contains(skipped[0], "pid 55302 (/bin/bash, uid 0)") {
+		t.Fatalf("skipped = %v", skipped)
+	}
+}
+
+// An unreadable interpreter whose ps command line names a Nix client anywhere
+// stays busy.
+func TestNixUnreadableInterpreterNamingANixClientIsBusy(t *testing.T) {
+	cases := map[string][]string{
+		"darwin-rebuild": {"/nix/store/abc-bash/bin/bash", "/run/current-system/sw/bin/darwin-rebuild", "switch"},
+		"nix":            {"/bin/bash", "-c", "nix", "build", ".#x"},
+		"nix-store":      {"/bin/sh", "/usr/local/bin/verify.sh", "/nix/var/nix/profiles/default/bin/nix-store"},
+	}
+	for want, args := range cases {
+		snapshots := []nixProcessSnapshot{{PID: 7, Comm: "/bin/bash", ArgvErr: errors.New("invalid argument"), PSArgs: args}}
+		reasons, err := nixBusyProcessReasons(snapshots)
+		if err != nil || len(reasons) != 1 || reasons[0] != want {
+			t.Fatalf("%v: reasons = %v, %v; want %q", args, reasons, err, want)
+		}
+	}
+}
+
+// An unreadable process whose comm is a Nix client stays busy without any
+// fallback.
+func TestNixUnreadableNixClientCommIsBusy(t *testing.T) {
+	for _, comm := range []string{"nix-build", "/nix/store/abc-nix/bin/nix-build", "home-manager", "darwin-rebuild"} {
+		snapshots := []nixProcessSnapshot{{PID: 9, UID: 0, Comm: comm, ArgvErr: errors.New("invalid argument")}}
+		snapshots = nixFillPSArgsFallback(context.Background(), snapshots, func(context.Context, int) ([]string, error) {
+			t.Fatalf("a Nix client comm needs no ps fallback")
+			return nil, nil
+		})
+		reasons, err := nixBusyProcessReasons(snapshots)
+		if err != nil || len(reasons) != 1 {
+			t.Fatalf("%s: reasons = %v, %v", comm, reasons, err)
+		}
+	}
+	// An unreadable nix-daemon is judged by its parent, as before.
+	reasons, err := nixBusyProcessReasons([]nixProcessSnapshot{{PID: 10, PPID: 20, ParentComm: "nix-daemon", Comm: "nix-daemon", ArgvErr: errors.New("invalid argument")}})
+	if err != nil || len(reasons) != 1 {
+		t.Fatalf("a nix-daemon worker with unreadable argv stays busy: %v, %v", reasons, err)
+	}
+}
+
+// A zombie or a process that exited after ps listed it is dropped.
+func TestNixUnreadableInterpreterThatExitedIsDropped(t *testing.T) {
+	snapshots := []nixProcessSnapshot{
+		{PID: 1, Comm: "/bin/bash", ArgvErr: errors.New("invalid argument")},
+		{PID: 2, Comm: "bash", ArgvErr: errors.New("invalid argument")},
+	}
+	snapshots = nixFillPSArgsFallback(context.Background(), snapshots, func(context.Context, int) ([]string, error) {
+		return nil, os.ErrNotExist
+	})
+	if len(snapshots) != 0 {
+		t.Fatalf("exited and zombie interpreters are dropped: %+v", snapshots)
+	}
+	reasons, err := nixBusyProcessReasons(snapshots)
+	if err != nil || len(reasons) != 0 {
+		t.Fatalf("reasons = %v, %v", reasons, err)
+	}
+}
+
+// When ps cannot read the command line either, inspection still fails closed
+// (nixBusyDeferralBound bounds that deferral), and the error names the UID.
+func TestNixUnreadableInterpreterWithoutFallbackFailsClosed(t *testing.T) {
+	snapshots := []nixProcessSnapshot{{PID: 3, UID: 0, Comm: "/bin/bash", ArgvErr: errors.New("invalid argument")}}
+	snapshots = nixFillPSArgsFallback(context.Background(), snapshots, func(context.Context, int) ([]string, error) {
+		return nil, errNixPSArgsUnavailable
+	})
+	_, err := nixBusyProcessReasons(snapshots)
+	if err == nil || !strings.Contains(err.Error(), "pid 3 (/bin/bash, uid 0)") {
+		t.Fatalf("expected a fail-closed error naming the uid, got %v", err)
+	}
+}
+
+func TestNixProcessPSArgsParsesStateAndCommandLine(t *testing.T) {
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("ps not available")
+	}
+	args, err := nixProcessPSArgs(context.Background(), os.Getpid())
+	if err != nil || len(args) == 0 {
+		t.Fatalf("own process: %v, %v", args, err)
+	}
+	if _, err := nixProcessPSArgs(context.Background(), 0x7ffffff0); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a missing pid is ErrNotExist, got %v", err)
 	}
 }
 

@@ -853,8 +853,9 @@ type NixConfig struct {
 	// DaemonBusyBackoff is the operator-facing backoff after busy detection.
 	DaemonBusyBackoff string `yaml:"daemon_busy_backoff"`
 	// MaxBusyDeferrals bounds how many consecutive due passes active Nix
-	// work may defer before a pass runs anyway, still behind the hook-path
-	// pins and the serialization lock (0 disables this bound).
+	// work or a failed process inspection may defer before a pass runs
+	// anyway, still behind the hook-path pins and the serialization lock (0
+	// disables this bound).
 	MaxBusyDeferrals int `yaml:"max_busy_deferrals"`
 	// MaxBusyDeferralDuration bounds how long active Nix work may defer due
 	// passes, from the first deferral, before a pass runs anyway (empty or
