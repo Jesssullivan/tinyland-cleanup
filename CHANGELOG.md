@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A due Nix GC pass with `nix-collect-garbage` off PATH is no longer
+  silent (issue #163, lab TIN-5770).** On petting-zoo-mini the launchd agent's
+  PATH missed `/nix/var/nix/profiles/default/bin`. Every due pass returned at
+  DEBUG without counting anything, while the cycle report said `nix: ran` and
+  `/nix` fell from 18.1 to 9.8 GiB free; a manual `--once` from a login shell
+  freed 15.8 GiB. Now the pass is a counted deferral (`last_deferral:
+  nix_unavailable`) logged at WARN with the PATH searched, and at ERROR past
+  `max_busy_deferrals` / `max_busy_deferral_duration`. It is never counted as
+  an attempt, so the next poll retries it.
 - **Darwin process inspection no longer holds Nix GC off without bound
   (issue #160, lab TIN-5770).** On petting-zoo-mini every due pass, periodic
   and pressure alike, deferred while `/nix` filled to 99%: `kern.procargs2`

@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -415,6 +416,61 @@ func TestNixMarkerDeferralIsCountedButNeverBypassed(t *testing.T) {
 	st := loadNixGCState(cfg.Nix.GCStateFile)
 	if st.DeferredPasses != 5 || !strings.Contains(st.LastDeferral, "serialized_operation") || !strings.Contains(st.LastDeferral, "hm-switch.lock.d") {
 		t.Fatalf("state = %+v", st)
+	}
+}
+
+// A due pass with nix-collect-garbage off PATH (a launchd agent whose PATH
+// misses the Nix profile) is a counted deferral, logged at WARN and at ERROR
+// past the bound, never a silent DEBUG return (issue #163).
+func TestNixUnavailableIsACountedLoudDeferral(t *testing.T) {
+	p, cfg, _, now := busyCleanupFixture(t)
+	cfg.Nix.MaxBusyDeferrals = 2
+	cfg.Nix.MaxBusyDeferralDuration = ""
+	p.activeWork = func(context.Context) ([]string, nixProcessInspection, error) {
+		return nil, nixProcessInspection{}, nil
+	}
+	t.Setenv("PATH", t.TempDir())
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	for i := 1; i <= 3; i++ {
+		p.Cleanup(context.Background(), LevelModerate, cfg, logger)
+		*now = now.Add(10 * time.Minute)
+	}
+	st := loadNixGCState(cfg.Nix.GCStateFile)
+	if st.DeferredPasses != 3 || st.LastDeferral != "nix_unavailable" || !st.LastGCAttempt.IsZero() {
+		t.Fatalf("state = %+v; want 3 counted nix_unavailable deferrals and no attempt", st)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "is not on the daemon's PATH") {
+		t.Fatalf("the first deferrals log at WARN: %s", out)
+	}
+	if !strings.Contains(out, "level=ERROR") || !strings.Contains(out, `bound="max_busy_deferrals=2"`) {
+		t.Fatalf("past the bound the deferral logs at ERROR: %s", out)
+	}
+
+	// Once nix is back on PATH the next poll collects and the run resets.
+	fakeNixGC(t)
+	p.Cleanup(context.Background(), LevelModerate, cfg, logger)
+	st = loadNixGCState(cfg.Nix.GCStateFile)
+	if st.DeferredPasses != 0 || st.LastGCAttempt.IsZero() {
+		t.Fatalf("state after nix returned = %+v; want an attempt and no deferrals", st)
+	}
+}
+
+// A pass that is not due never probes for nix, so a host without it that is
+// not under pressure logs nothing.
+func TestNixUnavailableNotDueIsQuiet(t *testing.T) {
+	p, cfg, _, _ := busyCleanupFixture(t)
+	cfg.Nix.PeriodicGCInterval = ""
+	t.Setenv("PATH", t.TempDir())
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	p.Cleanup(context.Background(), LevelNone, cfg, logger)
+	if st := loadNixGCState(cfg.Nix.GCStateFile); st.DeferredPasses != 0 {
+		t.Fatalf("a pass that is not due is not a deferral: %+v", st)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("nothing is logged when no pass is due: %s", logs.String())
 	}
 }
 

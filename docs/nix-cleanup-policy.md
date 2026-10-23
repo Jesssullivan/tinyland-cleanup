@@ -41,7 +41,11 @@ The Nix plan includes:
   ERROR. Required hook-path pins, a serialization marker and the GC lock are
   never bypassed; their deferrals are counted, and once the run passes the
   bound each one is logged at ERROR so a stale marker or a stuck lock holder
-  shows up;
+  shows up. A due pass with no `nix-collect-garbage` on the daemon's PATH is
+  deferred the same way (`last_deferral: nix_unavailable`, WARN, then ERROR
+  past the bound, with the PATH searched); give a launchd or systemd unit a
+  PATH that includes the Nix profile, for example
+  `/nix/var/nix/profiles/default/bin`;
 - process inspection on Darwin: `kern.procargs2` refuses another user's
   process and a zombie with EINVAL. A zombie or an exited PID is skipped. An
   interpreter (`bash`, `sh`, `python`, ...) whose argv cannot be read is
