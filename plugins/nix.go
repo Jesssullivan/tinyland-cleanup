@@ -302,6 +302,13 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		}
 		return result
 	}
+	// A due pass with no nix-collect-garbage on PATH used to return at
+	// DEBUG without counting anything, so a launchd agent whose PATH missed
+	// the Nix profile never collected and never said so (issue #163). It is
+	// a deferral like the others: counted, WARN, ERROR past the bound.
+	if !p.isNixAvailable() {
+		return deferUnbypassable(slog.LevelWarn, "nix_unavailable", "skipping Nix GC: nix-collect-garbage is not on the daemon's PATH", "path", os.Getenv("PATH"))
+	}
 	if pinErr != nil && cfg.Nix.HookPinRequired {
 		return deferUnbypassable(slog.LevelWarn, "hook_pins_unavailable", "skipping Nix GC: hook-path pins could not be established", "error", pinErr)
 	}
