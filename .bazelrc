@@ -1,5 +1,9 @@
 common --enable_bzlmod
 
+# Bound the Bazel client server (TIN-5770, R470). An idle server exits after
+# 120 s instead of holding a JVM for hours after a one-off build or test.
+startup --max_idle_secs=120
+
 build --announce_rc
 build --spawn_strategy=sandboxed
 build --experimental_convenience_symlinks=ignore
