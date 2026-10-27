@@ -48,7 +48,7 @@ Cache-backed validation on GloriousFlywheel runners:
 ```sh
 GF_BAZEL_SUBSTRATE_MODE=shared-cache-backed \
 GF_BAZEL_REMOTE_UPLOAD=false \
-BAZEL_REMOTE_CACHE=grpc://example.internal:9092 \
+BAZEL_REMOTE_CACHE=grpc://example.internal \
   just flywheel-test //...
 ```
 
@@ -75,7 +75,7 @@ Remote-execution proof is separate from cache-backed validation:
 GF_RBE_PROOF_MODE=explicit \
 GF_BAZEL_SUBSTRATE_MODE=executor-backed \
 GF_BAZEL_REMOTE_EXECUTION_PLATFORM=linux-x86_64 \
-BAZEL_REMOTE_CACHE=grpc://example-cache.internal:9092 \
+BAZEL_REMOTE_CACHE=grpc://example-cache.internal \
 BAZEL_REMOTE_EXECUTOR=grpc://example-executor.internal:8980 \
   bash scripts/bazel-rbe-proof.sh --target //:bazel_cache_policy_check
 ```
