@@ -387,6 +387,11 @@ type PodmanConfig struct {
 	PruneImagesAge string `yaml:"prune_images_age"`
 	// ProtectRunningContainers prevents pruning images used by running containers
 	ProtectRunningContainers bool `yaml:"protect_running_containers"`
+	// ProtectedImages are image references (pin them by digest, for example
+	// docker.io/kicad/kicad@sha256:...) that the moderate-level age prune never
+	// removes. Empty keeps the plain `podman image prune -af --filter until=`
+	// path. The opt-in critical system prune does not honor this list.
+	ProtectedImages []string `yaml:"protected_images"`
 	// MachineNames to check for cleanup (Darwin)
 	MachineNames []string `yaml:"machine_names"`
 	// BuildKitPrune enables targeted BuildKit cache pruning at critical level

@@ -25,6 +25,28 @@ your config. The list below is the full registry.
 | `debris-report` | Report only, off by default (`enable.debris_report`): logs stale incident/agent debris under `debris_report.scan_paths` (default patterns include YYYYMMDD-stamped names, `.bulkload-*`, `rollback/`, `*-carry/`) with sizes; never deletes |
 | `archive-lifecycle` | Retires archive staging pre-images after proving every file already exists in the durable archive target — see [Archive staging lifecycle](archive-staging-lifecycle.md) |
 
+### Podman protected images
+
+At moderate level the `podman` plugin removes every unused image older than
+`podman.prune_images_age` (`podman image prune -af --filter until=`). The age
+filter reads the image's creation date, so an image built long ago is eligible
+the moment no container uses it. To keep a large image that is pulled rarely
+but run often, list it under `podman.protected_images`, pinned by digest:
+
+```yaml
+podman:
+  protected_images:
+    - docker.io/kicad/kicad@sha256:c8f05703e865a1caa7266851cf4986dd01d5fb1148e4f63382b6a73466ba7e71
+```
+
+With a non-empty list the age prune lists the images the age filter selects
+(`podman images --format json --filter until=`) and removes each by name with
+`podman rmi`, never `--force`. It skips protected images, images any container
+uses (running or stopped) and read-only images, which is what `image prune -a`
+keeps. A reference that is not present locally is ignored. The opt-in critical
+`podman system prune -af --volumes` (`podman.critical_system_prune`) does not
+honor the list.
+
 ## Linux
 
 | Name | Cleans |
