@@ -381,6 +381,7 @@ go_test(
         "plugins/plugin_test.go",
         "plugins/podman_buildkit_test.go",
         "plugins/podman_compaction_test.go",
+        "plugins/podman_protected_test.go",
         "plugins/scan_budget_test.go",
         "plugins/streamwalk_test.go",
         "plugins/sudo_test.go",

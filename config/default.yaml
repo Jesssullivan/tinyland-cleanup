@@ -151,6 +151,10 @@ docker:
 podman:
   prune_images_age: "24h"
   protect_running_containers: true
+  # Image references the moderate age prune never removes. Pin each by digest.
+  # When set, the age prune lists images and removes them one by one instead
+  # of `podman image prune -af`, which has no reference exclusion.
+  protected_images: []
   machine_names:
     - podman-machine-default
 

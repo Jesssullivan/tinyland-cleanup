@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`podman.protected_images` keeps pinned images through the moderate age
+  prune (xlr_gangbox TIN-7255).** On honey `/home` sat above the 80 % moderate
+  level, so `podman image prune -af --filter until=24h` ran about hourly and
+  deleted the 2.6 GB `docker.io/kicad/kicad:10.0.7` image between KiCad runs
+  (`until` keys on the image creation date). Podman's prune has no reference
+  exclusion, so with a non-empty list the plugin lists the age-eligible images
+  and removes each with `podman rmi` by name, skipping protected, in-use and
+  read-only images. An empty list (the default) keeps the old command.
+
 ### Fixed
 
 - **A due Nix GC pass with `nix-collect-garbage` off PATH is no longer

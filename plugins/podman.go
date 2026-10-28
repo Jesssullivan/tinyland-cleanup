@@ -3,6 +3,7 @@ package plugins
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -212,9 +213,10 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 	case LevelWarning:
 		plan.Steps = append(plan.Steps, "Prune dangling Podman images")
 	case LevelModerate:
+		plan.Metadata["protected_images"] = strconv.Itoa(len(cfg.Podman.ProtectedImages))
 		plan.Steps = append(plan.Steps,
 			"Prune dangling Podman images",
-			fmt.Sprintf("Prune Podman images older than %s", cfg.Podman.PruneImagesAge),
+			podmanAgePruneStep(cfg),
 			"Prune old stopped Podman containers",
 			"Prune Podman build cache",
 		)
@@ -389,10 +391,16 @@ func (p *PodmanPlugin) cleanModerate(ctx context.Context, cfg *config.Config, lo
 
 	// Clean old images (with age filter)
 	logger.Debug("cleaning old podman images", "age", cfg.Podman.PruneImagesAge)
-	args := []string{"image", "prune", "-af", "--filter", fmt.Sprintf("until=%s", cfg.Podman.PruneImagesAge)}
-	if output, err := p.runPodmanCommand(ctx, args...); err == nil {
-		result.BytesFreed += p.parseReclaimedSpace(output)
-		result.ItemsCleaned++
+	if len(cfg.Podman.ProtectedImages) > 0 {
+		freed, removed := p.pruneOldImagesProtected(ctx, cfg, logger)
+		result.BytesFreed += freed
+		result.ItemsCleaned += removed
+	} else {
+		args := []string{"image", "prune", "-af", "--filter", fmt.Sprintf("until=%s", cfg.Podman.PruneImagesAge)}
+		if output, err := p.runPodmanCommand(ctx, args...); err == nil {
+			result.BytesFreed += p.parseReclaimedSpace(output)
+			result.ItemsCleaned++
+		}
 	}
 
 	// Clean old stopped containers
@@ -410,6 +418,129 @@ func (p *PodmanPlugin) cleanModerate(ctx context.Context, cfg *config.Config, lo
 	}
 
 	return result
+}
+
+// podmanImage is the subset of `podman images --format json` that the
+// protected age prune reads.
+type podmanImage struct {
+	ID         string   `json:"Id"`
+	Names      []string `json:"Names"`
+	Containers int      `json:"Containers"`
+	ReadOnly   bool     `json:"ReadOnly"`
+	Size       int64    `json:"Size"`
+}
+
+func podmanAgePruneStep(cfg *config.Config) string {
+	if n := len(cfg.Podman.ProtectedImages); n > 0 {
+		return fmt.Sprintf("Prune Podman images older than %s, keeping %d protected image reference(s)", cfg.Podman.PruneImagesAge, n)
+	}
+	return fmt.Sprintf("Prune Podman images older than %s", cfg.Podman.PruneImagesAge)
+}
+
+// pruneOldImagesProtected replaces `podman image prune -af --filter until=`
+// when podman.protected_images is set. `podman image prune` has no reference
+// or digest exclusion, so this lists the images the age filter selects and
+// removes each one by name, skipping protected images, images any container
+// (running or stopped) uses, and read-only images from additional stores.
+// That is the same set `image prune -a` keeps, minus the protected images.
+func (p *PodmanPlugin) pruneOldImagesProtected(ctx context.Context, cfg *config.Config, logger *slog.Logger) (int64, int) {
+	protected := p.resolveProtectedImageIDs(ctx, cfg.Podman.ProtectedImages, logger)
+
+	output, err := p.runPodmanCommand(ctx, "images", "--format", "json", "--filter", fmt.Sprintf("until=%s", cfg.Podman.PruneImagesAge))
+	if err != nil {
+		logger.Warn("failed to list podman images for protected age prune", "error", err)
+		return 0, 0
+	}
+	images, err := parsePodmanImagesJSON(output)
+	if err != nil {
+		logger.Warn("failed to parse podman images for protected age prune", "error", err)
+		return 0, 0
+	}
+
+	var freed int64
+	removed := 0
+	for _, img := range selectPodmanAgePruneCandidates(images, protected) {
+		if _, err := p.runPodmanCommand(ctx, podmanRemoveImageArgs(img)...); err != nil {
+			// A container may have started on the image since the listing.
+			logger.Debug("podman image removal skipped", "image", img.ID, "error", err)
+			continue
+		}
+		freed += img.Size
+		removed++
+	}
+	for id, ref := range protected {
+		logger.Debug("podman image protected from age prune", "image", id, "ref", ref)
+	}
+	return freed, removed
+}
+
+// resolveProtectedImageIDs maps each configured reference that is present
+// locally to its full image ID. A reference that is absent needs no
+// protection and is skipped.
+func (p *PodmanPlugin) resolveProtectedImageIDs(ctx context.Context, refs []string, logger *slog.Logger) map[string]string {
+	ids := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" {
+			continue
+		}
+		output, err := p.runPodmanCommand(ctx, "image", "inspect", "--format", "{{.Id}}", ref)
+		if err != nil {
+			logger.Debug("protected podman image not present", "ref", ref)
+			continue
+		}
+		if id := strings.TrimSpace(output); id != "" {
+			ids[id] = ref
+		}
+	}
+	return ids
+}
+
+func parsePodmanImagesJSON(output string) ([]podmanImage, error) {
+	output = strings.TrimSpace(output)
+	if output == "" || output == "null" {
+		return nil, nil
+	}
+	var images []podmanImage
+	if err := json.Unmarshal([]byte(output), &images); err != nil {
+		return nil, err
+	}
+	return images, nil
+}
+
+// selectPodmanAgePruneCandidates returns the listed images that may be
+// removed: not protected, not used by any container and not read-only.
+func selectPodmanAgePruneCandidates(images []podmanImage, protected map[string]string) []podmanImage {
+	seen := make(map[string]struct{}, len(images))
+	var out []podmanImage
+	for _, img := range images {
+		if img.ID == "" {
+			continue
+		}
+		if _, dup := seen[img.ID]; dup {
+			continue
+		}
+		seen[img.ID] = struct{}{}
+		if _, ok := protected[img.ID]; ok {
+			continue
+		}
+		if img.Containers > 0 || img.ReadOnly {
+			continue
+		}
+		out = append(out, img)
+	}
+	return out
+}
+
+// podmanRemoveImageArgs removes an image through every name it carries, so a
+// multi-tag image goes in one call without --force; an untagged image goes by
+// ID.
+func podmanRemoveImageArgs(img podmanImage) []string {
+	args := []string{"rmi"}
+	if len(img.Names) == 0 {
+		return append(args, img.ID)
+	}
+	return append(args, img.Names...)
 }
 
 // cleanAggressive performs aggressive cleanup: moderate + volumes + VM fstrim.
