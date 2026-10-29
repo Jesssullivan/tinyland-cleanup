@@ -63,6 +63,33 @@ bazel:
   # orphan_workspace_mount_roots defaults per platform; see below.
 ```
 
+## Disk cache age retention
+
+The plugin reports each `disk_cache` as one cache tier, deleted whole only
+when the Bazel footprint exceeds `max_total_gb`. `disk_cache_max_age`
+(default `14d`, floor 24h, `""` or `0` disables) adds per-entry retention
+(TIN-3082): an `ac/` or `cas/` entry whose last use, the later of its atime
+and mtime, is older than the age is expired. The later of the two is used so
+a `noatime` mount (sting's `/srv/cache`) never makes a fresh entry look old.
+Bazel's own `tmp/` and `gc/` directories and other users' entries are never
+touched.
+
+```yaml
+bazel:
+  disk_cache_max_age: 14d
+  disk_cache_age_delete: false   # report only until true
+  disk_cache_paths: []           # caches outside roots, "~" and "{user}" expand
+  disk_cache_max_entries: 2000000
+```
+
+Each cache gets one `disk_cache_entries` target whose bytes are the expired
+entries' allocated bytes: `report_expired_disk_cache_entries` by default,
+`delete_expired_disk_cache_entries` with `disk_cache_age_delete: true`. The
+rule waits while any Bazel client command is visible or the process
+inspection failed, re-checks clients before removing anything and each
+entry's last use just before its removal. With the flag set it runs at every
+level the plugin runs, warning included; the whole-tier rule is unchanged.
+
 ## Orphaned output bases
 
 Bazel writes a `DO_NOT_BUILD_HERE` file into every output base containing the

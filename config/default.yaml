@@ -98,6 +98,7 @@ enable:
   bazel: true           # Bazel output base and cache cleanup planning
   bazel_bases: false    # Structural Bazel/omux output-base reaper (R-C644/R-C645)
   shm_scratch: false    # Idle, unheld /dev/shm directories (lab R-C856, Linux)
+  retention: false      # Age retention: tmp-agents roots, Cargo build dirs, floor alert (TIN-7495)
   archive_lifecycle: true  # Retire verified archive staging pre-images
 
 # GitHub Actions runner settings (Linux only)
@@ -375,6 +376,50 @@ bazel:
   # orphan_workspace_mount_roots:
   #   - /
   #   - /Volumes
+  # Per-entry age retention for disk_cache ac/ and cas/ entries (TIN-3082).
+  # An entry whose last use (the later of atime and mtime) is older than
+  # disk_cache_max_age is expired. Report only until disk_cache_age_delete is
+  # true; skipped while any Bazel client command runs. "" or 0 disables.
+  disk_cache_max_age: 14d
+  disk_cache_age_delete: false
+  # disk_cache directories outside roots (for example a --disk_cache path not
+  # named disk_cache). "~" and "{user}" are expanded.
+  disk_cache_paths: []
+  disk_cache_max_entries: 2000000
+
+# Age retention (TIN-7495, TIN-3082). Enable with enable.retention. Every
+# deleting rule reports only until its own delete flag is true.
+retention:
+  interval: 1h          # shortest time between daemon passes; --dry-run always plans
+  uninspectable_ok_comms: [tailscaled, "(sd-pam)", sd-pam, systemd]
+  tmp_agents:
+    enabled: true
+    roots: [/srv/fast-local/tmp-agents]   # Darwin default: none
+    name_globs: ["nix-shell.*"]
+    max_age: 24h        # newest mtime or ctime inside must be older (floor 1h)
+    delete: false
+    max_dirs_per_cycle: 4096
+    max_entries_per_dir: 200000
+    # A .git below one of these path elements with no remote, no include and
+    # no linked work trees is a test fixture and goes with its stale tree
+    # (TIN-7495 ruling 2026-10-29). Empty keeps every .git.
+    fixture_repo_parents: ["pytest-of-*"]
+  cargo_targets:
+    enabled: true
+    roots: ["/srv/cache/{user}/cargo/build"]
+    max_depth: 3
+    max_age: 7d         # floor 24h
+    delete: false
+    busy_processes: [cargo, rustc]
+    max_entries_per_target: 2000000
+  free_space_floor:
+    enabled: true
+    floor_gib: 10
+    paths: [/]          # Darwin default: [/, /System/Volumes/Data]; monitored_mounts and retention roots are added
+  darwin_leftovers:     # report only; Darwin
+    enabled: true
+    fusion_webdeploy_root: "~/Library/Application Support/Autodesk/webdeploy/production"
+    report_paths: ["~/Library/Application Support/Claude/vm_bundles"]
 
 # Workspace development artifact settings
 dev_artifacts:
