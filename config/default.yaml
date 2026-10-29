@@ -156,6 +156,12 @@ podman:
   # When set, the age prune lists images and removes them one by one instead
   # of `podman image prune -af`, which has no reference exclusion.
   protected_images: []
+  # A file of more image references, one per line, read every cycle. A
+  # harness can write its pinned digests here. Empty disables it.
+  protected_images_file: ""
+  # Labels (key or key=value) whose images, containers, volumes and networks
+  # no prune removes.
+  protected_labels: []
   machine_names:
     - podman-machine-default
 

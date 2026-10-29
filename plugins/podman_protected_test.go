@@ -67,7 +67,7 @@ func TestSelectPodmanAgePruneCandidatesSkipsProtectedInUseAndReadOnly(t *testing
 		"e077b23920bf73a28d3e715c29cdd678048432ec19c1648014790ecff588171d": "docker.io/kicad/kicad@sha256:c8f05703e865a1caa7266851cf4986dd01d5fb1148e4f63382b6a73466ba7e71",
 	}
 	var got []string
-	for _, img := range selectPodmanAgePruneCandidates(images, protected) {
+	for _, img := range selectPodmanAgePruneCandidates(images, protected, podmanKeep{}) {
 		got = append(got, img.ID[:4])
 	}
 	want := []string{"5c64", "aaaa", "cccc"}
@@ -77,7 +77,7 @@ func TestSelectPodmanAgePruneCandidatesSkipsProtectedInUseAndReadOnly(t *testing
 
 	// Without the protection the KiCad image is a candidate, as with image prune -a.
 	got = nil
-	for _, img := range selectPodmanAgePruneCandidates(images, nil) {
+	for _, img := range selectPodmanAgePruneCandidates(images, nil, podmanKeep{}) {
 		got = append(got, img.ID[:4])
 	}
 	if got[0] != "e077" {
