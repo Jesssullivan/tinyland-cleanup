@@ -72,7 +72,13 @@ immediately before removal:
 - the process inventory is incomplete (a same-user process whose fds or
   environment cannot be read, other than `uninspectable_ok_comms`);
 - it belongs to another user, crosses a mount, or contains `.git` or
-  agent-session data (TIN-5268);
+  agent-session data (TIN-5268). One exception, `tmp_agents` only (operator
+  ruling TIN-7495 2026-10-29): a test fixture repository may go with its
+  stale tree. That is a real `.git` directory below a path element matching
+  `tmp_agents.fixture_repo_parents` (default `pytest-of-*`) whose config has
+  no `[remote]` and no `[include]` section and that has no linked work trees.
+  A `.git` file, a remote, a repository anywhere else, or an empty
+  `fixture_repo_parents` keeps the tree;
 - it is under `dev_artifacts.protect_paths`, holds files a Git repository
   tracks, or sits in a work tree with uncommitted changes, unpushed commits
   or no upstream;

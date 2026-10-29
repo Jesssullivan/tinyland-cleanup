@@ -394,6 +394,10 @@ retention:
     delete: false
     max_dirs_per_cycle: 4096
     max_entries_per_dir: 200000
+    # A .git below one of these path elements with no remote, no include and
+    # no linked work trees is a test fixture and goes with its stale tree
+    # (TIN-7495 ruling 2026-10-29). Empty keeps every .git.
+    fixture_repo_parents: ["pytest-of-*"]
   cargo_targets:
     enabled: true
     roots: ["/srv/cache/{user}/cargo/build"]

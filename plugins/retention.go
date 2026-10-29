@@ -431,7 +431,11 @@ func (p *RetentionPlugin) decide(ctx context.Context, cfg *config.Config, c rete
 		return target
 	}
 
-	stats, why := p.walkTree(ctx, path, uint64(st.Dev), walkLimit)
+	var fixtureParents []string
+	if c.rule == retentionRuleTmpAgents {
+		fixtureParents = cfg.Retention.TmpAgents.FixtureRepoParents
+	}
+	stats, why := p.walkTree(ctx, path, uint64(st.Dev), walkLimit, fixtureParents)
 	target.Bytes = stats.allocated
 	if stats.apparent != stats.allocated {
 		target.LogicalBytes = stats.apparent
@@ -466,6 +470,9 @@ func (p *RetentionPlugin) decide(ctx context.Context, cfg *config.Config, c rete
 
 	target.Protected = false
 	reason := fmt.Sprintf("newest change %s is older than %s with no live reference", stats.newest.UTC().Format(time.RFC3339), formatDevArtifactAge(c.maxAge))
+	if stats.fixtureRepos > 0 {
+		reason += fmt.Sprintf("; holds %d remote-less fixture repo(s)", stats.fixtureRepos)
+	}
 	if deleteFlag {
 		target.Action = "delete"
 		target.Reason = reason
@@ -510,11 +517,16 @@ type retentionTreeStats struct {
 	allocated int64
 	apparent  int64
 	entries   int
+	// fixtureRepos counts the remote-less fixture repositories inside.
+	fixtureRepos int
 }
 
 // walkTree measures a tree and applies the structural rules. A non-empty
 // reason keeps the tree.
-func (p *RetentionPlugin) walkTree(ctx context.Context, path string, dev uint64, limit int) (retentionTreeStats, string) {
+//
+// A .git keeps the tree unless it is a fixture repository (see
+// retentionFixtureRepo) and fixtureParents is not empty.
+func (p *RetentionPlugin) walkTree(ctx context.Context, path string, dev uint64, limit int, fixtureParents []string) (retentionTreeStats, string) {
 	var stats retentionTreeStats
 	now := p.clock()
 	err := filepath.WalkDir(path, func(walked string, d fs.DirEntry, walkErr error) error {
@@ -529,7 +541,10 @@ func (p *RetentionPlugin) walkTree(ctx context.Context, path string, dev uint64,
 			return fmt.Errorf("walk bound %d exceeded", limit)
 		}
 		if d.Name() == ".git" {
-			return errors.New("contains a Git repository (.git): Git custody")
+			if why := retentionFixtureRepo(path, walked, d, fixtureParents); why != "" {
+				return errors.New("contains a Git repository (.git): Git custody (" + why + ")")
+			}
+			stats.fixtureRepos++
 		}
 		if walked != path && d.IsDir() && isAgentSessionDir(walked) {
 			return errors.New("contains agent-session directory " + d.Name() + " (TIN-5268)")
@@ -562,6 +577,62 @@ func (p *RetentionPlugin) walkTree(ctx context.Context, path string, dev uint64,
 		return stats, "kept: " + err.Error()
 	}
 	return stats, ""
+}
+
+// retentionFixtureRepo decides whether one .git inside a stale tmp_agents
+// tree is a test fixture repository that may go with the tree (operator
+// ruling TIN-7495 2026-10-29, "Allow removing remote-less fixture repos").
+// It returns "" for a fixture repository and the reason to keep otherwise.
+// A fixture repository is all of:
+//
+//   - a real .git directory (a .git file links a work tree to a repository
+//     elsewhere, so it is never a fixture);
+//   - below a path element of the tree that matches a fixture parent glob
+//     (default pytest-of-*, the pytest basetemp root);
+//   - a config with no [remote] and no [include] section, read directly;
+//   - no linked work trees (.git/worktrees) and no commondir.
+func retentionFixtureRepo(tree, gitPath string, d fs.DirEntry, parents []string) string {
+	if len(parents) == 0 {
+		return "fixture repositories are not allowed"
+	}
+	if !d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
+		return ".git is not a directory"
+	}
+	rel, err := filepath.Rel(tree, filepath.Dir(gitPath))
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "repository at the tree root"
+	}
+	under := false
+	elems := strings.Split(rel, string(os.PathSeparator))
+	for _, e := range elems[:len(elems)-1] {
+		if retentionNameMatches(e, parents) {
+			under = true
+			break
+		}
+	}
+	if !under {
+		return "not under a fixture parent " + strings.Join(parents, ", ")
+	}
+	raw, err := os.ReadFile(filepath.Join(gitPath, "config"))
+	if err != nil {
+		return "config unreadable"
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		l := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(l, "[remote") {
+			return "a remote is configured"
+		}
+		if strings.HasPrefix(l, "[include") {
+			return "config includes another file"
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(gitPath, "commondir")); err == nil {
+		return "linked work tree (commondir)"
+	}
+	if entries, err := os.ReadDir(filepath.Join(gitPath, "worktrees")); err == nil && len(entries) > 0 {
+		return "has linked work trees"
+	}
+	return ""
 }
 
 // evaluateFloors raises an alert for every volume under the floor.

@@ -514,3 +514,108 @@ func TestBbIndexEnvironHoldsTmpdir(t *testing.T) {
 		t.Fatalf("unrelated dir held: %v", got)
 	}
 }
+
+// fixtureRepo makes a pytest-style fixture repository inside a stale
+// nix-shell root and returns the root and the repository.
+func (f *retFixture) fixtureRepo(git, root, rel string) (string, string) {
+	f.t.Helper()
+	dir := filepath.Join(f.root, root)
+	repo := filepath.Join(dir, rel)
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	retGit(f.t, git, repo, "init", "-q")
+	f.file(filepath.Join(repo, "receipt.json"), 64)
+	return dir, repo
+}
+
+func TestRetentionRemovesRemotelessFixtureRepos(t *testing.T) {
+	git := gitOrSkip(t)
+	f := newRetFixture(t)
+	f.cfg.Retention.TmpAgents.Delete = true
+	dir, _ := f.fixtureRepo(git, "nix-shell.fix01", "pytest-of-jess/pytest-7/test_carrier_refuses_0/repo")
+	f.fixtureRepo(git, "nix-shell.fix01", "pytest-of-jess/pytest-7/popen-gw3/test_draft_1/work")
+	tg := retTarget(t, f.plan(), dir)
+	if tg.Protected || !strings.Contains(tg.Reason, "2 remote-less fixture repo") {
+		t.Fatalf("stale root with only fixture repos should be eligible: %+v", tg)
+	}
+	f.cleanup()
+	if pathExists(dir) {
+		t.Fatal("stale root with only remote-less fixture repos was not removed")
+	}
+}
+
+func TestRetentionKeepsFixtureRepoWithRemote(t *testing.T) {
+	git := gitOrSkip(t)
+	f := newRetFixture(t)
+	f.cfg.Retention.TmpAgents.Delete = true
+	dir, repo := f.fixtureRepo(git, "nix-shell.fix02", "pytest-of-jess/pytest-7/test_push_0/repo")
+	f.fixtureRepo(git, "nix-shell.fix02", "pytest-of-jess/pytest-7/test_other_0/repo") // remote-less sibling
+	retGit(t, git, repo, "remote", "add", "github", "/srv/fast-local/tmp-agents/nix-shell.elsewhere/origin.git")
+	tg := retTarget(t, f.plan(), dir)
+	if !tg.Protected || !strings.Contains(tg.Reason, "a remote is configured") {
+		t.Fatalf("fixture repo with a remote not kept: %+v", tg)
+	}
+	f.cleanup()
+	if !pathExists(filepath.Join(repo, "receipt.json")) {
+		t.Fatal("fixture repo with a remote was removed")
+	}
+}
+
+func TestRetentionKeepsGitOutsideFixtureParents(t *testing.T) {
+	git := gitOrSkip(t)
+	for _, tc := range []struct{ name, rel string }{
+		{"not under pytest-of", "scratch/checkout"},
+		{"repo at the parent itself", "pytest-of-jess"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRetFixture(t)
+			f.cfg.Retention.TmpAgents.Delete = true
+			dir, repo := f.fixtureRepo(git, "nix-shell.fix03", tc.rel)
+			tg := retTarget(t, f.plan(), dir)
+			if !tg.Protected || !strings.Contains(tg.Reason, "Git custody") {
+				t.Fatalf("remote-less repo outside a fixture parent not kept: %+v", tg)
+			}
+			f.cleanup()
+			if !pathExists(repo) {
+				t.Fatal("repo outside a fixture parent removed")
+			}
+		})
+	}
+}
+
+func TestRetentionKeepsFixtureGitfileAndLinkedWorktrees(t *testing.T) {
+	git := gitOrSkip(t)
+	t.Run("gitfile", func(t *testing.T) {
+		f := newRetFixture(t)
+		f.cfg.Retention.TmpAgents.Delete = true
+		dir := filepath.Join(f.root, "nix-shell.fix04")
+		f.file(filepath.Join(dir, "pytest-of-jess", "pytest-1", "t0", "wt", ".git"), 0)
+		if err := os.WriteFile(filepath.Join(dir, "pytest-of-jess", "pytest-1", "t0", "wt", ".git"), []byte("gitdir: /srv/fast-local/jess/git/real/.git/worktrees/wt\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if tg := retTarget(t, f.plan(), dir); !tg.Protected || !strings.Contains(tg.Reason, "not a directory") {
+			t.Fatalf("gitfile not kept: %+v", tg)
+		}
+	})
+	t.Run("linked worktree", func(t *testing.T) {
+		f := newRetFixture(t)
+		f.cfg.Retention.TmpAgents.Delete = true
+		dir, repo := f.fixtureRepo(git, "nix-shell.fix05", "pytest-of-jess/pytest-1/t0/repo")
+		retGit(t, git, repo, "add", "receipt.json")
+		retGit(t, git, repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x")
+		retGit(t, git, repo, "worktree", "add", "-q", filepath.Join(t.TempDir(), "elsewhere"))
+		if tg := retTarget(t, f.plan(), dir); !tg.Protected || !strings.Contains(tg.Reason, "linked work trees") {
+			t.Fatalf("repo with linked work trees not kept: %+v", tg)
+		}
+	})
+	t.Run("disabled", func(t *testing.T) {
+		f := newRetFixture(t)
+		f.cfg.Retention.TmpAgents.Delete = true
+		f.cfg.Retention.TmpAgents.FixtureRepoParents = nil
+		dir, _ := f.fixtureRepo(git, "nix-shell.fix06", "pytest-of-jess/pytest-1/t0/repo")
+		if tg := retTarget(t, f.plan(), dir); !tg.Protected {
+			t.Fatalf("fixture repo removable with fixture_repo_parents empty: %+v", tg)
+		}
+	})
+}
