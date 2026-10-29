@@ -392,6 +392,15 @@ type PodmanConfig struct {
 	// removes. Empty keeps the plain `podman image prune -af --filter until=`
 	// path. The opt-in critical system prune does not honor this list.
 	ProtectedImages []string `yaml:"protected_images"`
+	// ProtectedImagesFile names a file of more image references, one per line
+	// ('#' starts a comment), read on every cycle so a harness can write its
+	// pins without a config change. A missing file adds nothing; a file that
+	// exists but cannot be read stops the age prune for that cycle.
+	ProtectedImagesFile string `yaml:"protected_images_file"`
+	// ProtectedLabels keeps every image, container, volume and network that
+	// carries one of these labels (a key, or key=value) out of every prune.
+	// Each becomes a `--filter label!=<entry>` on the prune commands.
+	ProtectedLabels []string `yaml:"protected_labels"`
 	// MachineNames to check for cleanup (Darwin)
 	MachineNames []string `yaml:"machine_names"`
 	// BuildKitPrune enables targeted BuildKit cache pruning at critical level

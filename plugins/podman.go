@@ -213,18 +213,23 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 	case LevelWarning:
 		plan.Steps = append(plan.Steps, "Prune dangling Podman images")
 	case LevelModerate:
-		plan.Metadata["protected_images"] = strconv.Itoa(len(cfg.Podman.ProtectedImages))
+		keep := loadPodmanKeep(cfg.Podman, podmanHome())
+		plan.Metadata["protected_images"] = strconv.Itoa(len(keep.Refs))
+		plan.Metadata["protected_labels"] = strconv.Itoa(len(keep.Labels))
+		plan.Metadata["protected_images_file"] = keep.File
+		if keep.FileErr != nil {
+			plan.Warnings = append(plan.Warnings, "protected_images_file unreadable; the age prune is skipped: "+keep.FileErr.Error())
+		}
 		plan.Steps = append(plan.Steps,
 			"Prune dangling Podman images",
-			podmanAgePruneStep(cfg),
+			podmanAgePruneStep(cfg, keep),
 			"Prune old stopped Podman containers",
 			"Prune Podman build cache",
 		)
 	case LevelAggressive:
 		plan.Steps = append(plan.Steps,
+			"Prune Podman volumes and networks no container uses",
 			"Run moderate Podman cleanup",
-			"Prune unused Podman volumes",
-			"Prune Podman build containers",
 		)
 		if runtime.GOOS == "darwin" && p.environment.VMRunning && cfg.Podman.TrimVMDisk && !p.fstrimReclaimsHostSpace() {
 			plan.Warnings = append(plan.Warnings, "guest fstrim output is not counted as host bytes for this provider; measured host free-space delta remains authoritative")
@@ -342,7 +347,7 @@ func (p *PodmanPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *con
 	switch level {
 	case LevelWarning:
 		// Light cleanup: dangling images only
-		result = p.cleanDangling(ctx, logger)
+		result = p.cleanDangling(ctx, cfg, logger)
 	case LevelModerate:
 		// Moderate: + old images + old containers + build cache
 		result = p.cleanModerate(ctx, cfg, logger)
@@ -358,11 +363,12 @@ func (p *PodmanPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *con
 }
 
 // cleanDangling removes dangling (untagged) images.
-func (p *PodmanPlugin) cleanDangling(ctx context.Context, logger *slog.Logger) CleanupResult {
+func (p *PodmanPlugin) cleanDangling(ctx context.Context, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: p.Name(), Level: LevelWarning}
+	keep := loadPodmanKeep(cfg.Podman, podmanHome())
 
 	logger.Debug("cleaning dangling podman images")
-	output, err := p.runPodmanCommand(ctx, "image", "prune", "-f")
+	output, err := p.runPodmanCommand(ctx, append([]string{"image", "prune", "-f"}, keep.labelFilterArgs()...)...)
 	if err != nil {
 		logger.Warn("failed to prune dangling images", "error", err)
 		result.Error = err
@@ -381,18 +387,23 @@ func (p *PodmanPlugin) cleanDangling(ctx context.Context, logger *slog.Logger) C
 // cleanModerate performs moderate cleanup: dangling images, old images, old containers, build cache.
 func (p *PodmanPlugin) cleanModerate(ctx context.Context, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: p.Name(), Level: LevelModerate}
+	keep := loadPodmanKeep(cfg.Podman, podmanHome())
+	labelFilters := keep.labelFilterArgs()
 
 	// Clean dangling images
 	logger.Debug("cleaning dangling podman images")
-	if output, err := p.runPodmanCommand(ctx, "image", "prune", "-f"); err == nil {
+	if output, err := p.runPodmanCommand(ctx, append([]string{"image", "prune", "-f"}, labelFilters...)...); err == nil {
 		result.BytesFreed += p.parseReclaimedSpace(output)
 		result.ItemsCleaned++
 	}
 
 	// Clean old images (with age filter)
 	logger.Debug("cleaning old podman images", "age", cfg.Podman.PruneImagesAge)
-	if len(cfg.Podman.ProtectedImages) > 0 {
-		freed, removed := p.pruneOldImagesProtected(ctx, cfg, logger)
+	if keep.FileErr != nil {
+		// Fail closed: an unreadable keep file may hold the only pin.
+		logger.Warn("skipping podman age prune: protected_images_file unreadable", "file", keep.File, "error", keep.FileErr)
+	} else if keep.active() {
+		freed, removed := p.pruneOldImagesProtected(ctx, cfg, keep, logger)
 		result.BytesFreed += freed
 		result.ItemsCleaned += removed
 	} else {
@@ -405,7 +416,8 @@ func (p *PodmanPlugin) cleanModerate(ctx context.Context, cfg *config.Config, lo
 
 	// Clean old stopped containers
 	logger.Debug("cleaning old podman containers")
-	if output, err := p.runPodmanCommand(ctx, "container", "prune", "-f", "--filter", "until=1h"); err == nil {
+	containerPrune := append([]string{"container", "prune", "-f", "--filter", "until=1h"}, labelFilters...)
+	if output, err := p.runPodmanCommand(ctx, containerPrune...); err == nil {
 		result.BytesFreed += p.parseReclaimedSpace(output)
 		result.ItemsCleaned++
 	}
@@ -423,16 +435,20 @@ func (p *PodmanPlugin) cleanModerate(ctx context.Context, cfg *config.Config, lo
 // podmanImage is the subset of `podman images --format json` that the
 // protected age prune reads.
 type podmanImage struct {
-	ID         string   `json:"Id"`
-	Names      []string `json:"Names"`
-	Containers int      `json:"Containers"`
-	ReadOnly   bool     `json:"ReadOnly"`
-	Size       int64    `json:"Size"`
+	ID         string            `json:"Id"`
+	Names      []string          `json:"Names"`
+	Containers int               `json:"Containers"`
+	ReadOnly   bool              `json:"ReadOnly"`
+	Size       int64             `json:"Size"`
+	Labels     map[string]string `json:"Labels"`
 }
 
-func podmanAgePruneStep(cfg *config.Config) string {
-	if n := len(cfg.Podman.ProtectedImages); n > 0 {
-		return fmt.Sprintf("Prune Podman images older than %s, keeping %d protected image reference(s)", cfg.Podman.PruneImagesAge, n)
+func podmanAgePruneStep(cfg *config.Config, keep podmanKeep) string {
+	if keep.FileErr != nil {
+		return "Skip the Podman age prune: protected_images_file is unreadable"
+	}
+	if keep.active() {
+		return fmt.Sprintf("Prune Podman images older than %s, keeping %d protected image reference(s) and %d protected label(s)", cfg.Podman.PruneImagesAge, len(keep.Refs), len(keep.Labels))
 	}
 	return fmt.Sprintf("Prune Podman images older than %s", cfg.Podman.PruneImagesAge)
 }
@@ -443,8 +459,8 @@ func podmanAgePruneStep(cfg *config.Config) string {
 // removes each one by name, skipping protected images, images any container
 // (running or stopped) uses, and read-only images from additional stores.
 // That is the same set `image prune -a` keeps, minus the protected images.
-func (p *PodmanPlugin) pruneOldImagesProtected(ctx context.Context, cfg *config.Config, logger *slog.Logger) (int64, int) {
-	protected := p.resolveProtectedImageIDs(ctx, cfg.Podman.ProtectedImages, logger)
+func (p *PodmanPlugin) pruneOldImagesProtected(ctx context.Context, cfg *config.Config, keep podmanKeep, logger *slog.Logger) (int64, int) {
+	protected := p.resolveProtectedImageIDs(ctx, keep.Refs, logger)
 
 	output, err := p.runPodmanCommand(ctx, "images", "--format", "json", "--filter", fmt.Sprintf("until=%s", cfg.Podman.PruneImagesAge))
 	if err != nil {
@@ -459,7 +475,7 @@ func (p *PodmanPlugin) pruneOldImagesProtected(ctx context.Context, cfg *config.
 
 	var freed int64
 	removed := 0
-	for _, img := range selectPodmanAgePruneCandidates(images, protected) {
+	for _, img := range selectPodmanAgePruneCandidates(images, protected, keep) {
 		if _, err := p.runPodmanCommand(ctx, podmanRemoveImageArgs(img)...); err != nil {
 			// A container may have started on the image since the listing.
 			logger.Debug("podman image removal skipped", "image", img.ID, "error", err)
@@ -510,7 +526,7 @@ func parsePodmanImagesJSON(output string) ([]podmanImage, error) {
 
 // selectPodmanAgePruneCandidates returns the listed images that may be
 // removed: not protected, not used by any container and not read-only.
-func selectPodmanAgePruneCandidates(images []podmanImage, protected map[string]string) []podmanImage {
+func selectPodmanAgePruneCandidates(images []podmanImage, protected map[string]string, keep podmanKeep) []podmanImage {
 	seen := make(map[string]struct{}, len(images))
 	var out []podmanImage
 	for _, img := range images {
@@ -524,7 +540,7 @@ func selectPodmanAgePruneCandidates(images []podmanImage, protected map[string]s
 		if _, ok := protected[img.ID]; ok {
 			continue
 		}
-		if img.Containers > 0 || img.ReadOnly {
+		if img.Containers > 0 || img.ReadOnly || keep.protectsLabels(img.Labels) {
 			continue
 		}
 		out = append(out, img)
@@ -545,22 +561,12 @@ func podmanRemoveImageArgs(img podmanImage) []string {
 
 // cleanAggressive performs aggressive cleanup: moderate + volumes + VM fstrim.
 func (p *PodmanPlugin) cleanAggressive(ctx context.Context, cfg *config.Config, logger *slog.Logger) CleanupResult {
-	result := p.cleanModerate(ctx, cfg, logger)
-	result.Level = LevelAggressive
+	result := CleanupResult{Plugin: p.Name(), Level: LevelAggressive}
+	p.pruneUnusedVolumesAndNetworks(ctx, cfg, &result, logger)
 
-	// Clean unused volumes
-	logger.Debug("cleaning unused podman volumes")
-	if output, err := p.runPodmanCommand(ctx, "volume", "prune", "-f"); err == nil {
-		result.BytesFreed += p.parseReclaimedSpace(output)
-		result.ItemsCleaned++
-	}
-
-	// Clean build containers (may interfere with active builds)
-	logger.Debug("cleaning podman build containers")
-	if output, err := p.runPodmanCommand(ctx, "system", "prune", "-f", "--build"); err == nil {
-		result.BytesFreed += p.parseReclaimedSpace(output)
-		result.ItemsCleaned++
-	}
+	moderate := p.cleanModerate(ctx, cfg, logger)
+	result.BytesFreed += moderate.BytesFreed
+	result.ItemsCleaned += moderate.ItemsCleaned
 
 	// On Darwin, run fstrim inside VM to reclaim sparse disk space when the
 	// provider reflects guest discard operations back to the host disk image.
@@ -578,6 +584,25 @@ func (p *PodmanPlugin) cleanAggressive(ctx context.Context, cfg *config.Config, 
 	return result
 }
 
+// pruneUnusedVolumesAndNetworks removes volumes and networks no container
+// uses, in any state, before the moderate pass prunes stopped containers.
+// Pruning a stopped container first would free its volumes and networks in
+// the same cycle (keep rule 1). `system prune -f --build` used to run here; it
+// removes every stopped container and then their networks, so it is gone.
+func (p *PodmanPlugin) pruneUnusedVolumesAndNetworks(ctx context.Context, cfg *config.Config, result *CleanupResult, logger *slog.Logger) {
+	labelFilters := loadPodmanKeep(cfg.Podman, podmanHome()).labelFilterArgs()
+	logger.Debug("cleaning unused podman volumes")
+	if output, err := p.runPodmanCommand(ctx, append([]string{"volume", "prune", "-f"}, labelFilters...)...); err == nil {
+		result.BytesFreed += p.parseReclaimedSpace(output)
+		result.ItemsCleaned++
+	}
+	logger.Debug("cleaning unused podman networks")
+	if output, err := p.runPodmanCommand(ctx, append([]string{"network", "prune", "-f"}, labelFilters...)...); err == nil {
+		result.BytesFreed += p.parseReclaimedSpace(output)
+		result.ItemsCleaned++
+	}
+}
+
 // cleanCritical performs emergency cleanup: full system prune with volumes and external cleanup.
 func (p *PodmanPlugin) cleanCritical(ctx context.Context, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: p.Name(), Level: LevelCritical}
@@ -593,7 +618,15 @@ func (p *PodmanPlugin) cleanCritical(ctx context.Context, cfg *config.Config, lo
 		result.ItemsCleaned += buildKitResult.ItemsCleaned
 	}
 
-	if cfg.Podman.CriticalSystemPrune {
+	if cfg.Podman.CriticalSystemPrune && loadPodmanKeep(cfg.Podman, podmanHome()).active() {
+		// `system prune -af --volumes` removes stopped containers and then
+		// their volumes in one call, which breaks keep rule 1, and it has no
+		// digest exclusion. Run the targeted passes instead.
+		logger.Warn("podman keep rule active: running targeted prunes instead of system prune")
+		aggressive := p.cleanAggressive(ctx, cfg, logger)
+		result.BytesFreed += aggressive.BytesFreed
+		result.ItemsCleaned += aggressive.ItemsCleaned
+	} else if cfg.Podman.CriticalSystemPrune {
 		// Full system prune with volumes.
 		logger.Warn("CRITICAL: running full Podman system prune with volumes")
 		output, err := p.runPodmanCommand(ctx, "system", "prune", "-af", "--volumes")

@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Podman keep rule: `podman.protected_labels` and
+  `podman.protected_images_file` (TIN-5770).** On sting on 2026-10-28 the
+  plugin pruned the mail-lacein harness's pinned rspamd and postfix images and
+  a live run's networks and volumes. No prune now removes a resource that
+  carries a protected label, an image named in the keep file (re-read every
+  cycle) or an image, network or volume any container uses. The aggressive
+  level prunes volumes and networks before stopped containers and no longer
+  runs `system prune -f --build`. An unreadable keep file skips the age prune.
+
 - **`podman.protected_images` keeps pinned images through the moderate age
   prune (xlr_gangbox TIN-7255).** On honey `/home` sat above the 80 % moderate
   level, so `podman image prune -af --filter until=24h` ran about hourly and

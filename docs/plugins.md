@@ -43,9 +43,38 @@ With a non-empty list the age prune lists the images the age filter selects
 (`podman images --format json --filter until=`) and removes each by name with
 `podman rmi`, never `--force`. It skips protected images, images any container
 uses (running or stopped) and read-only images, which is what `image prune -a`
-keeps. A reference that is not present locally is ignored. The opt-in critical
-`podman system prune -af --volumes` (`podman.critical_system_prune`) does not
-honor the list.
+keeps. A reference that is not present locally is ignored.
+
+### Podman keep rule
+
+Three things are never pruned (TIN-5770). On sting the plugin removed a
+mail-lacein harness run's pinned images, networks and volumes between runs.
+
+1. An image, network or volume that any container uses, in any state.
+   Podman's prunes skip those. At the aggressive level the plugin prunes
+   volumes and networks before it prunes stopped containers, and it no longer
+   runs `podman system prune -f --build`, which removed every stopped
+   container and then their networks.
+2. Anything that carries a label in `podman.protected_labels`, given as a key
+   (any value) or as `key=value`. Each entry becomes a
+   `--filter label!=<entry>` on the image, container, volume and network
+   prunes, and the per-image age prune checks image labels.
+3. The images in `podman.protected_images` and, one per line, in
+   `podman.protected_images_file`. `#` starts a comment. The file is read on
+   every cycle, so a harness can write its pins without a config change. A
+   missing file adds nothing. A file that exists but cannot be read skips the
+   age prune for that cycle.
+
+```yaml
+podman:
+  protected_labels:
+    - io.xoxd.lacein-harness
+  protected_images_file: ~/.config/tinyland-cleanup/keep-images
+```
+
+While any of the three is set, the opt-in critical
+`podman system prune -af --volumes` (`podman.critical_system_prune`) is
+replaced by the targeted aggressive prunes.
 
 ## Linux
 
