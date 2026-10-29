@@ -65,6 +65,11 @@ type RetentionTmpAgentsConfig struct {
 	MaxDirsPerCycle int `yaml:"max_dirs_per_cycle"`
 	// MaxEntriesPerDir bounds one tree walk; a larger tree is kept.
 	MaxEntriesPerDir int `yaml:"max_entries_per_dir"`
+	// FixtureRepoParents are globs for path elements (default pytest-of-*)
+	// below which a .git directory with no remote, no include and no linked
+	// work trees is a test fixture that may go with its stale tree
+	// (operator ruling TIN-7495 2026-10-29). Empty keeps every .git.
+	FixtureRepoParents []string `yaml:"fixture_repo_parents"`
 }
 
 // RetentionCargoTargetsConfig removes Cargo target or build directories
@@ -130,13 +135,14 @@ func DefaultRetentionConfig(home string) RetentionConfig {
 		Interval:             "1h",
 		UninspectableOKComms: []string{"tailscaled", "(sd-pam)", "sd-pam", "systemd"},
 		TmpAgents: RetentionTmpAgentsConfig{
-			Enabled:          true,
-			Roots:            tmpRoots,
-			NameGlobs:        []string{"nix-shell.*"},
-			MaxAge:           "24h",
-			Delete:           false,
-			MaxDirsPerCycle:  4096,
-			MaxEntriesPerDir: 200000,
+			Enabled:            true,
+			Roots:              tmpRoots,
+			NameGlobs:          []string{"nix-shell.*"},
+			MaxAge:             "24h",
+			Delete:             false,
+			MaxDirsPerCycle:    4096,
+			MaxEntriesPerDir:   200000,
+			FixtureRepoParents: []string{"pytest-of-*"},
 		},
 		CargoTargets: RetentionCargoTargetsConfig{
 			Enabled:             true,
@@ -182,6 +188,11 @@ func (c RetentionConfig) Validate() error {
 		}
 		if err := validateRetentionAge("retention.tmp_agents.max_age", c.TmpAgents.MaxAge, RetentionTmpAgentsMinMaxAge); err != nil {
 			return err
+		}
+		for _, g := range c.TmpAgents.FixtureRepoParents {
+			if _, err := filepath.Match(g, "x"); err != nil || g == "" || g == "*" || strings.Contains(g, "/") {
+				return fmt.Errorf("retention.tmp_agents.fixture_repo_parents: %q is not a usable path-element glob (a bare * is refused)", g)
+			}
 		}
 		if c.TmpAgents.MaxDirsPerCycle < 0 || c.TmpAgents.MaxEntriesPerDir < 0 {
 			return fmt.Errorf("retention.tmp_agents bounds must not be negative")

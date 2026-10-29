@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`retention.tmp_agents.fixture_repo_parents` lets remote-less pytest
+  fixture repositories go with their stale `nix-shell.*` tree (operator
+  ruling TIN-7495 2026-10-29, "Allow removing remote-less fixture repos").**
+  The 2026-10-29 sting dry run kept 77 stale roots (2.57 GiB) only for the
+  `git init` fixtures pytest leaves under `pytest-of-jess/pytest-N/`. A `.git`
+  directory below a `pytest-of-*` element whose config has no remote and no
+  include, and that has no linked work trees, no longer keeps the tree. A
+  fixture repository with a remote, a `.git` file, and any repository
+  elsewhere still keep it.
+
 - **`retention` plugin: age retention for stale temp roots and Cargo build
   directories, a free-space floor alert and Darwin leftovers (TIN-7495,
   TIN-3082).** On 2026-10-27 sting's 64 GiB `/srv/fast-local/tmp-agents`
