@@ -111,6 +111,9 @@ func TestRetentionTmpAgentsDryRunDefault(t *testing.T) {
 	if tg.Action != "report" || tg.Protected {
 		t.Fatalf("stale dir should be reported as eligible, got %+v", tg)
 	}
+	if tg.Tier != CleanupTierWarm || tg.Reclaim != CleanupReclaimNone {
+		t.Fatalf("report target policy: tier %q reclaim %q", tg.Tier, tg.Reclaim)
+	}
 	if plan.WouldRun || plan.EstimatedBytesFreed != 0 {
 		t.Fatalf("report-only plan must not claim a run: %+v", plan)
 	}
@@ -132,6 +135,9 @@ func TestRetentionTmpAgentsDeletesOnlyWithFlag(t *testing.T) {
 	f.file(filepath.Join(other, "x"), 8192)
 	f.file(filepath.Join(f.root, "nix-shell.file"), 10)
 
+	if tg := retTarget(t, f.plan(), stale); tg.Action != "delete" || tg.Reclaim != CleanupReclaimHost {
+		t.Fatalf("delete target policy: %+v", tg)
+	}
 	res := f.cleanup()
 	if pathExists(stale) || res.ItemsCleaned != 1 || res.BytesFreed <= 0 {
 		t.Fatalf("stale nix-shell dir not removed: %+v", res)
@@ -162,6 +168,22 @@ func TestRetentionTmpAgentsLiveReferenceKeeps(t *testing.T) {
 				t.Fatal("live dir removed")
 			}
 		})
+	}
+}
+
+func TestRetentionLiveReferenceRecordedBehindOtherKeepReasons(t *testing.T) {
+	f := newRetFixture(t)
+	f.plugin.now = time.Now // the tree is recent, so recency decides first
+	dir := filepath.Join(f.root, "nix-shell.busy")
+	f.file(filepath.Join(dir, "a"), 10)
+	f.held[dir] = "pid 50 has TMPDIR=" + dir
+	plan := f.plan()
+	tg := retTarget(t, plan, dir)
+	if !tg.Active || !strings.Contains(tg.Reason, "recent change") || !strings.Contains(tg.Reason, "also live reference") {
+		t.Fatalf("live reference not recorded: %+v", tg)
+	}
+	if plan.Metadata["tmp_agents.live_count"] != "1" {
+		t.Fatalf("live_count = %q", plan.Metadata["tmp_agents.live_count"])
 	}
 }
 

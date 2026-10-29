@@ -390,14 +390,26 @@ func retentionNameMatches(name string, globs []string) bool {
 
 // decide applies every rule to one tree and returns its target. busy, when
 // set, keeps the tree whatever else holds.
-func (p *RetentionPlugin) decide(ctx context.Context, cfg *config.Config, c retentionCandidate, deleteFlag bool, walkLimit int, activity *bbActivity, deny *agentSessionDeny, git *devArtifactGitTracker, busy string) CleanupTarget {
+func (p *RetentionPlugin) decide(ctx context.Context, cfg *config.Config, c retentionCandidate, deleteFlag bool, walkLimit int, activity *bbActivity, deny *agentSessionDeny, git *devArtifactGitTracker, busy string) (target CleanupTarget) {
 	path := c.path
-	target := CleanupTarget{
+	target = CleanupTarget{
 		Type: retentionTargetType(c.rule), Name: filepath.Base(path), Path: path,
 		Action: "keep", Protected: true,
 	}
+	// A live reference is recorded whatever else keeps the tree, so the
+	// report counts live trees even when a structural rule decides first.
+	liveWhy := ""
+	if live := activity.blockers(path); len(live) > 0 {
+		liveWhy = live[0]
+	}
 	// The reclaim class follows the final action (delete: host, else none).
-	defer func() { annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(target.Action)) }()
+	defer func() {
+		if liveWhy != "" && target.Protected && !strings.HasPrefix(target.Reason, "live reference") {
+			target.Active = true
+			target.Reason += "; also live reference: " + liveWhy
+		}
+		annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(target.Action))
+	}()
 
 	if why, denied := deny.denied(path); denied {
 		target.Reason = why
@@ -446,9 +458,9 @@ func (p *RetentionPlugin) decide(ctx context.Context, cfg *config.Config, c rete
 		target.Reason = why
 		return target
 	}
-	if live := activity.blockers(path); len(live) > 0 {
+	if liveWhy != "" {
 		target.Active = true
-		target.Reason = "live reference: " + live[0]
+		target.Reason = "live reference: " + liveWhy
 		return target
 	}
 
