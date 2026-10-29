@@ -240,7 +240,10 @@ go_test(
 
 go_library(
     name = "config",
-    srcs = ["config/config.go"],
+    srcs = [
+        "config/config.go",
+        "config/retention.go",
+    ],
     importpath = "github.com/Jesssullivan/tinyland-cleanup/config",
     visibility = ["//visibility:public"],
     deps = ["@in_gopkg_yaml_v3//:yaml_v3"],
@@ -251,8 +254,10 @@ go_test(
     srcs = [
         "config/config_pbt_test.go",
         "config/config_test.go",
+        "config/retention_test.go",
     ],
     data = [
+        "config/default.yaml",
         "config/testdata/home-manager-honey.yaml",
         "packaging/linux/config.yaml",
     ],
@@ -285,6 +290,7 @@ go_library(
         "plugins/archive_lifecycle.go",
         "plugins/bazel.go",
         "plugins/bazel_bases.go",
+        "plugins/bazel_disk_cache_age.go",
         "plugins/cache.go",
         "plugins/debris_report.go",
         "plugins/devartifacts.go",
@@ -301,6 +307,7 @@ go_library(
         "plugins/plugin.go",
         "plugins/podman.go",
         "plugins/proc_stat.go",
+        "plugins/retention.go",
         "plugins/rke2.go",
         "plugins/scan_budget.go",
         "plugins/shm_scratch.go",
@@ -321,6 +328,7 @@ go_library(
             "plugins/nix_process_argv_darwin.go",
             "plugins/nix_process_uid_other.go",
             "plugins/nix_sessions_darwin.go",
+            "plugins/process_env_darwin.go",
             "plugins/shm_scratch_other.go",
         ],
         "@platforms//os:linux": [
@@ -394,6 +402,9 @@ go_test(
             "plugins/nix_gclock_test.go",
             "plugins/nix_process_argv_darwin_test.go",
             "plugins/nix_sessions_darwin_test.go",
+            "plugins/bazel_disk_cache_age_test.go",
+            "plugins/process_env_darwin_test.go",
+            "plugins/retention_test.go",
         ],
         "@platforms//os:linux": [
             "plugins/bazel_bases_linux_test.go",
@@ -403,6 +414,9 @@ go_test(
             "plugins/nix_process_uid_linux_test.go",
             "plugins/nix_sessions_linux_test.go",
             "plugins/shm_scratch_test.go",
+            "plugins/bazel_disk_cache_age_test.go",
+            "plugins/retention_linux_test.go",
+            "plugins/retention_test.go",
         ],
         "//conditions:default": ["plugins/github_runner_linux_test.go"],
     }),

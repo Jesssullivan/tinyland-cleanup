@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`retention` plugin: age retention for stale temp roots and Cargo build
+  directories, a free-space floor alert and Darwin leftovers (TIN-7495,
+  TIN-3082).** On 2026-10-27 sting's 64 GiB `/srv/fast-local/tmp-agents`
+  quota had 2.1 GB free with 2409 `nix-shell.*` roots; their
+  `pytest-of-jess` subtrees allocated about 13.3 GB (the staged 16.8 GB
+  gguf files are sparse and allocate nothing). `tmp_agents` removes a
+  `nix-shell.*` root once nothing inside changed for 24h and no process holds
+  it by cwd, open file, mapping, command line or `TMPDIR`; `cargo_targets`
+  removes Cargo build dirs under `/srv/cache/{user}/cargo/build` older than
+  7d while no cargo or rustc runs; `free_space_floor` alerts on any volume
+  under 10 GiB (`/System/Volumes/Data` on Darwin); `darwin_leftovers`
+  reports superseded Fusion webdeploy builds and the Claude `vm_bundles`
+  directory. Off by default, and every deleting rule reports only until its
+  own `delete` flag is true. Sizes are allocated blocks, so sparse files
+  count what they occupy.
+- **`bazel.disk_cache_max_age` expires individual disk cache entries
+  (TIN-3082).** `ac/` and `cas/` entries whose later of atime and mtime is
+  older than 14d are reported, and removed only with
+  `bazel.disk_cache_age_delete: true`, never while a Bazel client runs.
+- The process inventory can read environment variables (`EnvVars`): a
+  `nix-shell` holds its temp root only through `TMPDIR`, with no descriptor
+  there.
+
 - **`podman.protected_images` keeps pinned images through the moderate age
   prune (xlr_gangbox TIN-7255).** On honey `/home` sat above the 80 % moderate
   level, so `podman image prune -af --filter until=24h` ran about hourly and

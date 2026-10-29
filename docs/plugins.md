@@ -24,6 +24,7 @@ your config. The list below is the full registry.
 | `dev-artifacts` | Stale `node_modules`, `.venv`, `target/`, Zig, Go, Haskell, LM Studio; compresses stale agent transcripts (zstd by default); reports large local artifacts |
 | `debris-report` | Report only, off by default (`enable.debris_report`): logs stale incident/agent debris under `debris_report.scan_paths` (default patterns include YYYYMMDD-stamped names, `.bulkload-*`, `rollback/`, `*-carry/`) with sizes; never deletes |
 | `archive-lifecycle` | Retires archive staging pre-images after proving every file already exists in the durable archive target — see [Archive staging lifecycle](archive-staging-lifecycle.md) |
+| `retention` | Off by default (`enable.retention`). Level-independent age retention (TIN-7495, TIN-3082): stale `tmp_agents` roots (`nix-shell.*` with their `pytest-of-<user>` subtrees), stale Cargo build directories, a per-volume free-space floor alert and report-only Darwin leftovers. Every deleting rule reports only until its own `delete` flag is true. See [Retention](#retention) |
 
 ### Podman protected images
 
@@ -46,6 +47,49 @@ uses (running or stopped) and read-only images, which is what `image prune -a`
 keeps. A reference that is not present locally is ignored. The opt-in critical
 `podman system prune -af --volumes` (`podman.critical_system_prune`) does not
 honor the list.
+
+### Retention
+
+`retention` owns age retention for the temp, cache and build output that
+filled sting's `/srv/fast-local/tmp-agents` quota and pzm's data volume
+(TIN-7495, TIN-3082). It runs every cycle outside the pressure ladder,
+throttled by `retention.interval` (default 1h); `--dry-run` always plans.
+
+| Rule | Removes | Default |
+|---|---|---|
+| `tmp_agents` | Top-level directories of `roots` matching `name_globs` (default `nix-shell.*`) whose newest mtime or ctime inside is older than `max_age` (24h) | report only (`delete: false`) |
+| `cargo_targets` | Cargo target or build-dir trees (`CACHEDIR.TAG` or `.rustc_info.json`) under `roots` (default `/srv/cache/{user}/cargo/build`, `max_depth` 3) whose newest change is older than `max_age` (7d); the whole rule waits while any `cargo` or `rustc` process runs | report only (`delete: false`) |
+| `free_space_floor` | Nothing: an `ALERT free-space floor` line for every volume under `floor_gib` (10). Checks `paths` (`/`, and `/System/Volumes/Data` on Darwin), every `monitored_mounts` path and every retention root | alert |
+| `darwin_leftovers` | Nothing: sizes of Fusion webdeploy builds under `fusion_webdeploy_root` that are not the target of its `Autodesk Fusion.app` symlink, and of each `report_paths` entry (the Claude desktop `vm_bundles`) | report only, no delete rule |
+
+A tree is kept when any of these hold, and every check runs again
+immediately before removal:
+
+- a live reference: a process has its cwd or root there, an open file or a
+  memory mapping there, names it on its command line, or has `TMPDIR`,
+  `TMP`, `TEMP` or `TEMPDIR` pointing inside it (Linux reads
+  `/proc/<pid>/environ`, Darwin `kern.procargs2`);
+- the process inventory is incomplete (a same-user process whose fds or
+  environment cannot be read, other than `uninspectable_ok_comms`);
+- it belongs to another user, crosses a mount, or contains `.git` or
+  agent-session data (TIN-5268);
+- it is under `dev_artifacts.protect_paths`, holds files a Git repository
+  tracks, or sits in a work tree with uncommitted changes, unpushed commits
+  or no upstream;
+- its walk exceeds `max_entries_per_dir` / `max_entries_per_target`.
+
+Sizes are allocated blocks, so a sparse file counts what it occupies; the
+apparent size is in `logical_bytes`. Plan metadata carries per-rule
+`eligible_count`, `eligible_bytes`, `eligible_logical_bytes`, `live_count`,
+`kept_count` and the floor reading of every volume.
+
+`dev_artifacts.nix_temp_roots` is unchanged: it still reaps stale Nix temp
+roots at aggressive or critical level, judged by the root's own mtime and
+cwd/fd holders. `tmp_agents` is the stricter, level-independent rule that
+also reads every change inside the tree and `TMPDIR`.
+
+The Bazel `disk_cache` age rule lives in the `bazel` plugin: see
+[Bazel policy](bazel-cache-policy.md#disk-cache-age-retention).
 
 ## Linux
 
