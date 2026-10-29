@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -9,7 +10,9 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Jesssullivan/tinyland-cleanup/config"
 )
@@ -121,14 +124,32 @@ case "$1 $2" in
   "image inspect")
     case "$5" in
       ghcr.io/xoxd-ai/blahaj/rspamd@sha256:b544*) echo r5pa000000000000000000000000000000000000000000000000000000000000 ;;
+      broken/*) echo "Error: database is locked" >&2; exit 125 ;;
       *) echo "Error: $5: image not known" >&2; exit 125 ;;
     esac ;;
   "images --format") cat "` + fixture + `" ;;
+  "ps -a") cat "` + filepath.Join(dir, "ps.json") + `" ;;
+  "volume ls") cat "` + filepath.Join(dir, "volumes.json") + `" ;;
 esac
 exit 0
 `
 	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour).Unix()
+	ps := fmt.Sprintf(`[
+  {"Id":"c-both","State":"exited","Created":%[1]d,"Labels":{"io.xoxd.lacein-harness":"run-1","io.xoxd.lacein-harness.image":"probe"}},
+  {"Id":"c-one","State":"created","Created":%[1]d,"Labels":{"io.xoxd.lacein-harness":"run-2"}},
+  {"Id":"c-plain","State":"exited","Created":%[1]d},
+  {"Id":"c-young","State":"exited","Created":%[2]d},
+  {"Id":"c-running","State":"running","Created":%[1]d},
+  {"Id":"c-pod","State":"exited","Created":%[1]d,"Pod":"p1"}
+]`, old, time.Now().Unix())
+	vols := `[{"Name":"v-one","Labels":{"io.xoxd.lacein-harness":"run-2"}},{"Name":"v-plain","Labels":{}}]`
+	for name, body := range map[string]string{"ps.json": ps, "volumes.json": vols} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return logPath
@@ -190,9 +211,11 @@ func TestPodmanAggressiveKeepRule(t *testing.T) {
 
 	filters := "--filter label!=" + laceinLabel + " --filter label!=" + laceinLabel + ".image"
 	for _, want := range []string{
-		"volume prune -f " + filters,
+		"volume ls --format json --filter dangling=true",
+		"volume rm v-plain",
 		"network prune -f " + filters,
-		"container prune -f --filter until=1h " + filters,
+		"ps -a --format json",
+		"rm c-plain",
 		"image prune -f " + filters,
 		"rmi docker.io/library/old:1",
 	} {
@@ -200,12 +223,15 @@ func TestPodmanAggressiveKeepRule(t *testing.T) {
 			t.Fatalf("missing call %q in:\n%s", want, joined)
 		}
 	}
-	for _, never := range []string{"system prune", "image prune -af", "rmi ghcr.io/xoxd-ai/blahaj/rspamd", "rmi localhost/lacein-probe", "rmi ghcr.io/xoxd-ai/blahaj/postfix-rocky", "--force"} {
+	// B1: a resource with only one of the protected labels is still kept.
+	for _, never := range []string{"system prune", "image prune -af", "--build-cache", "container prune", "volume prune",
+		"volume rm v-one", "rm c-both", "rm c-one", "rm c-young", "rm c-running", "rm c-pod",
+		"rmi ghcr.io/xoxd-ai/blahaj/rspamd", "rmi localhost/lacein-probe", "rmi ghcr.io/xoxd-ai/blahaj/postfix-rocky", "--force", " -f c-"} {
 		if strings.Contains(joined, never) {
 			t.Fatalf("unexpected call %q in:\n%s", never, joined)
 		}
 	}
-	vol, net, ctr := indexOfPrefix(calls, "volume prune"), indexOfPrefix(calls, "network prune"), indexOfPrefix(calls, "container prune")
+	vol, net, ctr := indexOfPrefix(calls, "volume ls"), indexOfPrefix(calls, "network prune"), indexOfPrefix(calls, "ps -a")
 	if vol < 0 || net < 0 || ctr < 0 || vol > ctr || net > ctr {
 		t.Fatalf("volumes and networks must be pruned before stopped containers:\n%s", joined)
 	}
@@ -243,8 +269,94 @@ func TestPodmanCriticalSystemPruneYieldsToTheKeepRule(t *testing.T) {
 	if strings.Contains(joined, "system prune") {
 		t.Fatalf("system prune must not run while the keep rule is active:\n%s", joined)
 	}
-	if !strings.Contains(joined, "volume prune -f --filter label!="+laceinLabel) {
+	if !strings.Contains(joined, "volume ls --format json --filter dangling=true") {
 		t.Fatalf("targeted prunes missing:\n%s", joined)
+	}
+}
+
+// S1: a configured keep file that is missing or empty still keeps the
+// critical system prune off.
+func TestPodmanMissingKeepFileStillBlocksSystemPrune(t *testing.T) {
+	logPath := fakePodman(t, laceinImagesFixture)
+	cfg := config.DefaultConfig()
+	cfg.Podman.ProtectedImagesFile = filepath.Join(t.TempDir(), "not-written-yet")
+	cfg.Podman.CriticalSystemPrune = true
+	cfg.Podman.BuildKitPrune = false
+	if !loadPodmanKeep(cfg.Podman, "").active() {
+		t.Fatal("a configured keep file must activate the keep rule")
+	}
+	p := &PodmanPlugin{environment: &PodmanEnvironment{Runtime: "podman"}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p.cleanCritical(context.Background(), cfg, logger)
+	if joined := strings.Join(readCalls(t, logPath), "\n"); strings.Contains(joined, "system prune") {
+		t.Fatalf("system prune ran with a configured keep file:\n%s", joined)
+	}
+}
+
+// S2: only a definite not-found means a pin is absent.
+func TestPodmanInspectErrorKeepsThePin(t *testing.T) {
+	logPath := fakePodman(t, laceinImagesFixture)
+	cfg := config.DefaultConfig()
+	cfg.Podman.ProtectedImages = []string{"broken/image@sha256:1", "absent/image@sha256:2"}
+	p := &PodmanPlugin{environment: &PodmanEnvironment{Runtime: "podman"}}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p.cleanModerate(context.Background(), cfg, logger)
+	if joined := strings.Join(readCalls(t, logPath), "\n"); strings.Contains(joined, "rmi ") {
+		t.Fatalf("an unresolved pin must stop the age prune:\n%s", joined)
+	}
+	if !podmanImageNotKnown("Error: absent/image: image not known") || podmanImageNotKnown("Error: database is locked") {
+		t.Fatal("podmanImageNotKnown misclassifies")
+	}
+}
+
+func TestReadPodmanKeepFileFailsClosedOnOddFiles(t *testing.T) {
+	dir := t.TempDir()
+	dangling := filepath.Join(dir, "dangling")
+	if err := os.Symlink(filepath.Join(dir, "gone"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPodmanKeepFile(dangling); err == nil {
+		t.Fatal("a dangling symlink must fail closed")
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := readPodmanKeepFile(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO must fail closed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO keep file blocked")
+	}
+	keep := loadPodmanKeep(config.PodmanConfig{ProtectedImagesFile: dangling}, dir)
+	if keep.FileErr == nil || !keep.active() {
+		t.Fatalf("dangling keep file: %#v", keep)
+	}
+}
+
+func TestSelectStoppedContainers(t *testing.T) {
+	now := time.Now()
+	old := now.Add(-2 * time.Hour).Unix()
+	keep := podmanKeep{Labels: []string{laceinLabel, laceinLabel + ".image"}}
+	in := []podmanContainer{
+		{ID: "one-label", State: "exited", Created: old, Labels: map[string]string{laceinLabel: "x"}},
+		{ID: "plain", State: "Exited", Created: old},
+		{ID: "created", State: "created", Created: old},
+		{ID: "young", State: "exited", Created: now.Unix()},
+		{ID: "running", State: "running", Created: old},
+		{ID: "paused", State: "paused", Created: old},
+		{ID: "infra", State: "exited", Created: old, IsInfra: true},
+	}
+	var got []string
+	for _, c := range selectStoppedContainers(in, keep, now.Add(-time.Hour)) {
+		got = append(got, c.ID)
+	}
+	if !reflect.DeepEqual(got, []string{"plain", "created"}) {
+		t.Fatalf("selected %v", got)
 	}
 }
 

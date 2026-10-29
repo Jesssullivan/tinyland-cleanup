@@ -224,7 +224,6 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 			"Prune dangling Podman images",
 			podmanAgePruneStep(cfg, keep),
 			"Prune old stopped Podman containers",
-			"Prune Podman build cache",
 		)
 	case LevelAggressive:
 		plan.Steps = append(plan.Steps,
@@ -414,20 +413,22 @@ func (p *PodmanPlugin) cleanModerate(ctx context.Context, cfg *config.Config, lo
 		}
 	}
 
-	// Clean old stopped containers
+	// Clean old stopped containers. With protected labels, podman 5.8's
+	// `container prune --filter label!=a --filter label!=b` keeps only
+	// containers carrying every label (libpod negates the all-labels match),
+	// so the plugin lists stopped containers and removes each unprotected one
+	// itself (keep rule 2).
 	logger.Debug("cleaning old podman containers")
-	containerPrune := append([]string{"container", "prune", "-f", "--filter", "until=1h"}, labelFilters...)
-	if output, err := p.runPodmanCommand(ctx, containerPrune...); err == nil {
+	if len(keep.Labels) > 0 {
+		result.ItemsCleaned += p.removeStoppedContainers(ctx, keep, podmanContainerPruneAge, time.Now(), logger)
+	} else if output, err := p.runPodmanCommand(ctx, "container", "prune", "-f", "--filter", "until=1h"); err == nil {
 		result.BytesFreed += p.parseReclaimedSpace(output)
 		result.ItemsCleaned++
 	}
 
-	// Clean build cache (important for Podman - survives normal prune)
-	logger.Debug("cleaning podman build cache")
-	if output, err := p.runPodmanCommand(ctx, "image", "prune", "--build-cache", "-f"); err == nil {
-		result.BytesFreed += p.parseReclaimedSpace(output)
-		result.ItemsCleaned++
-	}
+	// `image prune --build-cache -f` used to run here. It takes no label
+	// filter and runs a dangling prune first, so it is gone (TIN-5770 keep
+	// rule). The critical BuildKit prune still clears builder cache.
 
 	return result
 }
@@ -460,7 +461,10 @@ func podmanAgePruneStep(cfg *config.Config, keep podmanKeep) string {
 // (running or stopped) uses, and read-only images from additional stores.
 // That is the same set `image prune -a` keeps, minus the protected images.
 func (p *PodmanPlugin) pruneOldImagesProtected(ctx context.Context, cfg *config.Config, keep podmanKeep, logger *slog.Logger) (int64, int) {
-	protected := p.resolveProtectedImageIDs(ctx, keep.Refs, logger)
+	protected, ok := p.resolveProtectedImageIDs(ctx, keep.Refs, logger)
+	if !ok {
+		return 0, 0
+	}
 
 	output, err := p.runPodmanCommand(ctx, "images", "--format", "json", "--filter", fmt.Sprintf("until=%s", cfg.Podman.PruneImagesAge))
 	if err != nil {
@@ -491,9 +495,10 @@ func (p *PodmanPlugin) pruneOldImagesProtected(ctx context.Context, cfg *config.
 }
 
 // resolveProtectedImageIDs maps each configured reference that is present
-// locally to its full image ID. A reference that is absent needs no
-// protection and is skipped.
-func (p *PodmanPlugin) resolveProtectedImageIDs(ctx context.Context, refs []string, logger *slog.Logger) map[string]string {
+// locally to its full image ID. A reference podman definitely does not know
+// needs no protection and is skipped. Any other inspect failure returns
+// ok=false: the pin cannot be honored, so the caller prunes nothing.
+func (p *PodmanPlugin) resolveProtectedImageIDs(ctx context.Context, refs []string, logger *slog.Logger) (map[string]string, bool) {
 	ids := make(map[string]string, len(refs))
 	for _, ref := range refs {
 		ref = strings.TrimSpace(ref)
@@ -502,14 +507,23 @@ func (p *PodmanPlugin) resolveProtectedImageIDs(ctx context.Context, refs []stri
 		}
 		output, err := p.runPodmanCommand(ctx, "image", "inspect", "--format", "{{.Id}}", ref)
 		if err != nil {
-			logger.Debug("protected podman image not present", "ref", ref)
-			continue
+			if podmanImageNotKnown(output) {
+				logger.Debug("protected podman image not present", "ref", ref)
+				continue
+			}
+			// Only a definite not-found means absent. Any other failure
+			// leaves the pin unresolved, so the age prune stops this cycle.
+			logger.Warn("protected podman image could not be resolved; skipping the age prune", "ref", ref, "error", err)
+			return ids, false
 		}
-		if id := strings.TrimSpace(output); id != "" {
-			ids[id] = ref
+		id := strings.TrimSpace(output)
+		if id == "" {
+			logger.Warn("protected podman image inspect returned no ID; skipping the age prune", "ref", ref)
+			return ids, false
 		}
+		ids[id] = ref
 	}
-	return ids
+	return ids, true
 }
 
 func parsePodmanImagesJSON(output string) ([]podmanImage, error) {
@@ -590,12 +604,18 @@ func (p *PodmanPlugin) cleanAggressive(ctx context.Context, cfg *config.Config, 
 // the same cycle (keep rule 1). `system prune -f --build` used to run here; it
 // removes every stopped container and then their networks, so it is gone.
 func (p *PodmanPlugin) pruneUnusedVolumesAndNetworks(ctx context.Context, cfg *config.Config, result *CleanupResult, logger *slog.Logger) {
-	labelFilters := loadPodmanKeep(cfg.Podman, podmanHome()).labelFilterArgs()
+	keep := loadPodmanKeep(cfg.Podman, podmanHome())
+	labelFilters := keep.labelFilterArgs()
 	logger.Debug("cleaning unused podman volumes")
-	if output, err := p.runPodmanCommand(ctx, append([]string{"volume", "prune", "-f"}, labelFilters...)...); err == nil {
+	if len(keep.Labels) > 0 {
+		// Same libpod all-labels negation as container prune: list the
+		// volumes no container uses and remove each unprotected one.
+		result.ItemsCleaned += p.removeUnusedVolumes(ctx, keep, logger)
+	} else if output, err := p.runPodmanCommand(ctx, "volume", "prune", "-f"); err == nil {
 		result.BytesFreed += p.parseReclaimedSpace(output)
 		result.ItemsCleaned++
 	}
+	// Network and image prunes exclude per label correctly on podman 5.8.
 	logger.Debug("cleaning unused podman networks")
 	if output, err := p.runPodmanCommand(ctx, append([]string{"network", "prune", "-f"}, labelFilters...)...); err == nil {
 		result.BytesFreed += p.parseReclaimedSpace(output)
@@ -654,7 +674,12 @@ func (p *PodmanPlugin) cleanCritical(ctx context.Context, cfg *config.Config, lo
 	// On Darwin, aggressive VM cleanup
 	if runtime.GOOS == "darwin" && p.environment.VMRunning {
 		// First, clean inside the VM
-		if cfg.Podman.CleanInsideVM && cfg.Podman.CriticalSystemPrune {
+		if cfg.Podman.CleanInsideVM && cfg.Podman.CriticalSystemPrune && loadPodmanKeep(cfg.Podman, podmanHome()).active() {
+			// The in-VM commands are unfiltered prunes and a system prune.
+			// The host podman client already reaches the VM's store, so the
+			// targeted prunes above cover it.
+			logger.Warn("skipping critical Podman VM system prune", "reason", "keep_rule_active")
+		} else if cfg.Podman.CleanInsideVM && cfg.Podman.CriticalSystemPrune {
 			logger.Warn("CRITICAL: cleaning inside Podman VM")
 			vmResult := p.cleanInsideVM(ctx, LevelCritical, logger)
 			result.BytesFreed += vmResult.BytesFreed
