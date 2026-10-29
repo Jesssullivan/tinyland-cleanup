@@ -2022,6 +2022,9 @@ func registerPlugins(registry *plugins.Registry) {
 	// Report-only debris inventory (all platforms, off by default)
 	registry.Register(plugins.NewDebrisReportPlugin())
 
+	// Age retention for stale temp roots and Cargo build dirs (off by default; report-only until a delete flag)
+	registry.Register(plugins.NewRetentionPlugin())
+
 	// Kubernetes plugins (disabled by default, for future use)
 	registry.Register(plugins.NewEtcdPlugin())
 	registry.Register(plugins.NewRKE2Plugin())

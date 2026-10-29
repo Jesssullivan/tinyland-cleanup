@@ -70,6 +70,11 @@ func bbScanActivity(ctx context.Context, opts bbActivityOptions) *bbActivity {
 			cmdline = strings.Join(argv, " ")
 		}
 		a.procs = append(a.procs, bbProc{pid: pid, cmdline: cmdline})
+		if len(opts.EnvVars) > 0 && err == nil {
+			if env, eerr := darwinProcessEnv(pid); eerr == nil {
+				bbIndexEnviron(a, pid, env, opts)
+			}
+		}
 	}
 	if opts.Lsof == "" {
 		a.lsofError = "lsof is not configured; Darwin has no other open-file inventory"

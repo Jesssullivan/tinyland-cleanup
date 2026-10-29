@@ -117,6 +117,9 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 				a.index(t, fmt.Sprintf("pid %d holds %s", pid, t), opts.Within)
 			}
 		}
+		if len(opts.EnvVars) > 0 {
+			bbIndexProcEnviron(a, d, pid, uid, okComms, opts)
+		}
 		if f, err := os.Open(filepath.Join(d, "maps")); err == nil {
 			sc := bufio.NewScanner(f)
 			sc.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -241,4 +244,28 @@ func bbReadMountinfo(path string) ([]string, error) {
 		}
 	}
 	return points, sc.Err()
+}
+
+// bbIndexProcEnviron indexes the absolute path values of opts.EnvVars in one
+// process's initial environment (/proc/<pid>/environ). A nix-shell keeps its
+// TMPDIR in a temp root without holding a descriptor there, so its environment
+// is the only witness. A same-user process whose environment cannot be read
+// makes the inventory incomplete unless it is a zombie or a listed comm.
+func bbIndexProcEnviron(a *bbActivity, d string, pid, uid int, okComms map[string]bool, opts bbActivityOptions) {
+	raw, err := os.ReadFile(filepath.Join(d, "environ"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		if st, serr := os.Stat(d); serr == nil {
+			if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) == uid {
+				comm, state := procCommState(d)
+				if state != "Z" && !okComms[comm] {
+					a.incomplete = append(a.incomplete, fmt.Sprintf("pid %d (%s) environment unreadable: %v", pid, comm, err))
+				}
+			}
+		}
+		return
+	}
+	bbIndexEnviron(a, pid, strings.Split(string(raw), "\x00"), opts)
 }

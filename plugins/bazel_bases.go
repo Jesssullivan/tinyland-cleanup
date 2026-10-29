@@ -115,6 +115,11 @@ type bbActivityOptions struct {
 	// Within limits the indexed paths to these trees (the roots); processes'
 	// command lines are always kept.
 	Within []string
+	// EnvVars names environment variables (for example TMPDIR) whose
+	// absolute path values count as holding that path. Empty reads no
+	// environments. On Linux a same-user process whose environment cannot
+	// be read makes the inventory incomplete, as an unreadable fd table does.
+	EnvVars []string
 }
 
 // bbHeldLock is Bazel's output-base lock while the reaper holds it.
@@ -200,6 +205,23 @@ func (a *bbActivity) blockers(target string) []string {
 		}
 	}
 	return found
+}
+
+// bbIndexEnviron indexes the absolute path values of opts.EnvVars found in
+// env (NAME=value entries).
+func bbIndexEnviron(a *bbActivity, pid int, env []string, opts bbActivityOptions) {
+	for _, kv := range env {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(value, "/") {
+			continue
+		}
+		for _, want := range opts.EnvVars {
+			if name == want {
+				a.index(value, fmt.Sprintf("pid %d has %s=%s", pid, name, value), opts.Within)
+				break
+			}
+		}
+	}
 }
 
 func (a *bbActivity) proc(pid int) (bbProc, bool) {

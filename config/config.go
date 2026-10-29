@@ -97,6 +97,11 @@ type Config struct {
 	// Archive staging pre-image lifecycle settings
 	ArchiveLifecycle ArchiveLifecycleConfig `yaml:"archive_lifecycle"`
 
+	// Retention configures the age-based retention plugin (TIN-7495,
+	// TIN-3082): stale agent temp roots, stale Cargo build directories, a
+	// free-space floor alert and report-only Darwin leftovers.
+	Retention RetentionConfig `yaml:"retention"`
+
 	// Notification settings
 	Notify NotifyConfig `yaml:"notify"`
 }
@@ -226,6 +231,9 @@ type EnableFlags struct {
 	ArchiveLifecycle bool `yaml:"archive_lifecycle"`
 	// DebrisReport for the report-only stale debris inventory (off by default)
 	DebrisReport bool `yaml:"debris_report"`
+	// Retention for the age-based retention plugin (off by default; every
+	// deleting rule inside it is report-only until its own delete flag).
+	Retention bool `yaml:"retention"`
 }
 
 // ArchiveLifecycleConfig holds settings for retiring archive staging pre-images
@@ -460,6 +468,19 @@ type BazelConfig struct {
 	// is treated as unreachable rather than deleted, so an unmounted volume never
 	// makes every workspace on it look orphaned.
 	OrphanWorkspaceMountRoots []string `yaml:"orphan_workspace_mount_roots"`
+	// DiskCacheMaxAge is the age retention for individual disk_cache entries
+	// (TIN-3082): an ac/ or cas/ entry whose last use (the later of atime and
+	// mtime) is older than this is expired. Empty or "0" disables the rule.
+	DiskCacheMaxAge string `yaml:"disk_cache_max_age"`
+	// DiskCacheAgeDelete removes expired entries. False (the default)
+	// reports them only.
+	DiskCacheAgeDelete bool `yaml:"disk_cache_age_delete"`
+	// DiskCachePaths are disk_cache directories outside Roots (for example
+	// a --disk_cache path that is not named disk_cache). "~" and "{user}"
+	// are expanded.
+	DiskCachePaths []string `yaml:"disk_cache_paths"`
+	// DiskCacheMaxEntries bounds one disk_cache walk (default 2000000).
+	DiskCacheMaxEntries int `yaml:"disk_cache_max_entries"`
 }
 
 // Bazel output-base reaper modes.
@@ -1228,7 +1249,11 @@ func DefaultConfig() *Config {
 			ReapOrphanedOutputBases:      true,
 			OrphanStaleAfter:             "7d",
 			OrphanWorkspaceMountRoots:    defaultOrphanWorkspaceMountRoots(),
+			DiskCacheMaxAge:              "14d",
+			DiskCacheAgeDelete:           false,
+			DiskCacheMaxEntries:          2000000,
 		},
+		Retention: DefaultRetentionConfig(home),
 		ShmScratch: ShmScratchConfig{
 			Mode:             ShmScratchModeReport,
 			Roots:            []string{"/dev/shm"},
@@ -1494,6 +1519,16 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Enable.ShmScratch {
 		if err := config.ShmScratch.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if config.Enable.Retention {
+		if err := config.Retention.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if config.Enable.Bazel {
+		if err := config.Bazel.ValidateDiskCacheAge(); err != nil {
 			return nil, err
 		}
 	}

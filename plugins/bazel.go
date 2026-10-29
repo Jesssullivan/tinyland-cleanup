@@ -25,7 +25,11 @@ const bazelReclaimEstimateTimeout = 30 * time.Second
 var bazelCommandPattern = regexp.MustCompile(`\b(bazel|bazelisk)\s+(build|test|run|coverage|query|sync|fetch|clean|mobile-install|aquery|cquery|mod)\b`)
 
 // BazelPlugin reports Bazel output bases and cache tiers.
-type BazelPlugin struct{}
+type BazelPlugin struct {
+	// activeProbe is a test seam for the disk_cache age rule's pre-removal
+	// client check; nil means activeBazelProcessInfo.
+	activeProbe func(ctx context.Context) (bazelProcessInfo, error)
+}
 
 type bazelCandidate struct {
 	Type          string
@@ -168,6 +172,12 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		plan.Warnings = append(plan.Warnings, "some output bases carry a DO_NOT_BUILD_HERE workspace claim that could not be resolved safely; they are reported, never reaped as orphans")
 	}
 
+	ageTargets, ageMeta := planBazelDiskCacheAge(ctx, cfg.Bazel, candidates, home, globalActive, activeErr, time.Now())
+	targets = append(targets, ageTargets...)
+	for k, v := range ageMeta {
+		plan.Metadata[k] = v
+	}
+
 	plan.Targets = targets
 	plan.EstimatedBytesFreed = bazelEstimatedCandidateBytes(targets)
 	plan.Metadata["target_count"] = strconv.Itoa(len(targets))
@@ -188,6 +198,12 @@ func (p *BazelPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	result := CleanupResult{Plugin: p.Name(), Level: level}
 	if level == LevelWarning {
 		logger.Info("Bazel cleanup is report-only at warning level", "level", level.String())
+		// The disk_cache age rule is its own opt-in (disk_cache_age_delete)
+		// and runs at every level the plugin runs (TIN-3082).
+		if bazelDiskCacheAge(cfg.Bazel) > 0 && cfg.Bazel.DiskCacheAgeDelete {
+			plan, _ := p.buildCleanupPlan(ctx, level, cfg, logger)
+			p.applyBazelDiskCacheAge(ctx, cfg.Bazel, plan.Targets, logger, &result)
+		}
 		return result
 	}
 
@@ -201,6 +217,7 @@ func (p *BazelPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 	if result.ItemsCleaned == 0 {
 		logger.Info("Bazel cleanup found no eligible stale inactive output bases", "level", level.String())
 	}
+	p.applyBazelDiskCacheAge(ctx, cfg.Bazel, plan.Targets, logger, &result)
 	return result
 }
 
