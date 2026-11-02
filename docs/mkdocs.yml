@@ -62,6 +62,7 @@ nav:
       - Darwin dev caches: darwin-dev-caches.md
       - Podman compaction: podman-darwin-compaction.md
       - Archive staging lifecycle: archive-staging-lifecycle.md
+      - tmp_agents scope (design): retention-tmp-agents-scope.md
   - Packaging: rpm-packaging.md
   - Development: development.md
   - Validation status: validation-status.md
