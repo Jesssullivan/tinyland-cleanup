@@ -18,17 +18,39 @@ func nixSessionName(name string) string {
 	return name
 }
 
-// nixSessionMatches reports whether a process is a session: the basename of
-// argv[0], of a script's argv[1], or the process's comm names one of comms.
-// args may be empty when argv is unreadable; the comm alone then decides.
+// nixArgNames returns the names one argv element can carry: its basename,
+// and the basename of its first word when a process has rewritten argv[0]
+// into a title. Claude Code titles its helpers "claude bg-pty-host" and
+// "claude bg-spare".
+func nixArgNames(arg string) []string {
+	names := []string{filepath.Base(arg)}
+	if fields := strings.Fields(arg); len(fields) > 1 {
+		names = append(names, filepath.Base(fields[0]))
+	}
+	return names
+}
+
+// nixSessionMatches reports whether a process is a session: a name in comms
+// is a name of argv[0] or of a script's argv[1] (see nixArgNames). The comm
+// decides only when argv is unreadable or empty. A readable argv that names
+// another program is not a session, even when the comm names one: Claude
+// Code runs its bundled ugrep from its own binary with argv[0] "ugrep", so
+// the comm of every such grep is ".claude-unwrapp". On sting those greps
+// outlived their pipelines and held every hook pin (lab TIN-4405).
 func nixSessionMatches(args []string, comm string, comms map[string]bool) bool {
 	for i, arg := range args {
 		if i > 1 {
 			break
 		}
-		base := filepath.Base(arg)
-		if comms[base] || comms[nixSessionName(base)] {
-			return true
+		for _, name := range nixArgNames(arg) {
+			if comms[name] || comms[nixSessionName(name)] {
+				return true
+			}
+		}
+	}
+	for _, arg := range args {
+		if arg != "" {
+			return false
 		}
 	}
 	return comm != "" && (comms[comm] || comms[nixSessionName(comm)])

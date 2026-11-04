@@ -59,6 +59,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Hook pins: a readable argv that names another program is no session
+  (lab TIN-4405).** On sting on 2026-11-04 the oldest "session" holding
+  hook pins was a `ugrep -G` started on October 18. Claude Code runs its
+  bundled ugrep from its own binary, so the grep's comm is
+  `.claude-unwrapp`, and the comm matched unconditionally. 25 such greps,
+  20 of them orphaned to PID 1, held all 191 pin roots. The comm now
+  decides only when argv is unreadable or empty. An argv[0] rewritten into
+  a title, such as `claude bg-spare`, matches by its first word, so Claude
+  Code's spare and PTY-host helpers still hold pins. On the same process
+  table this releases 86 tracked pins, about 3.9 GiB. The other 119 stay
+  held by live Claude sessions that started before they were
+  unreferenced. The oldest started on October 23.
+
 - **A due Nix GC pass with `nix-collect-garbage` off PATH is no longer
   silent (issue #163, lab TIN-5770).** On petting-zoo-mini the launchd agent's
   PATH missed `/nix/var/nix/profiles/default/bin`. Every due pass returned at

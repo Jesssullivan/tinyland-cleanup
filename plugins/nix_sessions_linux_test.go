@@ -44,6 +44,11 @@ func TestNixProcMatchesObservedSessionShapes(t *testing.T) {
 		{"bash", fakeProc(t, "bash", "/bin/bash", "-l"), false},
 		{"claude as a later argument", fakeProc(t, "bash", "bash", "-c", "claude"), false},
 		{"empty comm", fakeProc(t, "", "sleep"), false},
+		// lab TIN-4405: the shapes a live sting census showed on 2026-11-04.
+		{"claude bundled ugrep", fakeProc(t, ".claude-unwrapp", "ugrep", "-G", "Pattern"), false},
+		{"claude bg-pty-host title", fakeProc(t, ".claude-unwrapp", "claude bg-pty-host", "--bg-pty-host", "/tmp/cc/pty.sock"), true},
+		{"claude bg-spare title", fakeProc(t, ".claude-unwrapp", "claude bg-spare", "--bg-spare", "/tmp/cc/claim.sock"), true},
+		{"empty cmdline leaves the comm", fakeProc(t, ".claude-unwrapp"), true},
 	} {
 		if got := nixProcMatches(tc.dir, comms); got != tc.want {
 			t.Errorf("%s: nixProcMatches = %v, want %v", tc.name, got, tc.want)

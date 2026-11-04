@@ -58,8 +58,9 @@ func nixOwnProcs() ([]string, error) {
 	return dirs, nil
 }
 
-// nixProcMatches reports whether a process is a session: argv[0], the
-// basename of a script's argv[1], or the comm names one of comms.
+// nixProcMatches reports whether a process is a session by
+// nixSessionMatches. An unreadable cmdline is no session. An empty one, as a
+// zombie has, leaves the comm to decide.
 func nixProcMatches(dir string, comms map[string]bool) bool {
 	raw, err := os.ReadFile(filepath.Join(dir, "cmdline"))
 	if err != nil {
