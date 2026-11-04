@@ -955,7 +955,8 @@ type NixConfig struct {
 	// so the stale-root reaper never lists them.
 	HookPinDir string `yaml:"hook_pin_dir"`
 	// HookPinSessionComms are the session process names (argv[0] or the
-	// script argv[1] basename) whose start times hold pins.
+	// script argv[1] basename) whose start times hold pins. The comm counts
+	// only when argv is unreadable or empty.
 	HookPinSessionComms []string `yaml:"hook_pin_session_comms"`
 	// HookPinRequired refuses every Nix GC pass whose hook pins could not be
 	// established.

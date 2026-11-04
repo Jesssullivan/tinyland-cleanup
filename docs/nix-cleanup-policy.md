@@ -136,9 +136,14 @@ roots each store path that a `hook_pin_files` file references, under `hook_pin_d
 `gcroots` path component, so the reaper never lists it). A path the files no
 longer reference is released only once no live process named in
 `hook_pin_session_comms` started before it stopped being referenced; when
-sessions cannot be inspected every pin is kept. A name matches argv[0], the
-basename of a script's argv[1], or the comm, with a leading `.` and a
-`-wrapped`/`-unwrapped` suffix (Nix wrappers) ignored. Refreshing every poll
+sessions cannot be inspected every pin is kept. A name matches argv[0] or
+the basename of a script's argv[1], with a leading `.` and a
+`-wrapped`/`-unwrapped` suffix (Nix wrappers) ignored. An argv[0] rewritten
+into a title also matches by its first word, as in `claude bg-spare`. The
+comm decides only when argv is unreadable or empty. A readable argv that
+names another program is no session even when its comm names one. Claude
+Code runs its bundled ugrep with argv[0] `ugrep` and the comm
+`.claude-unwrapp`, and orphaned greps of that kind held every pin on sting. Refreshing every poll
 means any path that stayed referenced for one poll interval is pinned, even
 when two switches replace hooks inside one GC gap. A session that predates
 the first refresh is covered only if its hook paths are still the current
