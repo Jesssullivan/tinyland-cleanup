@@ -66,7 +66,7 @@ type Config struct {
 	// unheld top-level directories of tmpfs roots such as /dev/shm.
 	ShmScratch ShmScratchConfig `yaml:"shm_scratch"`
 
-	// HomeLanes configures the stale home tree reaper (lab A-081): idle
+	// HomeLanes configures the stale home tree reaper (lab A-082): idle
 	// ~/.cache lanes and Hermes installs whose checkout is gone.
 	HomeLanes HomeLanesConfig `yaml:"home_lanes"`
 
@@ -229,7 +229,7 @@ type EnableFlags struct {
 	BazelBases bool `yaml:"bazel_bases"`
 	// ShmScratch for the RAM-backed scratch reaper (lab R-C856, Linux).
 	ShmScratch bool `yaml:"shm_scratch"`
-	// HomeLanes for the stale home tree reaper (lab A-081, Linux).
+	// HomeLanes for the stale home tree reaper (lab A-082, Linux).
 	HomeLanes bool `yaml:"home_lanes"`
 	// APFSSnapshots for APFS snapshot thinning (Darwin)
 	APFSSnapshots bool `yaml:"apfs_snapshots"`
@@ -702,13 +702,13 @@ const (
 	HomeLanesModeApply = "apply"
 )
 
-// The A-081 idle floors. A shorter window refuses to load.
+// The A-082 idle floors. A shorter window refuses to load.
 const (
 	HomeLanesMinCacheIdleAfter  = 72 * time.Hour
 	HomeLanesMinHermesIdleAfter = 24 * time.Hour
 )
 
-// HomeLanesConfig configures the stale home tree reaper (lab A-081, TIN-5770).
+// HomeLanesConfig configures the stale home tree reaper (lab A-082, TIN-5770).
 // Direct children of cache_root that match cache_lane_globs, and of
 // hermes_installs_root whose recorded checkout is gone, are removed in apply
 // mode once idle, unheld and free of file locks. A root left empty is not
@@ -761,14 +761,14 @@ func (c HomeLanesConfig) Validate() error {
 		return fmt.Errorf("home_lanes.cache_idle_after: %w", err)
 	}
 	if cacheIdle < HomeLanesMinCacheIdleAfter {
-		return fmt.Errorf("home_lanes.cache_idle_after %s is below the A-081 floor %s", cacheIdle, HomeLanesMinCacheIdleAfter)
+		return fmt.Errorf("home_lanes.cache_idle_after %s is below the A-082 floor %s", cacheIdle, HomeLanesMinCacheIdleAfter)
 	}
 	hermesIdle, err := ParseDuration(c.HermesIdleAfter)
 	if err != nil {
 		return fmt.Errorf("home_lanes.hermes_idle_after: %w", err)
 	}
 	if hermesIdle < HomeLanesMinHermesIdleAfter {
-		return fmt.Errorf("home_lanes.hermes_idle_after %s is below the A-081 floor %s", hermesIdle, HomeLanesMinHermesIdleAfter)
+		return fmt.Errorf("home_lanes.hermes_idle_after %s is below the A-082 floor %s", hermesIdle, HomeLanesMinHermesIdleAfter)
 	}
 	if c.HermesInstallsRoot != "" && len(c.HermesCheckoutRoots) == 0 {
 		return fmt.Errorf("home_lanes.hermes_checkout_roots must name a root when hermes_installs_root is set")

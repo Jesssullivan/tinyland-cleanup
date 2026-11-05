@@ -1,7 +1,7 @@
 package plugins
 
 // home_lanes.go reclaims stale trees that no other lane covers from a
-// developer home (lab amendment A-081, TIN-5770, operator ruling 2026-11-05).
+// developer home (lab amendment A-082, TIN-5770, operator ruling 2026-11-05).
 //
 // Why: on sting on 2026-11-05 /home sat at 93 percent and this daemon would
 // have collected 0 bytes there, because no rule covered the two trees that
@@ -113,7 +113,7 @@ func (p *HomeLanesPlugin) Name() string { return homeLanesPluginName }
 
 // Description returns the plugin description.
 func (p *HomeLanesPlugin) Description() string {
-	return "Removes stale ~/.cache lanes and orphaned Hermes installs that no process holds (lab A-081)"
+	return "Removes stale ~/.cache lanes and orphaned Hermes installs that no process holds (lab A-082)"
 }
 
 // SupportedPlatforms returns supported platforms.
@@ -333,7 +333,7 @@ func (p *HomeLanesPlugin) plan(ctx context.Context, cfg *config.Config, apply bo
 				if apply {
 					c.target.Action = "delete"
 				}
-				c.target.Reason = fmt.Sprintf("%s idle past %s with no live holder (A-081)", s.kind, s.idle)
+				c.target.Reason = fmt.Sprintf("%s idle past %s with no live holder (A-082)", s.kind, s.idle)
 			}
 			annotateCleanupTargetPolicy(&c.target, CleanupTierDestructive, hostReclaimForAction(c.target.Action))
 			out = append(out, c)

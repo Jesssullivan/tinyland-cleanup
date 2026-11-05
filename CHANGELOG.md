@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **Stale home tree reaper, `home_lanes` (lab A-081, TIN-5770).** Off by default
+- **Stale home tree reaper, `home_lanes` (lab A-082, TIN-5770).** Off by default
   and report-only until `home_lanes.mode` is `apply`. On sting on 2026-11-05
   `/home` sat at 93 percent and the daemon would have collected nothing there.
   The plugin covers lanes left in `~/.cache`, named by an allowlist of globs, and

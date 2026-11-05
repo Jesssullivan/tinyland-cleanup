@@ -98,7 +98,7 @@ enable:
   bazel: true           # Bazel output base and cache cleanup planning
   bazel_bases: false    # Structural Bazel/omux output-base reaper (R-C644/R-C645)
   shm_scratch: false    # Idle, unheld /dev/shm directories (lab R-C856, Linux)
-  home_lanes: false     # Stale ~/.cache lanes and orphaned Hermes installs (lab A-081, Linux)
+  home_lanes: false     # Stale ~/.cache lanes and orphaned Hermes installs (lab A-082, Linux)
   retention: false      # Age retention: tmp-agents roots, Cargo build dirs, floor alert (TIN-7495)
   archive_lifecycle: true  # Retire verified archive staging pre-images
 
@@ -335,7 +335,7 @@ shm_scratch:
   max_roots_per_cycle: 256
   uninspectable_ok_comms: [tailscaled, "(sd-pam)", sd-pam, systemd]
 
-# Stale home tree reaper (lab A-081, Linux). A direct child of cache_root that
+# Stale home tree reaper (lab A-082, Linux). A direct child of cache_root that
 # matches cache_lane_globs, or of hermes_installs_root whose recorded checkout is
 # gone, is removed in apply mode at moderate level or higher once it is idle, no
 # process holds it and no file in it is locked.
@@ -343,10 +343,10 @@ home_lanes:
   mode: report             # report (plan only) | apply
   cache_root: ~/.cache
   cache_lane_globs: []     # lane names; no match means a tool's cache, never touched
-  cache_idle_after: 7d     # A-081 floor: 72h
+  cache_idle_after: 7d     # A-082 floor: 72h
   hermes_installs_root: "" # for example ~/.hermes/installs; empty inspects none
   hermes_checkout_roots: [] # a recorded checkout's absence proves deletion only here
-  hermes_idle_after: 72h   # A-081 floor: 24h
+  hermes_idle_after: 72h   # A-082 floor: 24h
   max_removals_per_cycle: 8
   uninspectable_ok_comms: [tailscaled, "(sd-pam)", sd-pam, systemd]
 
