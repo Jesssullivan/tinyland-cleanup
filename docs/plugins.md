@@ -145,6 +145,7 @@ The Bazel `disk_cache` age rule lives in the `bazel` plugin: see
 | `github_runner` | GitHub Actions runner caches and work directories |
 | `yum` | DNF/YUM package caches |
 | `shm_scratch` | Off by default (`enable.shm_scratch`). Level-independent: removes top-level directories of tmpfs roots (default `/dev/shm`) idle past `shm_scratch.idle_after` (never under 24h) that no process holds by cwd, root, open file, memory mapping or command line; never files, other users' trees, Git trees or agent-session data; `mode: report` plans only (lab R-C856) |
+| `home_lanes` | Off by default (`enable.home_lanes`), report mode by default. Removes direct children of `home_lanes.cache_root` that match `cache_lane_globs`, and of `hermes_installs_root` whose checkout in `inputs/.project-root` is gone under `hermes_checkout_roots`. A tree must be idle past its window (floors 72h and 24h), with no `.git`, no agent-session data, no process holding it and no kernel file lock on any of its files. Apply mode removes at moderate level or higher, at most `max_removals_per_cycle` trees a cycle, largest first (lab A-081) |
 | `etcd` | Old etcd snapshots and WAL files; defrag when needed (disabled by default) |
 | `rke2` | RKE2/k3s containerd images, old pod logs, kubelet garbage (disabled by default) |
 

@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Stale home tree reaper, `home_lanes` (lab A-081, TIN-5770).** Off by default
+  and report-only until `home_lanes.mode` is `apply`. On sting on 2026-11-05
+  `/home` sat at 93 percent and the daemon would have collected nothing there.
+  The plugin covers lanes left in `~/.cache`, named by an allowlist of globs, and
+  Hermes installs whose recorded checkout is gone. It keeps a tree with `.git`,
+  agent-session data, a live holder or a kernel file lock on any file. An
+  incomplete process inventory or an unreadable lock table keeps every tree.
+
 - **Podman keep rule: `podman.protected_labels` and
   `podman.protected_images_file` (TIN-5770).** On sting on 2026-10-28 the
   plugin pruned the mail-lacein harness's pinned rspamd and postfix images and

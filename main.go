@@ -2011,6 +2011,7 @@ func registerPlugins(registry *plugins.Registry) {
 	registry.Register(plugins.NewBazelPlugin())
 	registry.Register(plugins.NewBazelBasesPlugin())
 	registry.Register(plugins.NewShmScratchPlugin())
+	registry.Register(plugins.NewHomeLanesPlugin())
 	registry.Register(plugins.NewCachePlugin())
 
 	// Development artifact cleanup (all platforms)
