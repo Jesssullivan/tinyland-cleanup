@@ -71,7 +71,10 @@ func bbScanActivity(ctx context.Context, opts bbActivityOptions) *bbActivity {
 // bbScanProc reads every process this user can see: command lines (world
 // readable) and, where readable, cwd, root, open fds and mappings. A process
 // of this user whose fd table cannot be read makes the inventory incomplete,
-// which keeps every base (R-C622 own_uninspectable).
+// which keeps every base (R-C622 own_uninspectable). The exceptions are a
+// zombie, a listed comm and, for a lane that sets SkipSSHDSessions, a process
+// the kernel's own parent chain proves is an SSH session process. That one is
+// recorded in skipped.
 func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActivityOptions) *bbActivity {
 	a := newBBActivity()
 	entries, err := os.ReadDir(procRoot)
@@ -97,7 +100,7 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 				a.index(t, fmt.Sprintf("pid %d %s is %s", pid, link, t), opts.Within)
 			}
 		}
-		fds, ferr := os.ReadDir(filepath.Join(d, "fd"))
+		fds, ferr := tempProcReadDir(filepath.Join(d, "fd"))
 		if ferr != nil {
 			if os.IsNotExist(ferr) {
 				continue
@@ -105,7 +108,11 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 			if st, err := os.Stat(d); err == nil {
 				if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) == uid {
 					comm, state := procCommState(d)
-					if state != "Z" && !okComms[comm] {
+					switch {
+					case state == "Z" || okComms[comm]:
+					case opts.SkipSSHDSessions && procIsSSHDSessionChild(procRoot, pid, uid):
+						a.skipped = append(a.skipped, pid)
+					default:
 						a.incomplete = append(a.incomplete, fmt.Sprintf("pid %d (%s) fd unreadable: %v", pid, comm, ferr))
 					}
 				}

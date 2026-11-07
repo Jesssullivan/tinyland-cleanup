@@ -17,10 +17,14 @@ package plugins
 //     stops once both dimensions are below pressure_stop_percent (60%).
 //   - A live server (server.pid.txt), a process that names the base on its
 //     command line or holds anything under it (cwd, root, fd, mapping), or a
-//     held lock always keeps it. An incomplete process inventory keeps every
-//     base. A base that git tracks, that holds .git, or that has a mount point
-//     inside it is kept. Held copies (R-C606) and the TIN-5268 agent-session
-//     deny set are never walked or removed.
+//     held lock always keeps it. The server and lock checks read the base
+//     itself, so they stand whatever the process scan could see. An incomplete
+//     process inventory keeps every base. An SSH session process, which the
+//     kernel refuses to its own user, does not make it incomplete when its
+//     parent chain proves what it is (procIsSSHDSessionChild). A base that git
+//     tracks, that holds .git, or that has a mount point inside it is kept.
+//     Held copies (R-C606) and the TIN-5268 agent-session deny set are never
+//     walked or removed.
 //   - Removal re-checks everything for that base, takes Bazel's own lock,
 //     renames the base aside on the same file system, re-checks the aside,
 //     renames it back if anything holds it, and only then deletes it.
@@ -39,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,6 +125,12 @@ type bbActivityOptions struct {
 	// environments. On Linux a same-user process whose environment cannot
 	// be read makes the inventory incomplete, as an unreadable fd table does.
 	EnvVars []string
+	// SkipSSHDSessions leaves the inventory complete past an unreadable
+	// process that procIsSSHDSessionChild proves is an SSH session process,
+	// and records its pid. Such a process can hold a forwarded agent socket,
+	// so a lane sets this only after reading whether its roots could contain
+	// one. Linux only: Darwin reads no /proc.
+	SkipSSHDSessions bool
 }
 
 // bbHeldLock is Bazel's output-base lock while the reaper holds it.
@@ -139,7 +150,9 @@ type bbActivity struct {
 	held       map[string]string
 	procs      []bbProc
 	incomplete []string
-	lsofError  string
+	// skipped are the pids of unreadable processes SkipSSHDSessions let pass.
+	skipped   []int
+	lsofError string
 }
 
 type bbProc struct {
@@ -357,13 +370,19 @@ type bbRow struct {
 	Decision      string  `json:"decision"`
 	Live          bool    `json:"live"`
 	Reason        string  `json:"reason"`
+	// InventorySkippedPIDs lists every SSH session process that an inventory
+	// deciding this row could not read: the cycle's first and the base's and
+	// sibling's own re-checks. Nothing about what those processes hold is known.
+	InventorySkippedPIDs []int `json:"inventory_skipped_pids,omitempty"`
 
 	lastUse time.Time
 	dev     uint64
 	idle    time.Duration
-	window  time.Duration
-	normal  time.Duration
-	hasLock bool
+	// idleNote is the part of an eligible row's reason no inventory changes.
+	idleNote string
+	window   time.Duration
+	normal   time.Duration
+	hasLock  bool
 	// pressureWindow is the window the base would have on a mount under
 	// pressure. recent marks a base kept only because it was used inside its
 	// window, and again a base that must be looked at on the next walk.
@@ -396,6 +415,44 @@ type bbCycle struct {
 	Seconds       float64          `json:"seconds"`
 	Rows          []*bbRow         `json:"rows"`
 	asides        []bbAside
+
+	// InventorySkipped counts the distinct unreadable processes that any
+	// inventory of the cycle proved to be SSH session processes.
+	// InventorySkippedPIDs lists the first bbInventorySkippedShown of them.
+	InventorySkipped     int   `json:"inventory_skipped,omitempty"`
+	InventorySkippedPIDs []int `json:"inventory_skipped_pids,omitempty"`
+	skippedAll           []int
+}
+
+// noteSkipped adds one inventory's skipped pids to the cycle. Every inventory
+// reports here, because a session can open after the first one.
+func (c *bbCycle) noteSkipped(pids []int) {
+	c.skippedAll = bbMergePIDs(c.skippedAll, pids)
+	c.InventorySkipped = len(c.skippedAll)
+	c.InventorySkippedPIDs = c.skippedAll[:min(len(c.skippedAll), bbInventorySkippedShown)]
+}
+
+// noteUnread adds one inventory's skipped pids to an eligible row and renders
+// its reason. An unread session may hold a path in the base, so the reason does
+// not claim nothing is open.
+func (r *bbRow) noteUnread(pids []int) {
+	r.InventorySkippedPIDs = bbMergePIDs(r.InventorySkippedPIDs, pids)
+	if len(r.InventorySkippedPIDs) == 0 {
+		r.Reason = r.idleNote + ", nothing open, lock free"
+		return
+	}
+	r.Reason = fmt.Sprintf("%s, nothing open in any process read, lock free, unread SSH session pids %v",
+		r.idleNote, r.InventorySkippedPIDs)
+}
+
+// bbMergePIDs appends the pids have lacks, keeping first-seen order.
+func bbMergePIDs(have, add []int) []int {
+	for _, pid := range add {
+		if !slices.Contains(have, pid) {
+			have = append(have, pid)
+		}
+	}
+	return have
 }
 
 type bbDev struct {
@@ -449,6 +506,8 @@ const (
 	// bbDefaultEarlyDutyPercent bounds early pressure walks to this share
 	// of wall time.
 	bbDefaultEarlyDutyPercent = 20
+	// bbInventorySkippedShown bounds the skipped pids a cycle records.
+	bbInventorySkippedShown = 5
 )
 
 func (p *BazelBasesPlugin) policy(cfg *config.Config) (*bbPolicy, error) {
@@ -796,6 +855,8 @@ func (p *BazelBasesPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg 
 		"removed", cycle.Removed,
 		"removed_bytes", cycle.RemovedBytes,
 		"kept_live", cycle.KeptLive,
+		"inventory_skipped", cycle.InventorySkipped,
+		"inventory_skipped_pids", cycle.InventorySkippedPIDs,
 		"refusal", cycle.Refusal,
 	)
 	return result
@@ -820,11 +881,15 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 		LsofTimeout: time.Duration(pol.cfg.LsofTimeoutSeconds) * time.Second,
 		UseLsof:     true,
 		OKComms:     pol.cfg.UninspectableOKComms,
+		// An output base holds no agent socket: the session process keeps
+		// that in its own /tmp/ssh-* directory, which is no base.
+		SkipSSHDSessions: true,
 	}
 	for _, r := range pol.roots {
 		opts.Within = append(opts.Within, uniquePaths(r, resolvedOrSelf(r))...)
 	}
 	activity := p.env.activity(ctx, opts)
+	cycle.noteSkipped(activity.skipped)
 	mounts, mountErr := p.env.mountPoints()
 	git := pol.cfg.Git
 	if git == "" {
@@ -936,7 +1001,8 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 			row.Sibling, row.SiblingNote = sib, note
 		}
 		row.Decision = "eligible"
-		row.Reason = fmt.Sprintf("idle %.1fh > %s, no live server, nothing open, lock free", row.idle.Hours(), window)
+		row.idleNote = fmt.Sprintf("idle %.1fh > %s, no live server", row.idle.Hours(), window)
+		row.noteUnread(activity.skipped)
 	}
 
 	if pol.cfg.OnlyListed != "" {
@@ -1154,7 +1220,11 @@ func (p *BazelBasesPlugin) apply(ctx context.Context, pol *bbPolicy, cycle *bbCy
 				continue
 			}
 		}
-		removed, why := p.removeTree(ctx, pol, row.Path, row.Root, row.Carveout, true, stamp, removalOpts)
+		note := func(pids []int) {
+			cycle.noteSkipped(pids)
+			row.noteUnread(pids)
+		}
+		removed, why := p.removeTree(ctx, pol, row.Path, row.Root, row.Carveout, true, stamp, removalOpts, note)
 		if !removed {
 			row.Decision, row.Reason = "keep", why
 			continue
@@ -1164,7 +1234,7 @@ func (p *BazelBasesPlugin) apply(ctx context.Context, pol *bbPolicy, cycle *bbCy
 		cycle.RemovedBytes += row.Bytes
 		cycle.RemovedInodes += row.Inodes
 		if row.Sibling != "" {
-			if ok, why := p.removeTree(ctx, pol, row.Sibling, row.Root, "", false, stamp, removalOpts); ok {
+			if ok, why := p.removeTree(ctx, pol, row.Sibling, row.Root, "", false, stamp, removalOpts, note); ok {
 				cycle.RemovedBytes += row.SiblingBytes
 				cycle.RemovedInodes += row.SiblingInodes
 			} else {
@@ -1241,12 +1311,14 @@ func (p *BazelBasesPlugin) liveReasons(base string, activity *bbActivity) []stri
 }
 
 // removeTree is the rename-recheck-delete sequence for one base or sibling.
+// note receives the skipped pids of each inventory it takes.
 func (p *BazelBasesPlugin) removeTree(ctx context.Context, pol *bbPolicy, path, root, carve string, isBase bool,
-	stamp string, opts bbActivityOptions) (bool, string) {
+	stamp string, opts bbActivityOptions, note func([]int)) (bool, string) {
 	if why := p.safe(pol, path, root, carve); why != "" {
 		return false, "kept at removal: " + why
 	}
 	act := p.env.activity(ctx, opts)
+	note(act.skipped)
 	if why := act.complete(); why != "" {
 		return false, "kept at removal: " + why
 	}
@@ -1276,6 +1348,7 @@ func (p *BazelBasesPlugin) removeTree(ctx context.Context, pol *bbPolicy, path, 
 		return false, "kept: rename failed: " + err.Error()
 	}
 	late := p.env.activity(ctx, opts)
+	note(late.skipped)
 	lateWhy := ""
 	if why := late.complete(); why != "" {
 		lateWhy = why
@@ -1304,6 +1377,7 @@ func (p *BazelBasesPlugin) removeAside(ctx context.Context, pol *bbPolicy, aside
 		return
 	}
 	act := p.env.activity(ctx, opts)
+	cycle.noteSkipped(act.skipped)
 	if act.complete() != "" || len(act.blockers(aside.path)) > 0 {
 		return
 	}
