@@ -17,10 +17,14 @@ package plugins
 //     stops once both dimensions are below pressure_stop_percent (60%).
 //   - A live server (server.pid.txt), a process that names the base on its
 //     command line or holds anything under it (cwd, root, fd, mapping), or a
-//     held lock always keeps it. An incomplete process inventory keeps every
-//     base. A base that git tracks, that holds .git, or that has a mount point
-//     inside it is kept. Held copies (R-C606) and the TIN-5268 agent-session
-//     deny set are never walked or removed.
+//     held lock always keeps it. The server and lock checks read the base
+//     itself, so they stand whatever the process scan could see. An incomplete
+//     process inventory keeps every base. An SSH session process, which the
+//     kernel refuses to its own user, does not make it incomplete when its
+//     parent chain proves what it is (procIsSSHDSessionChild). A base that git
+//     tracks, that holds .git, or that has a mount point inside it is kept.
+//     Held copies (R-C606) and the TIN-5268 agent-session deny set are never
+//     walked or removed.
 //   - Removal re-checks everything for that base, takes Bazel's own lock,
 //     renames the base aside on the same file system, re-checks the aside,
 //     renames it back if anything holds it, and only then deletes it.
@@ -120,6 +124,12 @@ type bbActivityOptions struct {
 	// environments. On Linux a same-user process whose environment cannot
 	// be read makes the inventory incomplete, as an unreadable fd table does.
 	EnvVars []string
+	// SkipSSHDSessions leaves the inventory complete past an unreadable
+	// process that procIsSSHDSessionChild proves is an SSH session process,
+	// and records its pid. Such a process can hold a forwarded agent socket,
+	// so a lane sets this only after reading whether its roots could contain
+	// one. Linux only: Darwin reads no /proc.
+	SkipSSHDSessions bool
 }
 
 // bbHeldLock is Bazel's output-base lock while the reaper holds it.
@@ -139,7 +149,9 @@ type bbActivity struct {
 	held       map[string]string
 	procs      []bbProc
 	incomplete []string
-	lsofError  string
+	// skipped are the pids of unreadable processes SkipSSHDSessions let pass.
+	skipped   []int
+	lsofError string
 }
 
 type bbProc struct {
@@ -396,6 +408,12 @@ type bbCycle struct {
 	Seconds       float64          `json:"seconds"`
 	Rows          []*bbRow         `json:"rows"`
 	asides        []bbAside
+
+	// InventorySkipped counts the unreadable processes the cycle's inventory
+	// proved to be SSH session processes. InventorySkippedPIDs lists the first
+	// bbInventorySkippedShown of them.
+	InventorySkipped     int   `json:"inventory_skipped,omitempty"`
+	InventorySkippedPIDs []int `json:"inventory_skipped_pids,omitempty"`
 }
 
 type bbDev struct {
@@ -449,6 +467,8 @@ const (
 	// bbDefaultEarlyDutyPercent bounds early pressure walks to this share
 	// of wall time.
 	bbDefaultEarlyDutyPercent = 20
+	// bbInventorySkippedShown bounds the skipped pids a cycle records.
+	bbInventorySkippedShown = 5
 )
 
 func (p *BazelBasesPlugin) policy(cfg *config.Config) (*bbPolicy, error) {
@@ -796,6 +816,8 @@ func (p *BazelBasesPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg 
 		"removed", cycle.Removed,
 		"removed_bytes", cycle.RemovedBytes,
 		"kept_live", cycle.KeptLive,
+		"inventory_skipped", cycle.InventorySkipped,
+		"inventory_skipped_pids", cycle.InventorySkippedPIDs,
 		"refusal", cycle.Refusal,
 	)
 	return result
@@ -820,11 +842,19 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 		LsofTimeout: time.Duration(pol.cfg.LsofTimeoutSeconds) * time.Second,
 		UseLsof:     true,
 		OKComms:     pol.cfg.UninspectableOKComms,
+		// An output base holds no agent socket: the session process keeps
+		// that in its own /tmp/ssh-* directory, which is no base.
+		SkipSSHDSessions: true,
 	}
 	for _, r := range pol.roots {
 		opts.Within = append(opts.Within, uniquePaths(r, resolvedOrSelf(r))...)
 	}
 	activity := p.env.activity(ctx, opts)
+	cycle.InventorySkipped = len(activity.skipped)
+	cycle.InventorySkippedPIDs = activity.skipped
+	if len(activity.skipped) > bbInventorySkippedShown {
+		cycle.InventorySkippedPIDs = activity.skipped[:bbInventorySkippedShown]
+	}
 	mounts, mountErr := p.env.mountPoints()
 	git := pol.cfg.Git
 	if git == "" {

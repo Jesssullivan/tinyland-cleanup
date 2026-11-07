@@ -59,6 +59,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **An SSH session no longer stops the Bazel output-base reaper (TIN-5770,
+  R-C645).** OpenSSH's session process is non-dumpable, so the kernel refuses
+  its own user its `/proc` links for the whole session. The inventory read that
+  as incomplete and refused the cycle. On honey on November 7, 2026 every apply
+  cycle logged `removed=0` with 51 bases eligible, while `/home` was at 96
+  percent. The inventory now passes over such a process only when its parent
+  chain in `/proc/<pid>/status` proves it: a root `sshd` or `sshd-session`
+  parent, and root sshd ancestors up to pid 1. A process that renames itself
+  fails that check, and any other unreadable process still refuses the cycle.
+  The cycle line and `last-cycle.json` carry `inventory_skipped` and the first
+  five `inventory_skipped_pids`. Only `bazel_bases` opts in. The docs no longer
+  claim `sshd-session` is unreadable only during session setup.
+
 - **A due Nix GC pass with `nix-collect-garbage` off PATH is no longer
   silent (issue #163, lab TIN-5770).** On petting-zoo-mini the launchd agent's
   PATH missed `/nix/var/nix/profiles/default/bin`. Every due pass returned at

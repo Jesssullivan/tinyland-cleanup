@@ -318,8 +318,9 @@ dev_artifacts:
   user manager and `(sd-pam)`. A zombie (state `Z`) holds nothing and is always
   ignored. What a listed process does expose is still recorded. Setting the
   key replaces the default list. `sshd-session` is deliberately not listed:
-  it is unreadable only while a session is set up, and it may hold a
-  forwarded agent socket under `/tmp`. Darwin reads the inventory with `lsof`
+  it stays unreadable for the whole SSH session, and it may hold a forwarded
+  agent socket under `/tmp`. So an open SSH session preserves every temp root
+  on this lane. Darwin reads the inventory with `lsof`
   and does not use this list. `bazel_bases.uninspectable_ok_comms` is the same
   rule for the Bazel output-base lane.
 - `nix_temp_root_min_mb` is the size floor for reaping a stale Nix root. `0`
@@ -359,6 +360,34 @@ bazel_bases:
 The `dev_artifacts` deleting lanes (node_modules, `.venv`, Rust `target`,
 Zig) never enter a directory covered by `protect_paths`; they skipped every
 artifact there anyway. Report and plan lanes still list protected artifacts.
+
+### SSH sessions and the process inventory
+
+OpenSSH's session process turns itself non-dumpable. The kernel then refuses
+its own user its `fd`, `cwd`, `root` and `maps` for the whole session, and an
+unreadable process makes the inventory incomplete. On honey on November 7,
+2026 that refused every apply cycle while anyone was logged in over SSH.
+
+`uninspectable_ok_comms` cannot carry this. Any process can set its own command
+name and turn non-dumpable. So `bazel_bases` passes over such a process only
+when `/proc/<pid>/status`, which any user can read, proves all of this:
+
+- the process is named `sshd-session` or `sshd`, and all its uids are this user;
+- its parent is named the same, and all that parent's uids are 0;
+- every ancestor up to pid 1 is named the same with all uids 0, and pid 1 is root.
+
+OpenSSH forks the session process from its root monitor, and every other process
+of the session from the session process. So a shell, or anything a shell starts,
+has a user-owned parent and fails. Anything else still refuses the cycle.
+
+The `bazel_bases cycle` log line and `last-cycle.json` record
+`inventory_skipped`, the count, and `inventory_skipped_pids`, the first five.
+A live server and a held lock are read from the base itself, so each keeps its
+base whatever the scan could see.
+
+`retention`, `shm_scratch`, the temp lane and the Nix root listing do not use
+this rule. A session process can hold a forwarded agent socket, and each of those
+lanes has to read whether its roots can contain one.
 
 ## Source of Truth
 

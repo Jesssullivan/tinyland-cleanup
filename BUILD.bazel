@@ -393,6 +393,7 @@ go_test(
         "plugins/podman_keep_store_test.go",
         "plugins/podman_keep_test.go",
         "plugins/podman_protected_test.go",
+        "plugins/proc_stat_test.go",
         "plugins/scan_budget_test.go",
         "plugins/streamwalk_test.go",
         "plugins/sudo_test.go",

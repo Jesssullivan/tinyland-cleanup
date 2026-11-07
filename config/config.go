@@ -582,7 +582,9 @@ type BazelBasesConfig struct {
 	// MaxDiscoverySeconds bounds one walk; a partial walk only finds fewer bases.
 	MaxDiscoverySeconds int `yaml:"max_discovery_seconds"`
 	// UninspectableOKComms are process names of this user whose fd tables may
-	// be unreadable without making the activity inventory incomplete.
+	// be unreadable without making the activity inventory incomplete. A name
+	// is only a claim: a process can set its own. SSH session processes are
+	// proved by their parent chain instead, so they are not listed here.
 	UninspectableOKComms []string `yaml:"uninspectable_ok_comms"`
 	// Git is the git binary used for the tracked-files guard (empty: PATH).
 	Git string `yaml:"git"`
