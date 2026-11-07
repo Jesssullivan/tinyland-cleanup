@@ -381,9 +381,28 @@ of the session from the session process. So a shell, or anything a shell starts,
 has a user-owned parent and fails. Anything else still refuses the cycle.
 
 The `bazel_bases cycle` log line and `last-cycle.json` record
-`inventory_skipped`, the count, and `inventory_skipped_pids`, the first five.
+`inventory_skipped`, the count of distinct pids, and `inventory_skipped_pids`,
+the first five. Both cover every inventory in the cycle: discovery, each leftover
+aside check and both re-checks of each base and sibling.
+
+An eligible row names the sessions its own inventories could not read, every pid.
+`inventory_skipped_pids` on the row holds them, and `reason` then says
+`nothing open in any process read` and lists them. `removals.jsonl` stores both.
+
 A live server and a held lock are read from the base itself, so each keeps its
-base whatever the scan could see.
+base whatever the scan could see. A live build keeps its base through the lock.
+
+A holder tied to a base only by a path now loses that base with a session open.
+The inventory sees none of these:
+
+- an SSH mux master with no child;
+- an external `sftp-server` child between requests;
+- `BAZEL_OUTPUT_BASE` in a process's environ and nowhere else;
+- a write deep in the base, once the file is closed, with older last-use signals.
+
+A base is rebuildable, so the cost is a rebuild. The old protection was
+accidental: the refusal came from the session process and read nothing about the
+base.
 
 `retention`, `shm_scratch`, the temp lane and the Nix root listing do not use
 this rule. A session process can hold a forwarded agent socket, and each of those

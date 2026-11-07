@@ -43,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -369,13 +370,19 @@ type bbRow struct {
 	Decision      string  `json:"decision"`
 	Live          bool    `json:"live"`
 	Reason        string  `json:"reason"`
+	// InventorySkippedPIDs lists every SSH session process that an inventory
+	// deciding this row could not read: the cycle's first and the base's and
+	// sibling's own re-checks. Nothing about what those processes hold is known.
+	InventorySkippedPIDs []int `json:"inventory_skipped_pids,omitempty"`
 
 	lastUse time.Time
 	dev     uint64
 	idle    time.Duration
-	window  time.Duration
-	normal  time.Duration
-	hasLock bool
+	// idleNote is the part of an eligible row's reason no inventory changes.
+	idleNote string
+	window   time.Duration
+	normal   time.Duration
+	hasLock  bool
 	// pressureWindow is the window the base would have on a mount under
 	// pressure. recent marks a base kept only because it was used inside its
 	// window, and again a base that must be looked at on the next walk.
@@ -409,11 +416,43 @@ type bbCycle struct {
 	Rows          []*bbRow         `json:"rows"`
 	asides        []bbAside
 
-	// InventorySkipped counts the unreadable processes the cycle's inventory
-	// proved to be SSH session processes. InventorySkippedPIDs lists the first
-	// bbInventorySkippedShown of them.
+	// InventorySkipped counts the distinct unreadable processes that any
+	// inventory of the cycle proved to be SSH session processes.
+	// InventorySkippedPIDs lists the first bbInventorySkippedShown of them.
 	InventorySkipped     int   `json:"inventory_skipped,omitempty"`
 	InventorySkippedPIDs []int `json:"inventory_skipped_pids,omitempty"`
+	skippedAll           []int
+}
+
+// noteSkipped adds one inventory's skipped pids to the cycle. Every inventory
+// reports here, because a session can open after the first one.
+func (c *bbCycle) noteSkipped(pids []int) {
+	c.skippedAll = bbMergePIDs(c.skippedAll, pids)
+	c.InventorySkipped = len(c.skippedAll)
+	c.InventorySkippedPIDs = c.skippedAll[:min(len(c.skippedAll), bbInventorySkippedShown)]
+}
+
+// noteUnread adds one inventory's skipped pids to an eligible row and renders
+// its reason. An unread session may hold a path in the base, so the reason does
+// not claim nothing is open.
+func (r *bbRow) noteUnread(pids []int) {
+	r.InventorySkippedPIDs = bbMergePIDs(r.InventorySkippedPIDs, pids)
+	if len(r.InventorySkippedPIDs) == 0 {
+		r.Reason = r.idleNote + ", nothing open, lock free"
+		return
+	}
+	r.Reason = fmt.Sprintf("%s, nothing open in any process read, lock free, unread SSH session pids %v",
+		r.idleNote, r.InventorySkippedPIDs)
+}
+
+// bbMergePIDs appends the pids have lacks, keeping first-seen order.
+func bbMergePIDs(have, add []int) []int {
+	for _, pid := range add {
+		if !slices.Contains(have, pid) {
+			have = append(have, pid)
+		}
+	}
+	return have
 }
 
 type bbDev struct {
@@ -850,11 +889,7 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 		opts.Within = append(opts.Within, uniquePaths(r, resolvedOrSelf(r))...)
 	}
 	activity := p.env.activity(ctx, opts)
-	cycle.InventorySkipped = len(activity.skipped)
-	cycle.InventorySkippedPIDs = activity.skipped
-	if len(activity.skipped) > bbInventorySkippedShown {
-		cycle.InventorySkippedPIDs = activity.skipped[:bbInventorySkippedShown]
-	}
+	cycle.noteSkipped(activity.skipped)
 	mounts, mountErr := p.env.mountPoints()
 	git := pol.cfg.Git
 	if git == "" {
@@ -966,7 +1001,8 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 			row.Sibling, row.SiblingNote = sib, note
 		}
 		row.Decision = "eligible"
-		row.Reason = fmt.Sprintf("idle %.1fh > %s, no live server, nothing open, lock free", row.idle.Hours(), window)
+		row.idleNote = fmt.Sprintf("idle %.1fh > %s, no live server", row.idle.Hours(), window)
+		row.noteUnread(activity.skipped)
 	}
 
 	if pol.cfg.OnlyListed != "" {
@@ -1184,7 +1220,11 @@ func (p *BazelBasesPlugin) apply(ctx context.Context, pol *bbPolicy, cycle *bbCy
 				continue
 			}
 		}
-		removed, why := p.removeTree(ctx, pol, row.Path, row.Root, row.Carveout, true, stamp, removalOpts)
+		note := func(pids []int) {
+			cycle.noteSkipped(pids)
+			row.noteUnread(pids)
+		}
+		removed, why := p.removeTree(ctx, pol, row.Path, row.Root, row.Carveout, true, stamp, removalOpts, note)
 		if !removed {
 			row.Decision, row.Reason = "keep", why
 			continue
@@ -1194,7 +1234,7 @@ func (p *BazelBasesPlugin) apply(ctx context.Context, pol *bbPolicy, cycle *bbCy
 		cycle.RemovedBytes += row.Bytes
 		cycle.RemovedInodes += row.Inodes
 		if row.Sibling != "" {
-			if ok, why := p.removeTree(ctx, pol, row.Sibling, row.Root, "", false, stamp, removalOpts); ok {
+			if ok, why := p.removeTree(ctx, pol, row.Sibling, row.Root, "", false, stamp, removalOpts, note); ok {
 				cycle.RemovedBytes += row.SiblingBytes
 				cycle.RemovedInodes += row.SiblingInodes
 			} else {
@@ -1271,12 +1311,14 @@ func (p *BazelBasesPlugin) liveReasons(base string, activity *bbActivity) []stri
 }
 
 // removeTree is the rename-recheck-delete sequence for one base or sibling.
+// note receives the skipped pids of each inventory it takes.
 func (p *BazelBasesPlugin) removeTree(ctx context.Context, pol *bbPolicy, path, root, carve string, isBase bool,
-	stamp string, opts bbActivityOptions) (bool, string) {
+	stamp string, opts bbActivityOptions, note func([]int)) (bool, string) {
 	if why := p.safe(pol, path, root, carve); why != "" {
 		return false, "kept at removal: " + why
 	}
 	act := p.env.activity(ctx, opts)
+	note(act.skipped)
 	if why := act.complete(); why != "" {
 		return false, "kept at removal: " + why
 	}
@@ -1306,6 +1348,7 @@ func (p *BazelBasesPlugin) removeTree(ctx context.Context, pol *bbPolicy, path, 
 		return false, "kept: rename failed: " + err.Error()
 	}
 	late := p.env.activity(ctx, opts)
+	note(late.skipped)
 	lateWhy := ""
 	if why := late.complete(); why != "" {
 		lateWhy = why
@@ -1334,6 +1377,7 @@ func (p *BazelBasesPlugin) removeAside(ctx context.Context, pol *bbPolicy, aside
 		return
 	}
 	act := p.env.activity(ctx, opts)
+	cycle.noteSkipped(act.skipped)
 	if act.complete() != "" || len(act.blockers(aside.path)) > 0 {
 		return
 	}

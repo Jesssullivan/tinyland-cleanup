@@ -68,9 +68,14 @@ All notable changes to this project will be documented in this file.
   chain in `/proc/<pid>/status` proves it: a root `sshd` or `sshd-session`
   parent, and root sshd ancestors up to pid 1. A process that renames itself
   fails that check, and any other unreadable process still refuses the cycle.
-  The cycle line and `last-cycle.json` carry `inventory_skipped` and the first
-  five `inventory_skipped_pids`. Only `bazel_bases` opts in. The docs no longer
-  claim `sshd-session` is unreadable only during session setup.
+  The cycle line and `last-cycle.json` carry `inventory_skipped`, the distinct
+  pids across every inventory in the cycle, and the first five
+  `inventory_skipped_pids`. An eligible row and its `removals.jsonl` line name
+  the sessions its own inventories could not read. Only `bazel_bases` opts in.
+  The docs no longer claim `sshd-session` is unreadable only during session
+  setup. A base held only by a path now goes with a session open, and
+  `docs/configuration.md` lists those holders. A live build keeps its base
+  through the lock.
 
 - **A due Nix GC pass with `nix-collect-garbage` off PATH is no longer
   silent (issue #163, lab TIN-5770).** On petting-zoo-mini the launchd agent's

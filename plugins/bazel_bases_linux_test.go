@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -549,5 +551,347 @@ func TestBazelBasesRemovalRecheckKeepsTheRule(t *testing.T) {
 				t.Fatalf("reason: %s", r.Reason)
 			}
 		})
+	}
+}
+
+// bbInventorySteps runs a fixture inventory over the fake /proc tree, with the
+// given step before its nth call. It returns the call count.
+func bbInventorySteps(f *bbFixture, tree *fakeProcTree, uid int, steps map[int]func()) *int {
+	calls := 0
+	f.plugin.env.activity = func(ctx context.Context, opts bbActivityOptions) *bbActivity {
+		calls++
+		if step := steps[calls]; step != nil {
+			step()
+		}
+		return bbScanProc(ctx, tree.dir, -1, uid, opts)
+	}
+	return &calls
+}
+
+// openSessions adds one proven, unreadable SSH session for each pid.
+func openSessions(t *testing.T, tree *fakeProcTree, uid int, pids ...int) {
+	t.Helper()
+	for _, pid := range pids {
+		s := addSSHDChain(tree, pid, uid)
+		denyProcReads(t, []string{s}, []string{s})
+	}
+}
+
+// closeSessions takes each pid's process out of the fixture tree.
+func closeSessions(t *testing.T, tree *fakeProcTree, pids ...int) {
+	t.Helper()
+	for _, pid := range pids {
+		if err := os.RemoveAll(filepath.Join(tree.dir, strconv.Itoa(pid))); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// bbCleanupCycle runs one logged cycle and returns the log and last-cycle.json.
+func bbCleanupCycle(t *testing.T, f *bbFixture) (string, string) {
+	t.Helper()
+	var log bytes.Buffer
+	result := f.plugin.Cleanup(context.Background(), LevelWarning, f.cfg, slog.New(slog.NewTextHandler(&log, nil)))
+	if result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	raw, err := os.ReadFile(filepath.Join(f.cfg.BazelBases.ReceiptDir, "last-cycle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return log.String(), string(raw)
+}
+
+type bbRemovalLine struct {
+	Path     string `json:"path"`
+	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
+	PIDs     []int  `json:"inventory_skipped_pids"`
+}
+
+// bbReadRemovals returns removals.jsonl as raw text and parsed lines.
+func bbReadRemovals(t *testing.T, f *bbFixture) (string, []bbRemovalLine) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(f.cfg.BazelBases.ReceiptDir, "removals.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []bbRemovalLine
+	for _, l := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var line bbRemovalLine
+		if err := json.Unmarshal([]byte(l), &line); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, line)
+	}
+	return string(raw), lines
+}
+
+// The cycle's count covers all three inventories of a one-base cycle, not the
+// first alone, and each pid counts once however many inventories saw it.
+func TestBazelBasesSkippedCountCoversEveryInventory(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		open      map[int][]int
+		close     map[int][]int
+		wantCount int
+		wantPIDs  []int
+	}{
+		{name: "opens at inventory 2 of 3", open: map[int][]int{2: {6001}}, wantCount: 1, wantPIDs: []int{6001}},
+		{name: "opens at inventory 3 of 3", open: map[int][]int{3: {6001}}, wantCount: 1, wantPIDs: []int{6001}},
+		{name: "seen by all three counts once", open: map[int][]int{1: {3001}}, wantCount: 1, wantPIDs: []int{3001}},
+		{name: "closed after inventory 1 stays counted", open: map[int][]int{1: {3001}}, close: map[int][]int{2: {3001}},
+			wantCount: 1, wantPIDs: []int{3001}},
+		{name: "one more at each inventory", open: map[int][]int{1: {3001}, 2: {6001}, 3: {7001}},
+			wantCount: 3, wantPIDs: []int{3001, 6001, 7001}},
+		{name: "count passes the shown bound", open: map[int][]int{1: {3001, 3003, 3005, 3007}, 2: {6001, 6003}, 3: {7001}},
+			wantCount: 7, wantPIDs: []int{3001, 3003, 3005, 3007, 6001}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uid := sshdFixtureUID()
+			tree := newFakeProcTree(t)
+			addStatusProc(tree, 1, 0, "systemd", 0)
+			f := newBBFixture(t)
+			steps := map[int]func(){}
+			for n := 1; n <= 3; n++ {
+				steps[n] = func() {
+					openSessions(t, tree, uid, tc.open[n]...)
+					closeSessions(t, tree, tc.close[n]...)
+				}
+			}
+			calls := bbInventorySteps(f, tree, uid, steps)
+			base := filepath.Join(f.root, "a", "out")
+			bbMakeBase(t, base, 4096, 30*time.Hour)
+
+			log, raw := bbCleanupCycle(t, f)
+			if *calls != 3 {
+				t.Fatalf("inventories = %d, want 3", *calls)
+			}
+			if bbExists(base) {
+				t.Fatalf("the idle base was kept:\n%s", log)
+			}
+			if !strings.Contains(log, "removed=1") || !strings.Contains(log, "inventory_skipped="+strconv.Itoa(tc.wantCount)+" ") {
+				t.Fatalf("the cycle line does not carry the count %d:\n%s", tc.wantCount, log)
+			}
+			var receipt struct {
+				Skipped int   `json:"inventory_skipped"`
+				PIDs    []int `json:"inventory_skipped_pids"`
+			}
+			if err := json.Unmarshal([]byte(raw), &receipt); err != nil {
+				t.Fatal(err)
+			}
+			if receipt.Skipped != tc.wantCount || !slices.Equal(receipt.PIDs, tc.wantPIDs) {
+				t.Fatalf("receipt skipped %d %v, want %d %v", receipt.Skipped, receipt.PIDs, tc.wantCount, tc.wantPIDs)
+			}
+		})
+	}
+}
+
+// A re-check that keeps the base still reports the sessions it passed over.
+func TestBazelBasesSkippedCountCoversARefusingRecheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   int
+		want string
+	}{
+		{name: "before the rename", at: 2, want: "kept at removal: "},
+		{name: "after the rename", at: 3, want: "renamed back"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uid := sshdFixtureUID()
+			tree := newFakeProcTree(t)
+			f := newBBFixture(t)
+			bbInventorySteps(f, tree, uid, map[int]func(){tc.at: func() {
+				openSessions(t, tree, uid, 6001)
+				other := addStatusProc(tree, 5000, 1, "podman", uid)
+				denyProcReads(t, []string{other}, []string{other})
+			}})
+			base := filepath.Join(f.root, "a", "out")
+			bbMakeBase(t, base, 4096, 30*time.Hour)
+			cycle := f.run()
+			if !bbExists(base) {
+				t.Fatal("a base was reaped past an unexplained unreadable process")
+			}
+			if r := bbRowFor(t, cycle, base); !strings.Contains(r.Reason, tc.want) {
+				t.Fatalf("reason: %s", r.Reason)
+			}
+			if cycle.InventorySkipped != 1 || !slices.Equal(cycle.InventorySkippedPIDs, []int{6001}) {
+				t.Fatalf("skipped %d %v", cycle.InventorySkipped, cycle.InventorySkippedPIDs)
+			}
+		})
+	}
+}
+
+// The check before a leftover aside goes is an inventory of the cycle. It
+// decides no row, so the cycle counts its session and the base's row does not.
+func TestBazelBasesAsideInventoryCountsForTheCycleOnly(t *testing.T) {
+	uid := sshdFixtureUID()
+	tree := newFakeProcTree(t)
+	addStatusProc(tree, 1, 0, "systemd", 0)
+	f := newBBFixture(t)
+	calls := bbInventorySteps(f, tree, uid, map[int]func(){
+		2: func() { openSessions(t, tree, uid, 6001) },
+		3: func() { closeSessions(t, tree, 6001) },
+	})
+	base := filepath.Join(f.root, "a", "out")
+	bbMakeBase(t, base, 4096, 30*time.Hour)
+	aside := filepath.Join(f.root, "b", ".out"+bbAsideTag+"20261101T000000Z")
+	bbMkdir(t, aside)
+
+	cycle := f.run()
+	if *calls != 4 {
+		t.Fatalf("inventories = %d, want 4", *calls)
+	}
+	if bbExists(aside) || bbExists(base) {
+		t.Fatalf("the aside or the base was kept: %v", bbRowPaths(cycle))
+	}
+	if cycle.InventorySkipped != 1 || !slices.Equal(cycle.InventorySkippedPIDs, []int{6001}) {
+		t.Fatalf("skipped %d %v", cycle.InventorySkipped, cycle.InventorySkippedPIDs)
+	}
+	if r := bbRowFor(t, cycle, base); len(r.InventorySkippedPIDs) != 0 || strings.Contains(r.Reason, "unread") {
+		t.Fatalf("the row names a session its own inventories did not see: %v %s", r.InventorySkippedPIDs, r.Reason)
+	}
+}
+
+// A removed row names the sessions no inventory could read, in its reason and
+// its own field, and removals.jsonl stores both. Only a row with none says
+// nothing is open.
+func TestBazelBasesRemovalReceiptNamesUnreadSessions(t *testing.T) {
+	const quiet = ", no live server, nothing open, lock free"
+	for _, tc := range []struct {
+		name  string
+		open  map[int][]int
+		close map[int][]int
+		want  []int
+	}{
+		{name: "no session"},
+		{name: "open at discovery", open: map[int][]int{1: {3001}}, want: []int{3001}},
+		{name: "opens before the rename", open: map[int][]int{2: {6001}}, want: []int{6001}},
+		{name: "opens after the rename", open: map[int][]int{3: {6001}}, want: []int{6001}},
+		{name: "one at discovery and one later", open: map[int][]int{1: {3001}, 3: {6001}}, want: []int{3001, 6001}},
+		{name: "closed before the later one opens", open: map[int][]int{1: {3001}, 3: {6001}}, close: map[int][]int{2: {3001}},
+			want: []int{3001, 6001}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uid := sshdFixtureUID()
+			tree := newFakeProcTree(t)
+			addStatusProc(tree, 1, 0, "systemd", 0)
+			f := newBBFixture(t)
+			steps := map[int]func(){}
+			for n := 1; n <= 3; n++ {
+				steps[n] = func() {
+					openSessions(t, tree, uid, tc.open[n]...)
+					closeSessions(t, tree, tc.close[n]...)
+				}
+			}
+			bbInventorySteps(f, tree, uid, steps)
+			base := filepath.Join(f.root, "a", "out")
+			bbMakeBase(t, base, 4096, 30*time.Hour)
+
+			log, lastCycle := bbCleanupCycle(t, f)
+			if bbExists(base) {
+				t.Fatalf("the idle base was kept:\n%s", log)
+			}
+			raw, lines := bbReadRemovals(t, f)
+			if len(lines) != 1 || lines[0].Path != base || lines[0].Decision != "removed" {
+				t.Fatalf("removals.jsonl: %s", raw)
+			}
+			line := lines[0]
+			if !strings.HasPrefix(line.Reason, "idle 30.0h > ") {
+				t.Fatalf("reason lost its idle figure: %s", line.Reason)
+			}
+			if !slices.Equal(line.PIDs, tc.want) {
+				t.Fatalf("receipt pids %v, want %v", line.PIDs, tc.want)
+			}
+			if tc.want == nil {
+				if !strings.HasSuffix(line.Reason, quiet) {
+					t.Fatalf("reason with no session: %s", line.Reason)
+				}
+				if strings.Contains(raw, "inventory_skipped_pids") {
+					t.Fatalf("the receipt carries an empty field: %s", raw)
+				}
+				return
+			}
+			wantNote := fmt.Sprintf(", nothing open in any process read, lock free, unread SSH session pids %v", tc.want)
+			if !strings.HasSuffix(line.Reason, wantNote) {
+				t.Fatalf("reason does not name the sessions: %s", line.Reason)
+			}
+			if strings.Contains(line.Reason, quiet) {
+				t.Fatalf("reason claims nothing is open past an unread session: %s", line.Reason)
+			}
+			if !strings.Contains(lastCycle, wantNote) {
+				t.Fatalf("last-cycle.json does not carry the reason:\n%s", lastCycle)
+			}
+			tsv, err := os.ReadFile(filepath.Join(f.cfg.BazelBases.ReceiptDir, "candidates.tsv"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(tsv), wantNote) {
+				t.Fatalf("candidates.tsv does not carry the reason:\n%s", tsv)
+			}
+		})
+	}
+}
+
+// A sibling's own two inventories decide its removal too, and the receipt is
+// written after them.
+func TestBazelBasesReceiptNamesSessionFromSiblingRecheck(t *testing.T) {
+	for _, at := range []int{4, 5} {
+		t.Run(strconv.Itoa(at), func(t *testing.T) {
+			uid := sshdFixtureUID()
+			tree := newFakeProcTree(t)
+			addStatusProc(tree, 1, 0, "systemd", 0)
+			f := newBBFixture(t)
+			calls := bbInventorySteps(f, tree, uid, map[int]func(){at: func() { openSessions(t, tree, uid, 6001) }})
+			run := filepath.Join(f.root, "omux-run")
+			base := filepath.Join(run, "out")
+			bbMakeBase(t, base, 4096, 30*time.Hour)
+			sib := filepath.Join(run, "bazel-user-root")
+			inst := filepath.Join(sib, "install", "deadbeef")
+			bbMkdir(t, inst)
+			if err := os.Symlink(inst, filepath.Join(base, "install")); err != nil {
+				t.Fatal(err)
+			}
+			bbAge(t, base, 30*time.Hour)
+
+			cycle := f.run()
+			if *calls != 5 {
+				t.Fatalf("inventories = %d, want 5", *calls)
+			}
+			if bbExists(base) || bbExists(sib) {
+				t.Fatalf("base and sibling were not both reaped: %v", bbRowPaths(cycle))
+			}
+			raw, lines := bbReadRemovals(t, f)
+			if len(lines) != 1 || !slices.Equal(lines[0].PIDs, []int{6001}) ||
+				!strings.Contains(lines[0].Reason, "unread SSH session pids [6001]") {
+				t.Fatalf("removals.jsonl: %s", raw)
+			}
+			if cycle.InventorySkipped != 1 {
+				t.Fatalf("skipped = %d, want 1", cycle.InventorySkipped)
+			}
+		})
+	}
+}
+
+// A report-only cycle has one inventory, and its eligible rows name the
+// sessions just as a removal does.
+func TestBazelBasesReportRowNamesUnreadSessions(t *testing.T) {
+	uid := sshdFixtureUID()
+	tree := newFakeProcTree(t)
+	openSessions(t, tree, uid, 3001)
+	f := newBBFixture(t)
+	f.cfg.BazelBases.Mode = config.BazelBasesModeReport
+	useFixtureProc(f, tree, uid)
+	base := filepath.Join(f.root, "a", "out")
+	bbMakeBase(t, base, 4096, 30*time.Hour)
+
+	cycle := f.run()
+	if !bbExists(base) {
+		t.Fatal("a report-only cycle removed a base")
+	}
+	r := bbRowFor(t, cycle, base)
+	if r.Decision != "eligible" || !slices.Equal(r.InventorySkippedPIDs, []int{3001}) ||
+		!strings.Contains(r.Reason, "unread SSH session pids [3001]") {
+		t.Fatalf("row %s %v: %s", r.Decision, r.InventorySkippedPIDs, r.Reason)
 	}
 }
