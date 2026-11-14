@@ -129,6 +129,23 @@ re-lists each key, re-reads every link and takes a fresh process inventory. It
 removes `<uuid>.recorded_inputs` before `<uuid>/`, so Bazel never sees a
 recorded entry without its tree.
 
+The over-budget whole-tier rule never deletes a repository cache that holds
+a copy an output base references or a key with duplicate copies. It also
+holds off while the `external/` scan or the Bazel process inspection is
+incomplete. The target stays `keep` with the reason, and the dedupe class
+reclaims the cache instead. Whole-cache deletion stays possible only for a
+cache with no referenced copy and no duplicates, while no Bazel process is
+visible.
+
+An output base outside the scanned set is not seen. Its copies are guarded
+only by `repo_contents_keep_recent` and `repo_contents_min_age`, and every
+plan carries a warning that says so.
+
+Discovery follows a top-level `_bazel_*` symlink in a root by one hop, as on
+sting, where `~/.cache/bazel/_bazel_jess` links to the fast-local output user
+root. The target must be a real directory, so a chain of links is never
+followed.
+
 ```yaml
 bazel:
   repo_contents_dedupe: true

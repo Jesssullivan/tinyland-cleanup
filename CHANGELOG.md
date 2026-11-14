@@ -18,6 +18,10 @@ All notable changes to this project will be documented in this file.
   process holds. A mount that stays critical for `policy.stalled_alert_cycles`
   (6) cycles while every plugin reclaims nothing gets a warning and a
   `stalled_mounts` report entry.
+  The over-budget whole-tier rule no longer deletes a repository cache that
+  holds a referenced copy or duplicate copies; the dedupe class reclaims it
+  instead. Discovery follows a top-level `_bazel_*` symlink in a root by one
+  hop, so sting's `~/.cache/bazel/_bazel_jess` cache is measured.
 
 - **Podman keep rule: `podman.protected_labels` and
   `podman.protected_images_file` (TIN-5770).** On sting on 2026-10-28 the

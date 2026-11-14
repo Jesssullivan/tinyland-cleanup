@@ -130,7 +130,7 @@ func planRepoContentsFixture(t *testing.T, p *BazelPlugin, f repoContentsFixture
 		repoCaches:  measureBazelRepoCacheCandidates(context.Background(), candidates, now),
 		outputBases: bazelRepoContentsOutputBases(candidates, bazelRepoContentsRoots(cfg, "")),
 	}
-	targets, meta := p.planBazelRepoContents(context.Background(), cfg, level, state.repoCaches, state.outputBases, now)
+	targets, meta := p.planBazelRepoContents(context.Background(), cfg, level, state.repoCaches, collectBazelRepoContentsRefs(state.outputBases), now)
 	return targets, meta, state
 }
 
@@ -318,5 +318,184 @@ func TestBazelRepoCacheMeasureEstimatesUnwalkedCopiesFromTheirKey(t *testing.T) 
 	m := measureBazelRepoCache(ctx, f.repoCache, time.Now(), time.Minute)
 	if !m.Partial || m.Estimated != 7 {
 		t.Fatalf("partial=%v estimated=%d, want partial with 7 estimated copies", m.Partial, m.Estimated)
+	}
+}
+
+// singleCopyCache builds an output user root whose repository contents cache
+// holds one key with one copy, and an output base. linked makes the output
+// base's external/ symlink point at the copy.
+func singleCopyCache(t *testing.T, linked bool) (root, repoCache, copyDir, outputBase string) {
+	t.Helper()
+	root = t.TempDir()
+	our := filepath.Join(root, "_bazel_jess")
+	repoCache = filepath.Join(our, "cache", "repos", "v1")
+	copyDir = filepath.Join(repoCache, "contents", repoContentsTestKey, "00000000-0000-4000-8000-0000000000bb")
+	mustMkdir(t, filepath.Join(copyDir, "lib"))
+	if err := os.WriteFile(copyDir+bazelRepoContentsRecorded, []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outputBase = filepath.Join(our, "fedcba9876543210fedcba9876543210")
+	makeBazelOutputBase(t, outputBase)
+	mustMkdir(t, filepath.Join(outputBase, "external"))
+	if linked {
+		if err := os.Symlink(copyDir, filepath.Join(outputBase, "external", "rules_python")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root, repoCache, copyDir, outputBase
+}
+
+// planTierOverBudget runs the whole-tier rule with the repository cache
+// forced over a 1 GiB budget and stale, then the TIN-5770 guard.
+func planTierOverBudget(t *testing.T, root string, activeErr error) CleanupTarget {
+	t.Helper()
+	now := time.Now()
+	candidates := discoverBazelRootCandidates(root)
+	measures := measureBazelRepoCacheCandidates(context.Background(), candidates, now)
+	for i := range candidates {
+		if candidates[i].Type == "repository_cache" {
+			candidates[i].Physical = 2 * bazelGiB
+			candidates[i].ModTime = now.Add(-30 * 24 * time.Hour)
+		} else {
+			candidates[i].ModTime = now
+		}
+	}
+	targets, _ := bazelPlanTargets(candidates, config.BazelConfig{MaxTotalGB: 1, StaleAfter: "14d", CriticalStaleAfter: "3d"}, LevelCritical, now, false)
+	refs := collectBazelRepoContentsRefs(bazelRepoContentsOutputBases(candidates, []string{root}))
+	targets = guardBazelRepositoryCacheTiers(targets, measures, refs, activeErr)
+	for _, tg := range targets {
+		if tg.Type == "repository_cache" {
+			return tg
+		}
+	}
+	t.Fatalf("no repository_cache target in %#v", targets)
+	return CleanupTarget{}
+}
+
+func TestBazelRepositoryCacheTierWithheldWhileACopyIsReferenced(t *testing.T) {
+	root, _, _, _ := singleCopyCache(t, true)
+	tg := planTierOverBudget(t, root, nil)
+	if tg.Action != "keep" || !tg.Protected || !strings.Contains(tg.Reason, "1 copies are referenced by output bases") {
+		t.Fatalf("tier = %#v, want whole-tier deletion withheld for a referenced copy", tg)
+	}
+	if bazelTargetReclaimsHost(tg) {
+		t.Fatal("withheld tier still counts as reclaim")
+	}
+}
+
+func TestBazelRepositoryCacheTierWithheldWhileDuplicatesExist(t *testing.T) {
+	f := newRepoContentsFixture(t)
+	// No copy is referenced: drop the fixture's external/ link.
+	if err := os.Remove(filepath.Join(f.outputBase, "external", "rules_python++python+python_3_11_x86_64-unknown-linux-gnu")); err != nil {
+		t.Fatal(err)
+	}
+	tg := planTierOverBudget(t, f.root, nil)
+	if tg.Action != "keep" || !tg.Protected || !strings.Contains(tg.Reason, "1 keys hold duplicate copies") {
+		t.Fatalf("tier = %#v, want whole-tier deletion withheld while duplicates exist", tg)
+	}
+	// The dedupe class carries the reclaim instead.
+	cfg := repoContentsTestConfig(f.root, 3)
+	targets, _, _ := planRepoContentsFixture(t, &BazelPlugin{activityScan: repoContentsActivity()}, f, cfg, LevelCritical)
+	if len(targets) != 1 || targets[0].Action != bazelRepoContentsDelete {
+		t.Fatalf("dedupe targets = %#v, want one %s", targets, bazelRepoContentsDelete)
+	}
+}
+
+func TestBazelRepositoryCacheTierDeletableOnlyWhenUnreferencedAndInactive(t *testing.T) {
+	root, _, _, _ := singleCopyCache(t, false)
+	if tg := planTierOverBudget(t, root, nil); tg.Action != "delete_cache_tier" {
+		t.Fatalf("tier = %#v, want delete_cache_tier with no reference, no duplicates and no Bazel process", tg)
+	}
+	if tg := planTierOverBudget(t, root, os.ErrPermission); tg.Action != "keep" || !strings.Contains(tg.Reason, "process inspection failed") {
+		t.Fatalf("tier = %#v, want kept when process inspection failed", tg)
+	}
+	// A visible Bazel process keeps the tier through the existing rule.
+	now := time.Now()
+	candidates := discoverBazelRootCandidates(root)
+	for i := range candidates {
+		candidates[i].Physical = 2 * bazelGiB
+		candidates[i].ModTime = now.Add(-30 * 24 * time.Hour)
+	}
+	targets, _ := bazelPlanTargets(candidates, config.BazelConfig{MaxTotalGB: 1}, LevelCritical, now, true)
+	for _, tg := range targets {
+		if tg.Type == "repository_cache" && tg.Action == "delete_cache_tier" {
+			t.Fatalf("tier deletable while a Bazel process is visible: %#v", tg)
+		}
+	}
+}
+
+func TestDiscoverBazelRootFollowsOneTopLevelUserRootLink(t *testing.T) {
+	real := t.TempDir()
+	_, repoCache, copyDir, outputBase := singleCopyCache(t, true)
+	userRoot := filepath.Dir(filepath.Dir(filepath.Dir(repoCache)))
+	// ~/.cache/bazel/_bazel_jess -> <real output user root>, as on sting.
+	home := filepath.Join(real, "cache-bazel")
+	mustMkdir(t, home)
+	if err := os.Symlink(userRoot, filepath.Join(home, "_bazel_jess")); err != nil {
+		t.Fatal(err)
+	}
+	// A chained link (link -> link -> dir) is never followed.
+	if err := os.Symlink(filepath.Join(home, "_bazel_jess"), filepath.Join(home, "_bazel_chain")); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates := discoverBazelRootCandidates(home)
+	var sawCache, sawOutputBase int
+	for _, c := range candidates {
+		switch {
+		case c.Type == "repository_cache" && c.Path == resolvedOrSelf(repoCache):
+			sawCache++
+		case c.Type == "output_base" && c.Path == resolvedOrSelf(outputBase):
+			sawOutputBase++
+		}
+	}
+	if sawCache != 1 || sawOutputBase != 1 {
+		t.Fatalf("candidates = %#v, want the linked cache and output base once each", candidates)
+	}
+	measures := measureBazelRepoCacheCandidates(context.Background(), candidates, time.Now())
+	if len(measures) != 1 || len(measures[0].Keys) != 1 {
+		t.Fatalf("measures = %#v, want the linked cache measured", measures)
+	}
+	refs := collectBazelRepoContentsRefs(bazelRepoContentsOutputBases(nil, []string{home}))
+	if _, ok := refs.referencedBy(copyDir); !ok {
+		t.Fatal("shallow output-base scan did not follow the top-level _bazel_* link")
+	}
+}
+
+func TestDiscoverCandidatesAddsDefaultOutputRootRepositoryCache(t *testing.T) {
+	home := t.TempDir()
+	_, repoCache, _, outputBase := singleCopyCache(t, true)
+	userRoot := filepath.Dir(filepath.Dir(filepath.Dir(repoCache)))
+	mustMkdir(t, filepath.Join(home, ".cache", "bazel"))
+	if err := os.Symlink(userRoot, filepath.Join(home, ".cache", "bazel", "_bazel_jess")); err != nil {
+		t.Fatal(err)
+	}
+	// bazel.roots lists an unrelated tree, as sting's config does.
+	other := t.TempDir()
+	candidates := NewBazelPlugin().discoverCandidates(home, config.BazelConfig{Roots: []string{other}}, bazelProcessInfo{})
+	var caches, bases int
+	for _, c := range candidates {
+		if c.Type == "repository_cache" && c.Path == resolvedOrSelf(repoCache) {
+			caches++
+		}
+		if bazelCandidateIsOutputBaseLike(c.Type) {
+			bases++
+		}
+	}
+	if caches != 1 || bases != 0 {
+		t.Fatalf("candidates = %#v, want the default-root repository cache only", candidates)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Bazel.Roots = []string{other}
+	cfg.Enable.BazelBases = false
+	obs := bazelRepoContentsOutputBases(candidates, bazelRepoContentsRoots(cfg, home))
+	found := false
+	for _, ob := range obs {
+		if resolvedOrSelf(ob) == resolvedOrSelf(outputBase) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("output-base scan %v missed %s behind the default-root link", obs, outputBase)
 	}
 }

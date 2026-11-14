@@ -423,11 +423,14 @@ func bazelRepoContentsOutputBases(candidates []bazelCandidate, roots []string) [
 			continue
 		}
 		for _, c := range children {
-			if !c.IsDir() {
-				continue
-			}
 			child := filepath.Join(root, c.Name())
-			if hasExternal(child) {
+			if !c.IsDir() {
+				target, ok := bazelOutputUserRootLinkTarget(root, c)
+				if !ok {
+					continue
+				}
+				child = target
+			} else if hasExternal(child) {
 				add(child)
 			}
 			if !strings.HasPrefix(c.Name(), "_bazel_") {
@@ -452,6 +455,9 @@ func bazelRepoContentsOutputBases(candidates []bazelCandidate, roots []string) [
 func bazelRepoContentsRoots(cfg *config.Config, home string) []string {
 	name := os.Getenv("USER")
 	var roots []string
+	if d := bazelDefaultOutputRoot(home); d != "" {
+		roots = append(roots, d)
+	}
 	for _, r := range cfg.Bazel.Roots {
 		roots = append(roots, expandHome(r, home))
 	}
@@ -550,14 +556,13 @@ func (p *BazelPlugin) scanActivity(ctx context.Context, opts bbActivityOptions) 
 
 // planBazelRepoContents returns one target per contents key with more than
 // one copy, and the plan metadata.
-func (p *BazelPlugin) planBazelRepoContents(ctx context.Context, cfg *config.Config, level CleanupLevel, measures []bazelRepoCacheMeasure, outputBases []string, now time.Time) ([]CleanupTarget, map[string]string) {
+func (p *BazelPlugin) planBazelRepoContents(ctx context.Context, cfg *config.Config, level CleanupLevel, measures []bazelRepoCacheMeasure, refs *bazelRepoContentsRefs, now time.Time) ([]CleanupTarget, map[string]string) {
 	pol := bazelRepoContentsPolicyFor(cfg.Bazel)
 	meta := map[string]string{
 		"repo_contents_dedupe":      strconv.FormatBool(pol.enabled),
 		"repo_contents_min_age":     pol.minAge.String(),
 		"repo_contents_keep_recent": strconv.Itoa(pol.keep),
 	}
-	refs := collectBazelRepoContentsRefs(outputBases)
 	meta["repo_contents_output_bases_scanned"] = strconv.Itoa(refs.outputBases)
 	meta["repo_contents_external_links"] = strconv.Itoa(refs.links)
 
@@ -768,4 +773,51 @@ func (p *BazelPlugin) applyBazelRepoContents(ctx context.Context, cfg *config.Co
 		result.EstimatedBytesFreed += freed
 		result.ItemsCleaned += removed
 	}
+}
+
+// guardBazelRepositoryCacheTiers withholds the over-budget whole-tier deletion
+// of a repository cache that holds a copy an output base references, that
+// holds duplicate copies of a key, or whose activity is not proven absent
+// (the external/ scan or the Bazel process inspection is incomplete). The
+// repo contents dedupe class reclaims such a cache instead (TIN-5770).
+func guardBazelRepositoryCacheTiers(targets []CleanupTarget, measures []bazelRepoCacheMeasure, refs *bazelRepoContentsRefs, activeErr error) []CleanupTarget {
+	byRoot := map[string]bazelRepoCacheMeasure{}
+	for _, m := range measures {
+		byRoot[filepath.Clean(m.Root)] = m
+	}
+	for i := range targets {
+		t := &targets[i]
+		if t.Type != "repository_cache" || t.Action != "delete_cache_tier" {
+			continue
+		}
+		m := byRoot[filepath.Clean(t.Path)]
+		var referenced, duplicateKeys int
+		for _, k := range m.Keys {
+			if len(k.Copies) > 1 {
+				duplicateKeys++
+			}
+			for _, cp := range k.Copies {
+				if _, ok := refs.referencedBy(cp.Dir); ok {
+					referenced++
+				}
+			}
+		}
+		var why string
+		switch {
+		case referenced > 0:
+			why = fmt.Sprintf("%d copies are referenced by output bases", referenced)
+		case duplicateKeys > 0:
+			why = fmt.Sprintf("%d keys hold duplicate copies", duplicateKeys)
+		case len(refs.incomplete) > 0:
+			why = "the output-base external/ scan is incomplete"
+		case activeErr != nil:
+			why = "Bazel process inspection failed"
+		default:
+			continue
+		}
+		t.Action, t.Protected = "keep", true
+		t.Reason = "whole repository cache deletion withheld because " + why + "; the repo contents dedupe class reclaims it instead"
+		annotateCleanupTargetPolicy(t, CleanupTierWarm, hostReclaimForAction(t.Action))
+	}
+	return targets
 }

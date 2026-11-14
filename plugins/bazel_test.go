@@ -210,6 +210,8 @@ func TestRefineBazelOutputBaseCandidatesUsesRecursiveAllocation(t *testing.T) {
 }
 
 func TestBazelPlanRefinesProtectedOutputBaseBytes(t *testing.T) {
+	// Keep the plan off the real ~/.cache/bazel, which it always checks.
+	t.Setenv("HOME", t.TempDir())
 	outputUserRoot := filepath.Join(t.TempDir(), "_bazel_jess")
 	outputBase := filepath.Join(outputUserRoot, "recent")
 	makeBazelOutputBase(t, outputBase)

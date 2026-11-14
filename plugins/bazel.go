@@ -179,7 +179,9 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 	state.repoCaches = measureBazelRepoCacheCandidates(ctx, candidates, now)
 	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, now, globalActive)
 	state.outputBases = bazelRepoContentsOutputBases(candidates, bazelRepoContentsRoots(cfg, home))
-	repoTargets, repoMeta := p.planBazelRepoContents(ctx, cfg, level, state.repoCaches, state.outputBases, now)
+	refs := collectBazelRepoContentsRefs(state.outputBases)
+	targets = guardBazelRepositoryCacheTiers(targets, state.repoCaches, refs, activeErr)
+	repoTargets, repoMeta := p.planBazelRepoContents(ctx, cfg, level, state.repoCaches, refs, now)
 	targets = append(targets, repoTargets...)
 	for k, v := range repoMeta {
 		plan.Metadata[k] = v
@@ -209,6 +211,7 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		plan.Warnings = append(plan.Warnings, "detected Bazel cache footprint exceeds configured review budget")
 	}
 	plan.Warnings = append(plan.Warnings, "Bazel cleanup deletes rebuildable cache tiers only when the total footprint exceeds the configured budget; output-base deletion remains limited to stale inactive candidates using process inspection when available and candidate-local activity evidence otherwise")
+	plan.Warnings = append(plan.Warnings, "repository contents copies referenced only by output bases outside the scanned set (discovered output bases plus a shallow scan of bazel.roots and bazel_bases.roots) are guarded only by repo_contents_keep_recent and repo_contents_min_age")
 	plan.Warnings = append(plan.Warnings, "Bazel output-base and repository-cache byte counts use a bounded recursive allocation estimate; other cache tier counts use bounded top-level allocation estimates")
 
 	return plan, state, activeErr
@@ -281,6 +284,12 @@ func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, ac
 		for _, candidate := range discoverBazelRootCandidates(expanded) {
 			add(candidate)
 		}
+	}
+
+	// Bazel's default output root is always checked for repository caches,
+	// whatever bazel.roots lists (TIN-5770: sting's roots miss it).
+	for _, candidate := range discoverBazelDefaultRepositoryCaches(home) {
+		add(candidate)
 	}
 
 	processOutputBaseKinds := bazelProcessOutputBaseKinds(activeInfo)
@@ -405,6 +414,9 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			if target, ok := bazelOutputUserRootLinkTarget(root, entry); ok {
+				candidates = append(candidates, discoverBazelOutputUserRootCandidates(target)...)
+			}
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
@@ -435,6 +447,73 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 		}
 	}
 
+	return candidates
+}
+
+// bazelOutputUserRootLinkTarget resolves a top-level _bazel_* symlink in a
+// root by one hop (sting links ~/.cache/bazel/_bazel_jess to its fast-local
+// output user root). The target must be a real directory, not another
+// symlink, so discovery never follows a chain.
+func bazelOutputUserRootLinkTarget(root string, entry os.DirEntry) (string, bool) {
+	if entry.Type()&os.ModeSymlink == 0 || !strings.HasPrefix(entry.Name(), "_bazel_") {
+		return "", false
+	}
+	link := filepath.Join(root, entry.Name())
+	target, err := os.Readlink(link)
+	if err != nil || target == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(root, target)
+	}
+	target = filepath.Clean(target)
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return target, true
+}
+
+// bazelDefaultOutputRoot is Bazel's default output root on Linux and the
+// place a user-level _bazel_* link lives.
+func bazelDefaultOutputRoot(home string) string {
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "bazel")
+}
+
+// discoverBazelDefaultRepositoryCaches returns the repository cache of each
+// _bazel_* output user root in ~/.cache/bazel, a directory or a one-hop
+// link. Only the repository cache is added: output bases there stay outside
+// output-base deletion unless bazel.roots lists them.
+func discoverBazelDefaultRepositoryCaches(home string) []bazelCandidate {
+	root := bazelDefaultOutputRoot(home)
+	if root == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var candidates []bazelCandidate
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "_bazel_") {
+			continue
+		}
+		userRoot := filepath.Join(root, entry.Name())
+		if !entry.IsDir() {
+			target, ok := bazelOutputUserRootLinkTarget(root, entry)
+			if !ok {
+				continue
+			}
+			userRoot = target
+		}
+		repoCache := filepath.Join(userRoot, "cache", "repos", "v1")
+		if info, err := os.Lstat(repoCache); err == nil && info.IsDir() {
+			candidates = append(candidates, newBazelCandidate("repository_cache", filepath.Join("cache", "repos", "v1"), repoCache, staleModTime(info)))
+		}
+	}
 	return candidates
 }
 
