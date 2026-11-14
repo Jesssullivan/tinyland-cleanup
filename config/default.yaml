@@ -70,6 +70,12 @@ policy:
   zero_yield_backoff_max: 6h
   zero_yield_pressure_min_interval: 1h
   zero_yield_exempt_plugins: []
+  # Stall alert (TIN-5770). A monitored mount that stays at the critical level
+  # for stalled_alert_cycles consecutive cycles while every plugin together
+  # reclaims less than byte_progress_min_mb gets a warning log line and a
+  # stalled_mounts entry in the cycle report, repeated every
+  # stalled_alert_cycles cycles. Zero uses the default (6); negative disables.
+  stalled_alert_cycles: 6
   # Deadlines (0.4.3). A plugin run is cancelled at plugin_timeout and, if it
   # still does not return, left behind so the cycle continues; it is skipped
   # with skip_reason plugin_wedged until that run returns. A command that sets
@@ -386,6 +392,16 @@ bazel:
   # named disk_cache). "~" and "{user}" are expanded.
   disk_cache_paths: []
   disk_cache_max_entries: 2000000
+  # Repository contents cache dedupe (TIN-5770). Bazel can leave many UUID
+  # copies of one repository under <repository_cache>/contents/<key>/. A copy
+  # that any output base's external/ symlink resolves to is always kept, so
+  # this runs while a Bazel server is up. The newest repo_contents_keep_recent
+  # unreferenced copies per key and every copy used within
+  # repo_contents_min_age (floor 1h) are kept too. Removal runs at moderate or
+  # higher levels; warning reports only.
+  repo_contents_dedupe: true
+  repo_contents_min_age: 24h
+  repo_contents_keep_recent: 3
 
 # Age retention (TIN-7495, TIN-3082). Enable with enable.retention. Every
 # deleting rule reports only until its own delete flag is true.
