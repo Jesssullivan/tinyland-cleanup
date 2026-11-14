@@ -61,6 +61,12 @@ const (
 	// bazelRepoContentsProbeTimeout bounds the apply-time size walk of a
 	// copy the plan did not measure.
 	bazelRepoContentsProbeTimeout = 10 * time.Second
+	// bazelRepoContentsLockBatch and bazelRepoContentsLockSpan bound one
+	// hold of the exclusive gc_lock: every Bazel command takes it shared at
+	// startup, so the dedupe renames at most this many copies, or for at
+	// most this long, before it releases the lock and removes them.
+	bazelRepoContentsLockBatch = 8
+	bazelRepoContentsLockSpan  = 2 * time.Second
 )
 
 // bazelRepoContentsCopy is one <uuid>/ copy of a contents key.
@@ -762,9 +768,9 @@ func bazelRepoContentsCopyPathAllowed(dir string) bool {
 	return bazelCacheTierPathAllowed("repository_cache", filepath.Dir(contents))
 }
 
-// deleteBazelRepoContentsCopy removes <uuid>.recorded_inputs first, so Bazel
-// never sees a recorded entry without its tree, then the <uuid>/ tree.
-func deleteBazelRepoContentsCopy(dir string, logger *slog.Logger) error {
+// checkBazelRepoContentsCopy checks that dir is a real <uuid>/ directory of
+// a contents key, never a symlink.
+func checkBazelRepoContentsCopy(dir string) error {
 	if !bazelRepoContentsCopyPathAllowed(dir) {
 		return fmt.Errorf("refusing to delete unsafe Bazel repo contents path: %s", dir)
 	}
@@ -775,21 +781,153 @@ func deleteBazelRepoContentsCopy(dir string, logger *slog.Logger) error {
 	if !info.IsDir() {
 		return fmt.Errorf("refusing to delete non-directory Bazel repo contents copy: %s", dir)
 	}
+	return nil
+}
+
+// removeBazelRepoContentsRecorded removes <uuid>.recorded_inputs, so Bazel
+// never sees a recorded entry without its tree.
+func removeBazelRepoContentsRecorded(dir string) error {
 	rec := dir + bazelRepoContentsRecorded
 	if ri, err := os.Lstat(rec); err == nil {
 		if !ri.Mode().IsRegular() {
 			return fmt.Errorf("refusing to delete non-regular %s", rec)
 		}
-		if err := os.Remove(rec); err != nil {
-			return err
-		}
+		return os.Remove(rec)
 	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// deleteBazelRepoContentsCopy removes <uuid>.recorded_inputs first, then the
+// <uuid>/ tree, in place. Apply uses trashBazelRepoContentsCopy instead so
+// the gc_lock is held only for a rename.
+func deleteBazelRepoContentsCopy(dir string, logger *slog.Logger) error {
+	if err := checkBazelRepoContentsCopy(dir); err != nil {
+		return err
+	}
+	if err := removeBazelRepoContentsRecorded(dir); err != nil {
 		return err
 	}
 	if err := normalizeBazelDeletionPermissions(dir, logger); err != nil {
 		return err
 	}
 	return os.RemoveAll(dir)
+}
+
+// bazelRepoContentsTrashDir is Bazel's own garbage directory in contents/.
+func bazelRepoContentsTrashDir(contentsDir string) string {
+	return filepath.Join(contentsDir, "_trash")
+}
+
+// trashBazelRepoContentsCopy removes the copy's .recorded_inputs and renames
+// <uuid>/ to contents/_trash/<uuid>, as Bazel's own GC does. The caller holds
+// the gc_lock. The rename stays inside contents/, one file system, so it is
+// atomic. An existing trash entry of the same name leaves the copy in place
+// for a later cycle.
+func trashBazelRepoContentsCopy(dir string) (string, error) {
+	if err := checkBazelRepoContentsCopy(dir); err != nil {
+		return "", err
+	}
+	trash := bazelRepoContentsTrashDir(filepath.Dir(filepath.Dir(dir)))
+	if err := os.Mkdir(trash, 0o755); err != nil && !os.IsExist(err) {
+		return "", err
+	}
+	if info, err := os.Lstat(trash); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("repo contents trash %s is not a directory", trash)
+	}
+	dest := filepath.Join(trash, filepath.Base(dir))
+	if _, err := os.Lstat(dest); err == nil {
+		return "", fmt.Errorf("trash entry %s already exists", dest)
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := removeBazelRepoContentsRecorded(dir); err != nil {
+		return "", err
+	}
+	if err := os.Rename(dir, dest); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
+// removeBazelRepoContentsTrash removes one contents/_trash/<uuid> directory
+// outside the gc_lock. It refuses a symlink or a name that is not a UUID.
+func removeBazelRepoContentsTrash(path string, logger *slog.Logger) error {
+	path = filepath.Clean(path)
+	if !bazelRepoContentsUUID.MatchString(filepath.Base(path)) || filepath.Base(filepath.Dir(path)) != "_trash" ||
+		!bazelCacheTierPathAllowed("repository_cache", filepath.Dir(filepath.Dir(filepath.Dir(path)))) {
+		return fmt.Errorf("refusing to remove unsafe Bazel repo contents trash path: %s", path)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("refusing to remove non-directory trash entry %s", path)
+	}
+	if err := normalizeBazelDeletionPermissions(path, logger); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.RemoveAll(path)
+}
+
+// sweepBazelRepoContentsTrash removes leftover contents/_trash/<uuid>
+// directories: copies an earlier cycle renamed but did not finish removing,
+// or Bazel's own GC garbage, which Bazel treats as removable. It runs without
+// the gc_lock, as Bazel's GC does for its own trash.
+func (p *BazelPlugin) sweepBazelRepoContentsTrash(ctx context.Context, contentsDir string, logger *slog.Logger) (int64, int) {
+	entries, err := os.ReadDir(bazelRepoContentsTrashDir(contentsDir))
+	if err != nil {
+		return 0, 0
+	}
+	uid := os.Geteuid()
+	var freed int64
+	removed := 0
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			break
+		}
+		if !e.IsDir() || !bazelRepoContentsUUID.MatchString(e.Name()) {
+			continue
+		}
+		path := filepath.Join(bazelRepoContentsTrashDir(contentsDir), e.Name())
+		if info, err := os.Lstat(path); err != nil {
+			continue
+		} else if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != uid {
+			continue
+		}
+		bytes, err := p.removeTrashEntry(ctx, path, logger)
+		if err != nil {
+			logger.Warn("failed to remove Bazel repo contents trash", "path", path, "error", err)
+			continue
+		}
+		freed += bytes
+		removed++
+	}
+	if removed > 0 {
+		logger.Info("removed leftover Bazel repo contents trash", "contents", contentsDir, "entries", removed, "estimated_bytes", freed)
+	}
+	return freed, removed
+}
+
+// removeTrashEntry measures (bounded) and removes one trash entry.
+func (p *BazelPlugin) removeTrashEntry(ctx context.Context, path string, logger *slog.Logger) (int64, error) {
+	if p.trashHook != nil {
+		if err := p.trashHook("remove", path); err != nil {
+			return 0, err
+		}
+	}
+	pctx, cancel := context.WithTimeout(ctx, bazelRepoContentsProbeTimeout)
+	_, bytes, _ := bazelAllocatedTree(pctx, path, map[[2]uint64]bool{})
+	cancel()
+	if err := removeBazelRepoContentsTrash(path, logger); err != nil {
+		return 0, err
+	}
+	return bytes, nil
 }
 
 // applyBazelRepoContents removes the unreferenced copies of every key marked
@@ -803,10 +941,21 @@ func (p *BazelPlugin) applyBazelRepoContents(ctx context.Context, cfg *config.Co
 			due = append(due, t)
 		}
 	}
+	pol := bazelRepoContentsPolicyFor(cfg.Bazel)
+	if pol.enabled {
+		for _, m := range measures {
+			if m.ContentsDir == "" {
+				continue
+			}
+			freed, removed := p.sweepBazelRepoContentsTrash(ctx, m.ContentsDir, logger)
+			result.BytesFreed += freed
+			result.EstimatedBytesFreed += freed
+			result.ItemsCleaned += removed
+		}
+	}
 	if len(due) == 0 {
 		return
 	}
-	pol := bazelRepoContentsPolicyFor(cfg.Bazel)
 	planned := map[string]int64{}
 	var contentsDirs []string
 	for _, m := range measures {
@@ -854,19 +1003,18 @@ func (p *BazelPlugin) applyBazelRepoContents(ctx context.Context, cfg *config.Co
 	}
 }
 
-// applyBazelRepoContentsKey removes one key's unreferenced copies while it
-// holds Bazel's contents/gc_lock exclusively, so no Bazel command can use or
-// add a copy of the cache during the pass. A busy lock skips the key. Just
-// before each deletion it re-reads every external/ link and the copy's last
-// use, so a copy that became referenced or used since planning stays.
+// applyBazelRepoContentsKey removes one key's unreferenced copies the way
+// Bazel's own GC does. Under a short exclusive hold of contents/gc_lock it
+// re-checks a bounded batch of copies (bazelRepoContentsLockBatch or
+// bazelRepoContentsLockSpan, whichever comes first), removes each one's
+// .recorded_inputs and renames it into contents/_trash/. It then releases the
+// lock and removes the trashed trees outside it, so a Bazel command waits at
+// most for one batch of renames, never for a tree removal. A busy lock stops
+// the key. The re-check reads every external/ link and the copy's last use,
+// so a copy that became referenced or used since planning stays. A crash
+// after a rename leaves a _trash/<uuid> that the next cycle's sweep removes.
 func (p *BazelPlugin) applyBazelRepoContentsKey(ctx context.Context, keyDir string, refs *bazelRepoContentsRefs, activity *bbActivity, pol bazelRepoContentsPolicy, planned map[string]int64, outputBases []string, logger *slog.Logger) (freed int64, removed, kept int, err error) {
 	contentsDir := filepath.Dir(keyDir)
-	release, err := bazelGCLockTry(filepath.Join(contentsDir, bazelRepoContentsGCLock), true)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	defer release()
-
 	now := time.Now()
 	var key *bazelRepoContentsKey
 	for _, k := range listBazelRepoContents(contentsDir, now) {
@@ -881,13 +1029,59 @@ func (p *BazelPlugin) applyBazelRepoContentsKey(ctx context.Context, keyDir stri
 	}
 	remove := decideBazelRepoContentsKey(key, refs, activity, pol, now)
 	kept = len(key.Copies)
-	for _, cp := range remove {
+	for len(remove) > 0 {
 		if err := ctx.Err(); err != nil {
 			return freed, removed, kept, err
 		}
+		trashed, rest, err := p.trashBazelRepoContentsBatch(contentsDir, remove, pol, outputBases, logger)
+		remove = rest
+		for _, t := range trashed {
+			bytes, rerr := p.removeTrashEntry(ctx, t.trash, logger)
+			if rerr != nil {
+				logger.Warn("trashed Bazel repo contents copy not removed; the next cycle sweeps it", "path", t.trash, "error", rerr)
+				continue
+			}
+			if b, ok := planned[t.copyDir]; ok {
+				bytes = b
+			}
+			logger.Debug("deleted unreferenced Bazel repo contents copy", "path", t.copyDir, "estimated_bytes", bytes)
+			freed += bytes
+			removed++
+			kept--
+		}
+		if err != nil {
+			return freed, removed, kept, err
+		}
+	}
+	return freed, removed, kept, nil
+}
+
+type bazelTrashedCopy struct{ copyDir, trash string }
+
+// trashBazelRepoContentsBatch holds the gc_lock for one bounded batch. It
+// returns the copies it renamed into _trash/ and the copies left to do.
+//
+// The gc_lock is held through a POSIX record lock as well as flock(2). A
+// POSIX lock is dropped as soon as this process closes any descriptor for
+// the gc_lock file, so nothing in this process may open that file while the
+// lock is held.
+func (p *BazelPlugin) trashBazelRepoContentsBatch(contentsDir string, copies []bazelRepoContentsCopy, pol bazelRepoContentsPolicy, outputBases []string, logger *slog.Logger) ([]bazelTrashedCopy, []bazelRepoContentsCopy, error) {
+	release, err := bazelGCLockTry(filepath.Join(contentsDir, bazelRepoContentsGCLock), true)
+	if err != nil {
+		return nil, copies, err
+	}
+	defer release()
+	start := time.Now()
+	var trashed []bazelTrashedCopy
+	i := 0
+	for ; i < len(copies); i++ {
+		if len(trashed) >= bazelRepoContentsLockBatch || time.Since(start) >= bazelRepoContentsLockSpan {
+			break
+		}
+		cp := copies[i]
 		fresh := collectBazelRepoContentsRefs(outputBases)
 		if len(fresh.incomplete) > 0 {
-			return freed, removed, kept, fmt.Errorf("output-base external/ scan incomplete: %s", fresh.incomplete[0])
+			return trashed, nil, fmt.Errorf("output-base external/ scan incomplete: %s", fresh.incomplete[0])
 		}
 		if why, ok := fresh.referencedBy(cp.Dir); ok {
 			logger.Info("keeping Bazel repo contents copy referenced since planning", "path", cp.Dir, "link", why)
@@ -902,22 +1096,17 @@ func (p *BazelPlugin) applyBazelRepoContentsKey(ctx context.Context, keyDir stri
 			logger.Info("keeping Bazel repo contents copy used since planning", "path", cp.Dir, "last_use", last.UTC().Format(time.RFC3339))
 			continue
 		}
-		bytes, ok := planned[cp.Dir]
-		if !ok {
-			pctx, cancel := context.WithTimeout(ctx, bazelRepoContentsProbeTimeout)
-			_, bytes, _ = bazelAllocatedTree(pctx, cp.Dir, map[[2]uint64]bool{})
-			cancel()
-		}
-		if err := deleteBazelRepoContentsCopy(cp.Dir, logger); err != nil {
-			logger.Warn("failed to delete Bazel repo contents copy", "path", cp.Dir, "error", err)
+		dest, err := trashBazelRepoContentsCopy(cp.Dir)
+		if err != nil {
+			logger.Warn("failed to trash Bazel repo contents copy", "path", cp.Dir, "error", err)
 			continue
 		}
-		logger.Debug("deleted unreferenced Bazel repo contents copy", "path", cp.Dir, "estimated_bytes", bytes)
-		freed += bytes
-		removed++
-		kept--
+		if p.trashHook != nil {
+			_ = p.trashHook("trashed", dest)
+		}
+		trashed = append(trashed, bazelTrashedCopy{copyDir: cp.Dir, trash: dest})
 	}
-	return freed, removed, kept, nil
+	return trashed, copies[i:], nil
 }
 
 // guardBazelRepositoryCacheTiers withholds the over-budget whole-tier deletion

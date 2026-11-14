@@ -145,8 +145,13 @@ is 72h.
 Bazel commands hold `contents/gc_lock` shared, and Bazel's own GC takes it
 exclusively with a non-blocking try. The dedupe takes it the same way, as a
 flock(2) lock and a POSIX record lock, once per key. A busy lock skips the
-key and the plan reports `bazel active (gc_lock)`. Under the lock, each copy's
-links and last use are re-read just before its removal. Bazel's `_trash/`
+key and the plan reports `bazel active (gc_lock)`. As in Bazel's own GC, the
+lock is held only for a bounded batch of renames: at most 8 copies or 2
+seconds. Under it, each copy's links and last use are re-read, its
+`.recorded_inputs` is removed and the copy is renamed into
+`contents/_trash/<uuid>`. The trees are removed after the lock is released.
+Every apply first sweeps leftover `_trash/<uuid>` directories, so a crash
+between the rename and the removal is finished on the next cycle. Bazel's `_trash/`
 and any other non-key entry of `contents/` are measured, never deduplicated.
 An unreadable `contents/` or key directory withholds the whole-tier rule.
 

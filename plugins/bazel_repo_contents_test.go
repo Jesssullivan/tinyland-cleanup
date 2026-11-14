@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -565,5 +566,156 @@ func TestBazelRepoContentsDefaultMinAgeIs72h(t *testing.T) {
 	}
 	if got := bazelRepoContentsPolicyFor(config.BazelConfig{}).minAge; got != 72*time.Hour {
 		t.Fatalf("unset min age = %s, want 72h", got)
+	}
+}
+
+// gcLockFree reports whether another open file description can take the
+// gc_lock shared right now, as a starting Bazel command would.
+func gcLockFree(t *testing.T, contentsDir string) bool {
+	t.Helper()
+	f, err := os.OpenFile(filepath.Join(contentsDir, bazelRepoContentsGCLock), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		return false
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return true
+}
+
+func TestBazelRepoContentsHoldsGCLockOnlyForRenames(t *testing.T) {
+	f := newRepoContentsFixture(t)
+	cfg := repoContentsTestConfig(f.root, 1)
+	var renamedLocked, removedFree, renames, removes int
+	p := &BazelPlugin{activityScan: repoContentsActivity()}
+	p.trashHook = func(phase, path string) error {
+		switch phase {
+		case "trashed":
+			renames++
+			if filepath.Base(filepath.Dir(path)) != "_trash" {
+				t.Errorf("trashed path %s is not in _trash/", path)
+			}
+			if !gcLockFree(t, f.contentsDir) {
+				renamedLocked++
+			}
+		case "remove":
+			removes++
+			if gcLockFree(t, f.contentsDir) {
+				removedFree++
+			}
+		}
+		return nil
+	}
+	targets, _, state := planRepoContentsFixture(t, p, f, cfg, LevelCritical)
+	var r CleanupResult
+	p.applyBazelRepoContents(context.Background(), cfg, targets, state.repoCaches, state.outputBases, slog.New(slog.NewTextHandler(io.Discard, nil)), &r)
+	// keep 1: new1 kept as newest, new2 and recent kept as recent; old1, old2
+	// and held (no activity injected) go.
+	if renames != 3 || removes != 3 || r.ItemsCleaned != 3 {
+		t.Fatalf("renames=%d removes=%d items=%d, want 3 each", renames, removes, r.ItemsCleaned)
+	}
+	if renamedLocked != renames {
+		t.Fatalf("gc_lock was free during %d of %d renames", renames-renamedLocked, renames)
+	}
+	if removedFree != removes {
+		t.Fatalf("gc_lock was held during %d of %d tree removals", removes-removedFree, removes)
+	}
+	entries, _ := os.ReadDir(bazelRepoContentsTrashDir(f.contentsDir))
+	if len(entries) != 0 {
+		t.Fatalf("_trash/ keeps %d entries after apply", len(entries))
+	}
+}
+
+func TestBazelRepoContentsRecoversTrashAfterCrash(t *testing.T) {
+	f := newRepoContentsFixture(t)
+	cfg := repoContentsTestConfig(f.root, 1)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p := &BazelPlugin{activityScan: repoContentsActivity()}
+	// Crash between the rename and the tree removal.
+	p.trashHook = func(phase, path string) error {
+		if phase == "remove" {
+			return os.ErrDeadlineExceeded
+		}
+		return nil
+	}
+	targets, _, state := planRepoContentsFixture(t, p, f, cfg, LevelCritical)
+	var crashed CleanupResult
+	p.applyBazelRepoContents(context.Background(), cfg, targets, state.repoCaches, state.outputBases, logger, &crashed)
+	trash := bazelRepoContentsTrashDir(f.contentsDir)
+	left, _ := os.ReadDir(trash)
+	if crashed.ItemsCleaned != 0 || len(left) != 3 {
+		t.Fatalf("crashed run cleaned %d and left %d trash entries, want 0 and 3", crashed.ItemsCleaned, len(left))
+	}
+	for _, label := range []string{"old1", "old2", "held"} {
+		if _, err := os.Lstat(f.copies[label]); !os.IsNotExist(err) {
+			t.Fatalf("copy %s still in its key after the rename: %v", label, err)
+		}
+		if _, err := os.Lstat(f.copies[label] + bazelRepoContentsRecorded); !os.IsNotExist(err) {
+			t.Fatalf("recorded_inputs of trashed %s survived: %v", label, err)
+		}
+	}
+	// A symlink in _trash/ pointing outside is never followed.
+	outside := filepath.Join(t.TempDir(), "victim")
+	mustMkdir(t, outside)
+	if err := os.Symlink(outside, filepath.Join(trash, "00000000-0000-4000-8000-0000000000ff")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The next cycle, with nothing left to plan, sweeps the leftovers.
+	p.trashHook = nil
+	targets, _, state = planRepoContentsFixture(t, p, f, cfg, LevelCritical)
+	var next CleanupResult
+	p.applyBazelRepoContents(context.Background(), cfg, targets, state.repoCaches, state.outputBases, logger, &next)
+	if next.ItemsCleaned != 3 || next.BytesFreed < 3*256*1024 {
+		t.Fatalf("recovery cleaned %d items and %d bytes, want 3 copies", next.ItemsCleaned, next.BytesFreed)
+	}
+	left, _ = os.ReadDir(trash)
+	if len(left) != 1 || left[0].Type()&os.ModeSymlink == 0 {
+		t.Fatalf("_trash/ after recovery = %v, want only the untouched symlink", left)
+	}
+	if !pathExistsAndIsDir(outside) {
+		t.Fatal("sweep followed a symlink out of _trash/")
+	}
+}
+
+func TestBazelRepoContentsBoundsEachLockHoldToABatch(t *testing.T) {
+	f := newRepoContentsFixture(t)
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	for i := 0; i < 12; i++ {
+		dir := filepath.Join(f.keyDir, fmt.Sprintf("00000000-0000-4000-9000-0000000001%02x", i))
+		mustMkdir(t, filepath.Join(dir, "lib"))
+		for _, p := range []string{filepath.Join(dir, "lib"), dir} {
+			if err := os.Chtimes(p, old, old); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cfg := repoContentsTestConfig(f.root, 1)
+	var run, maxRun, batches int
+	p := &BazelPlugin{activityScan: repoContentsActivity()}
+	p.trashHook = func(phase, _ string) error {
+		if phase == "trashed" {
+			if run == 0 {
+				batches++
+			}
+			run++
+			if run > maxRun {
+				maxRun = run
+			}
+		} else {
+			run = 0
+		}
+		return nil
+	}
+	targets, _, state := planRepoContentsFixture(t, p, f, cfg, LevelCritical)
+	var r CleanupResult
+	p.applyBazelRepoContents(context.Background(), cfg, targets, state.repoCaches, state.outputBases, slog.New(slog.NewTextHandler(io.Discard, nil)), &r)
+	if r.ItemsCleaned != 15 {
+		t.Fatalf("removed %d copies, want 15", r.ItemsCleaned)
+	}
+	if maxRun > bazelRepoContentsLockBatch || batches < 2 {
+		t.Fatalf("largest lock hold renamed %d copies over %d batches, want at most %d per hold", maxRun, batches, bazelRepoContentsLockBatch)
 	}
 }

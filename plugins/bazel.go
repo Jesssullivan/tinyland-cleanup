@@ -32,6 +32,11 @@ type BazelPlugin struct {
 	// activityScan is a test seam for the repo contents dedupe's open-file
 	// inventory; nil means bbScanActivity.
 	activityScan func(ctx context.Context, opts bbActivityOptions) *bbActivity
+	// trashHook is a test seam called with "trashed" right after a copy is
+	// renamed into contents/_trash/ (gc_lock held) and with "remove" before
+	// a trash entry is removed (gc_lock released). A non-nil error from the
+	// "remove" call stops the removal, as a crash would.
+	trashHook func(phase, path string) error
 }
 
 // bazelPlanState is what one plan found that applying it needs again.

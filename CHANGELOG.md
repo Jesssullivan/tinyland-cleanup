@@ -15,8 +15,9 @@ All notable changes to this project will be documented in this file.
   Bazel server runs. It keeps every copy an output base's `external/` symlink
   resolves to, the newest `bazel.repo_contents_keep_recent` (3) unreferenced
   copies, copies used within `bazel.repo_contents_min_age` (72h) and copies a
-  process holds. It takes Bazel's `contents/gc_lock` exclusively per key and
-  skips the key while a Bazel command holds it. A mount that stays critical for `policy.stalled_alert_cycles`
+  process holds. It takes Bazel's `contents/gc_lock` exclusively only to rename
+  a batch of at most 8 copies into `contents/_trash/`, removes them after
+  releasing it, and skips while a Bazel command holds the lock. A mount that stays critical for `policy.stalled_alert_cycles`
   (6) cycles while every plugin reclaims nothing gets a warning and a
   `stalled_mounts` report entry.
   The over-budget whole-tier rule no longer deletes a repository cache that

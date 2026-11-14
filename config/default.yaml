@@ -399,8 +399,9 @@ bazel:
   # unreferenced copies per key and every copy used within
   # repo_contents_min_age (floor 1h) are kept too. Those two are the only
   # guard for a copy linked from an output base outside the scanned roots.
-  # Bazel's contents/gc_lock is taken exclusively per key; a busy lock skips. Removal runs at moderate or
-  # higher levels; warning reports only.
+  # Bazel's contents/gc_lock is held only to rename a batch of at most 8
+  # copies into contents/_trash/; a busy lock skips. Removal runs at moderate
+  # or higher levels; warning reports only.
   repo_contents_dedupe: true
   repo_contents_min_age: 72h
   repo_contents_keep_recent: 3
