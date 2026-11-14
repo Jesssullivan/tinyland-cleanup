@@ -719,3 +719,76 @@ func TestBazelRepoContentsBoundsEachLockHoldToABatch(t *testing.T) {
 		t.Fatalf("largest lock hold renamed %d copies over %d batches, want at most %d per hold", maxRun, batches, bazelRepoContentsLockBatch)
 	}
 }
+
+func TestBazelRepoContentsSweepRefusesSymlinkedTrash(t *testing.T) {
+	f := newRepoContentsFixture(t)
+	cfg := repoContentsTestConfig(f.root, 1)
+	cfg.Bazel.RepoContentsMinAge = "1000h" // nothing is due: only the sweep runs
+	// _trash points at the key directory: a sweep through it would remove
+	// every copy, the referenced one included.
+	if err := os.Symlink(f.keyDir, bazelRepoContentsTrashDir(f.contentsDir)); err != nil {
+		t.Fatal(err)
+	}
+	p := &BazelPlugin{activityScan: repoContentsActivity()}
+	targets, _, state := planRepoContentsFixture(t, p, f, cfg, LevelCritical)
+	var r CleanupResult
+	p.applyBazelRepoContents(context.Background(), cfg, targets, state.repoCaches, state.outputBases, slog.New(slog.NewTextHandler(io.Discard, nil)), &r)
+	if r.ItemsCleaned != 0 {
+		t.Fatalf("sweep through a symlinked _trash removed %d entries", r.ItemsCleaned)
+	}
+	for label, dir := range f.copies {
+		if !pathExistsAndIsDir(dir) {
+			t.Fatalf("copy %s removed through a symlinked _trash", label)
+		}
+	}
+	if err := removeBazelRepoContentsTrash(filepath.Join(bazelRepoContentsTrashDir(f.contentsDir), filepath.Base(f.copies["ref"])), slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+		t.Fatal("trash removal accepted a path under a symlinked _trash")
+	}
+	if _, err := trashBazelRepoContentsCopy(f.copies["old1"]); err == nil {
+		t.Fatal("rename into a symlinked _trash was accepted")
+	}
+	if _, err := os.Stat(f.copies["old1"] + bazelRepoContentsRecorded); err != nil {
+		t.Fatalf("refused trash left old1 without recorded_inputs: %v", err)
+	}
+}
+
+func TestBazelRepoContentsTrashesReadOnlyCopyAndKeepsAFailedOneUsable(t *testing.T) {
+	f := newRepoContentsFixture(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, label := range []string{"old1", "old2"} {
+		if err := os.Chmod(f.copies[label], 0o555); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A read-only copy directory is renamed and removed.
+	dest, err := trashBazelRepoContentsCopy(f.copies["old1"])
+	if err != nil {
+		t.Fatalf("trash of a 0555 copy failed: %v", err)
+	}
+	if _, err := os.Lstat(f.copies["old1"] + bazelRepoContentsRecorded); !os.IsNotExist(err) {
+		t.Fatalf("recorded_inputs of the trashed copy survived: %v", err)
+	}
+	if err := removeBazelRepoContentsTrash(dest, logger); err != nil {
+		t.Fatalf("remove trashed 0555 copy: %v", err)
+	}
+
+	// A rename that fails (here the key directory is read-only) leaves the
+	// copy in place with its recorded_inputs and mode intact.
+	if err := os.Chmod(f.keyDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(f.keyDir, 0o755) }()
+	if _, err := trashBazelRepoContentsCopy(f.copies["old2"]); err == nil {
+		t.Fatal("rename out of a read-only key directory succeeded")
+	}
+	info, err := os.Lstat(f.copies["old2"])
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o555 {
+		t.Fatalf("failed rename changed the copy: %v %v", info, err)
+	}
+	if _, err := os.Stat(f.copies["old2"] + bazelRepoContentsRecorded); err != nil {
+		t.Fatalf("failed rename lost recorded_inputs: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.copies["old2"], "python", "lib", "python3.11", "site-packages", "blob.so")); err != nil {
+		t.Fatalf("failed rename left the copy unusable: %v", err)
+	}
+}

@@ -833,8 +833,8 @@ func trashBazelRepoContentsCopy(dir string) (string, error) {
 	if err := os.Mkdir(trash, 0o755); err != nil && !os.IsExist(err) {
 		return "", err
 	}
-	if info, err := os.Lstat(trash); err != nil || !info.IsDir() {
-		return "", fmt.Errorf("repo contents trash %s is not a directory", trash)
+	if err := checkBazelRepoContentsTrashDir(trash); err != nil {
+		return "", err
 	}
 	dest := filepath.Join(trash, filepath.Base(dir))
 	if _, err := os.Lstat(dest); err == nil {
@@ -842,13 +842,48 @@ func trashBazelRepoContentsCopy(dir string) (string, error) {
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	if err := removeBazelRepoContentsRecorded(dir); err != nil {
+	// Moving a directory to another parent rewrites its "..", which needs
+	// write permission on the directory itself; Bazel leaves copies 0555.
+	info, err := os.Lstat(dir)
+	if err != nil {
 		return "", err
 	}
+	mode := info.Mode().Perm()
+	if mode&0o200 == 0 {
+		if err := os.Chmod(dir, mode|0o700); err != nil {
+			return "", err
+		}
+	}
+	// Rename first: a failed rename leaves the copy in place, usable, with
+	// its .recorded_inputs and original mode intact.
 	if err := os.Rename(dir, dest); err != nil {
+		if mode&0o200 == 0 {
+			_ = os.Chmod(dir, mode)
+		}
 		return "", err
+	}
+	// The gc_lock is held, so no Bazel command sees the recorded entry
+	// without its tree before it goes.
+	if err := removeBazelRepoContentsRecorded(dir); err != nil {
+		return dest, fmt.Errorf("copy moved to %s but %s%s remains: %w", dest, dir, bazelRepoContentsRecorded, err)
 	}
 	return dest, nil
+}
+
+// checkBazelRepoContentsTrashDir checks that contents/_trash is a real
+// directory this user owns, never a symlink.
+func checkBazelRepoContentsTrashDir(trash string) error {
+	info, err := os.Lstat(trash)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("repo contents trash %s is not a real directory", trash)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("repo contents trash %s is not owned by this user", trash)
+	}
+	return nil
 }
 
 // removeBazelRepoContentsTrash removes one contents/_trash/<uuid> directory
@@ -858,6 +893,9 @@ func removeBazelRepoContentsTrash(path string, logger *slog.Logger) error {
 	if !bazelRepoContentsUUID.MatchString(filepath.Base(path)) || filepath.Base(filepath.Dir(path)) != "_trash" ||
 		!bazelCacheTierPathAllowed("repository_cache", filepath.Dir(filepath.Dir(filepath.Dir(path)))) {
 		return fmt.Errorf("refusing to remove unsafe Bazel repo contents trash path: %s", path)
+	}
+	if err := checkBazelRepoContentsTrashDir(filepath.Dir(path)); err != nil {
+		return err
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -880,7 +918,15 @@ func removeBazelRepoContentsTrash(path string, logger *slog.Logger) error {
 // or Bazel's own GC garbage, which Bazel treats as removable. It runs without
 // the gc_lock, as Bazel's GC does for its own trash.
 func (p *BazelPlugin) sweepBazelRepoContentsTrash(ctx context.Context, contentsDir string, logger *slog.Logger) (int64, int) {
-	entries, err := os.ReadDir(bazelRepoContentsTrashDir(contentsDir))
+	trash := bazelRepoContentsTrashDir(contentsDir)
+	if _, err := os.Lstat(trash); os.IsNotExist(err) {
+		return 0, 0
+	}
+	if err := checkBazelRepoContentsTrashDir(trash); err != nil {
+		logger.Warn("Bazel repo contents trash sweep skipped", "reason", err.Error())
+		return 0, 0
+	}
+	entries, err := os.ReadDir(trash)
 	if err != nil {
 		return 0, 0
 	}
