@@ -139,17 +139,29 @@ visible.
 
 An output base outside the scanned set is not seen. Its copies are guarded
 only by `repo_contents_keep_recent` and `repo_contents_min_age`, and every
-plan carries a warning that says so.
+plan carries a warning that says so. For that reason the default minimum age
+is 72h.
 
-Discovery follows a top-level `_bazel_*` symlink in a root by one hop, as on
-sting, where `~/.cache/bazel/_bazel_jess` links to the fast-local output user
-root. The target must be a real directory, so a chain of links is never
-followed.
+Bazel commands hold `contents/gc_lock` shared, and Bazel's own GC takes it
+exclusively with a non-blocking try. The dedupe takes it the same way, as a
+flock(2) lock and a POSIX record lock, once per key. A busy lock skips the
+key and the plan reports `bazel active (gc_lock)`. Under the lock, each copy's
+links and last use are re-read just before its removal. Bazel's `_trash/`
+and any other non-key entry of `contents/` are measured, never deduplicated.
+An unreadable `contents/` or key directory withholds the whole-tier rule.
+
+Discovery follows a top-level `_bazel_*` link in a root only to measure and
+deduplicate its repository cache and to read its output bases' links. Output
+bases behind a link never become deletion candidates.
+
+The link is resolved by one hop, as on sting, where `~/.cache/bazel/_bazel_jess`
+links to the fast-local output user root. The target must be a real
+directory, so a chain of links is never followed.
 
 ```yaml
 bazel:
   repo_contents_dedupe: true
-  repo_contents_min_age: 24h     # floor 1h
+  repo_contents_min_age: 72h     # floor 1h
   repo_contents_keep_recent: 3   # at least 1
 ```
 

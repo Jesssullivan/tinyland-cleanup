@@ -14,8 +14,9 @@ All notable changes to this project will be documented in this file.
   unreferenced copies of a key at moderate or higher levels, also while a
   Bazel server runs. It keeps every copy an output base's `external/` symlink
   resolves to, the newest `bazel.repo_contents_keep_recent` (3) unreferenced
-  copies, copies used within `bazel.repo_contents_min_age` (24h) and copies a
-  process holds. A mount that stays critical for `policy.stalled_alert_cycles`
+  copies, copies used within `bazel.repo_contents_min_age` (72h) and copies a
+  process holds. It takes Bazel's `contents/gc_lock` exclusively per key and
+  skips the key while a Bazel command holds it. A mount that stays critical for `policy.stalled_alert_cycles`
   (6) cycles while every plugin reclaims nothing gets a warning and a
   `stalled_mounts` report entry.
   The over-budget whole-tier rule no longer deletes a repository cache that

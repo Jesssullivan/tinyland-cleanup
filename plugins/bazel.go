@@ -211,7 +211,7 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		plan.Warnings = append(plan.Warnings, "detected Bazel cache footprint exceeds configured review budget")
 	}
 	plan.Warnings = append(plan.Warnings, "Bazel cleanup deletes rebuildable cache tiers only when the total footprint exceeds the configured budget; output-base deletion remains limited to stale inactive candidates using process inspection when available and candidate-local activity evidence otherwise")
-	plan.Warnings = append(plan.Warnings, "repository contents copies referenced only by output bases outside the scanned set (discovered output bases plus a shallow scan of bazel.roots and bazel_bases.roots) are guarded only by repo_contents_keep_recent and repo_contents_min_age")
+	plan.Warnings = append(plan.Warnings, "repository contents copies referenced only by output bases outside the scanned set (discovered output bases plus a shallow scan of bazel.roots and bazel_bases.roots) are guarded only by repo_contents_keep_recent and repo_contents_min_age (default 72h)")
 	plan.Warnings = append(plan.Warnings, "Bazel output-base and repository-cache byte counts use a bounded recursive allocation estimate; other cache tier counts use bounded top-level allocation estimates")
 
 	return plan, state, activeErr
@@ -286,10 +286,18 @@ func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, ac
 		}
 	}
 
-	// Bazel's default output root is always checked for repository caches,
-	// whatever bazel.roots lists (TIN-5770: sting's roots miss it).
-	for _, candidate := range discoverBazelDefaultRepositoryCaches(home) {
-		add(candidate)
+	// Repository caches behind a top-level _bazel_* link in a root, and in
+	// Bazel's default output root whatever bazel.roots lists (TIN-5770:
+	// sting's roots miss it), are measured and deduplicated. Only the cache
+	// is added, never an output base.
+	cacheRoots := []string{bazelDefaultOutputRoot(home)}
+	for _, root := range cfg.Roots {
+		cacheRoots = append(cacheRoots, expandHome(root, home))
+	}
+	for _, root := range cacheRoots {
+		for _, candidate := range discoverBazelRepositoryCachesUnder(root) {
+			add(candidate)
+		}
 	}
 
 	processOutputBaseKinds := bazelProcessOutputBaseKinds(activeInfo)
@@ -414,9 +422,9 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
-			if target, ok := bazelOutputUserRootLinkTarget(root, entry); ok {
-				candidates = append(candidates, discoverBazelOutputUserRootCandidates(target)...)
-			}
+			// A _bazel_* link is followed only for its repository cache, by
+			// discoverBazelRepositoryCachesUnder: output bases behind a link
+			// never become deletion candidates.
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
@@ -483,12 +491,11 @@ func bazelDefaultOutputRoot(home string) string {
 	return filepath.Join(home, ".cache", "bazel")
 }
 
-// discoverBazelDefaultRepositoryCaches returns the repository cache of each
-// _bazel_* output user root in ~/.cache/bazel, a directory or a one-hop
-// link. Only the repository cache is added: output bases there stay outside
-// output-base deletion unless bazel.roots lists them.
-func discoverBazelDefaultRepositoryCaches(home string) []bazelCandidate {
-	root := bazelDefaultOutputRoot(home)
+// discoverBazelRepositoryCachesUnder returns the repository cache of each
+// _bazel_* output user root directly in root, a directory or a one-hop link.
+// Only the repository cache is returned: output bases there stay outside
+// output-base deletion unless the root's own discovery finds them.
+func discoverBazelRepositoryCachesUnder(root string) []bazelCandidate {
 	if root == "" {
 		return nil
 	}

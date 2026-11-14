@@ -885,7 +885,7 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 	}
 
 	if !d.dryRun && stateErr == nil {
-		report.StalledMounts = d.recordStalls(state, report, totalFreed < minYield)
+		report.StalledMounts = d.recordStalls(state, report, totalFreed < minYield, anyPluginRan(report.Plugins))
 		stateDirty = true
 	}
 
@@ -1014,6 +1014,16 @@ type cycleReport struct {
 	Plugins       []pluginCycleReport `json:"plugins"`
 }
 
+// anyPluginRan reports whether any plugin, ladder or level-independent, ran.
+func anyPluginRan(reports []pluginCycleReport) bool {
+	for _, r := range reports {
+		if r.Ran {
+			return true
+		}
+	}
+	return false
+}
+
 // stalledMount is one mount the stall alert names.
 type stalledMount struct {
 	Path        string  `json:"path"`
@@ -1038,14 +1048,22 @@ func (d *daemon) stalledAlertCycles() int {
 // level while every plugin together reclaims nothing (TIN-5770). The daemon
 // has no notification sender, so the warning line and the report's
 // stalled_mounts field are the alert.
-func (d *daemon) recordStalls(state *cleanupState, report cycleReport, zeroYield bool) []stalledMount {
+//
+// Only a cycle that ran at least one plugin advances the count. A cycle whose
+// plugins were all held back by cooldown or backoff leaves it unchanged, so
+// the count measures cleanup attempts, not poll intervals.
+func (d *daemon) recordStalls(state *cleanupState, report cycleReport, zeroYield, ran bool) []stalledMount {
 	limit := d.stalledAlertCycles()
 	var out []stalledMount
 	for _, m := range report.Mounts {
 		if m.Path == "" || m.Error != "" {
 			continue
 		}
-		count := state.recordStall(m.Path, zeroYield && m.Level == monitor.LevelCritical.String())
+		critical := zeroYield && m.Level == monitor.LevelCritical.String()
+		if critical && !ran {
+			continue
+		}
+		count := state.recordStall(m.Path, critical)
 		if limit <= 0 || count < limit {
 			continue
 		}

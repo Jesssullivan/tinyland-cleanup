@@ -502,8 +502,9 @@ type BazelConfig struct {
 	// is always kept, so this class runs while a Bazel server is up.
 	RepoContentsDedupe bool `yaml:"repo_contents_dedupe"`
 	// RepoContentsMinAge keeps every copy used more recently than this (the
-	// later of the copy's mtime and its .recorded_inputs mtime). Default 24h,
-	// floor 1h.
+	// later of the copy's mtime and its .recorded_inputs mtime). Default 72h,
+	// floor 1h. It is the main guard for a copy linked only from an output
+	// base outside the scanned roots.
 	RepoContentsMinAge string `yaml:"repo_contents_min_age"`
 	// RepoContentsKeepRecent keeps this many newest unreferenced copies of
 	// each key in addition to every referenced copy. Default 3, at least 1.
@@ -1282,7 +1283,7 @@ func DefaultConfig() *Config {
 			DiskCacheAgeDelete:           false,
 			DiskCacheMaxEntries:          2000000,
 			RepoContentsDedupe:           true,
-			RepoContentsMinAge:           "24h",
+			RepoContentsMinAge:           "72h",
 			RepoContentsKeepRecent:       3,
 		},
 		Retention: DefaultRetentionConfig(home),

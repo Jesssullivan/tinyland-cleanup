@@ -20,6 +20,7 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -43,6 +44,24 @@ const (
 )
 
 var bazelRepoContentsUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// bazelRepoContentsKeyName matches a contents key: Bazel names each key
+// directory by a hex digest. Anything else (Bazel's _trash/, gc_lock) is
+// measured but never listed as a key, so the dedupe never touches it.
+var bazelRepoContentsKeyName = regexp.MustCompile(`^[0-9a-fA-F]{32,128}$`)
+
+// errBazelGCLockHeld reports that Bazel's contents/gc_lock is held: a Bazel
+// command is using the repository contents cache.
+var errBazelGCLockHeld = errors.New("bazel active (gc_lock)")
+
+const (
+	// bazelRepoContentsGCLock is Bazel's lock file in contents/
+	// (LocalRepoContentsCache.LOCK_PATH).
+	bazelRepoContentsGCLock = "gc_lock"
+	// bazelRepoContentsProbeTimeout bounds the apply-time size walk of a
+	// copy the plan did not measure.
+	bazelRepoContentsProbeTimeout = 10 * time.Second
+)
 
 // bazelRepoContentsCopy is one <uuid>/ copy of a contents key.
 type bazelRepoContentsCopy struct {
@@ -77,6 +96,9 @@ type bazelRepoCacheMeasure struct {
 	Estimated int
 	// Partial is set when the time bound cut the measurement short.
 	Partial bool
+	// Unreadable lists the contents/ or key directories that could not be
+	// read, so copies in them are unseen.
+	Unreadable []string
 }
 
 // bazelRepoContentsPolicy is the resolved dedupe policy.
@@ -87,7 +109,7 @@ type bazelRepoContentsPolicy struct {
 }
 
 func bazelRepoContentsPolicyFor(cfg config.BazelConfig) bazelRepoContentsPolicy {
-	pol := bazelRepoContentsPolicy{enabled: cfg.RepoContentsDedupe, minAge: 24 * time.Hour, keep: cfg.RepoContentsKeepRecent}
+	pol := bazelRepoContentsPolicy{enabled: cfg.RepoContentsDedupe, minAge: 72 * time.Hour, keep: cfg.RepoContentsKeepRecent}
 	if cfg.RepoContentsMinAge != "" {
 		if d, err := config.ParseDuration(cfg.RepoContentsMinAge); err == nil {
 			pol.minAge = d
@@ -114,19 +136,36 @@ func bazelRepoContentsDir(root string) string {
 // listBazelRepoContents lists every key of a contents directory and its UUID
 // copies, newest first. It stats only the top two levels.
 func listBazelRepoContents(contentsDir string, now time.Time) []bazelRepoContentsKey {
+	l := listBazelRepoContentsFull(contentsDir, now)
+	return l.keys
+}
+
+// bazelRepoContentsListing is one listing of a contents directory.
+type bazelRepoContentsListing struct {
+	keys []bazelRepoContentsKey
+	// others are contents/ entries that are not keys (_trash/, gc_lock).
+	others []string
+	// unreadable are directories the listing could not read.
+	unreadable []string
+}
+
+func listBazelRepoContentsFull(contentsDir string, now time.Time) bazelRepoContentsListing {
+	var l bazelRepoContentsListing
 	entries, err := os.ReadDir(contentsDir)
 	if err != nil {
-		return nil
+		l.unreadable = append(l.unreadable, fmt.Sprintf("%s: %v", contentsDir, err))
+		return l
 	}
 	uid := os.Geteuid()
-	var keys []bazelRepoContentsKey
 	for _, e := range entries {
-		if !e.IsDir() {
+		keyDir := filepath.Join(contentsDir, e.Name())
+		if !e.IsDir() || !bazelRepoContentsKeyName.MatchString(e.Name()) {
+			l.others = append(l.others, keyDir)
 			continue
 		}
-		keyDir := filepath.Join(contentsDir, e.Name())
 		children, err := os.ReadDir(keyDir)
 		if err != nil {
+			l.unreadable = append(l.unreadable, fmt.Sprintf("%s: %v", keyDir, err))
 			continue
 		}
 		key := bazelRepoContentsKey{Key: e.Name(), Dir: keyDir}
@@ -157,10 +196,31 @@ func listBazelRepoContents(contentsDir string, now time.Time) []bazelRepoContent
 			}
 			return key.Copies[i].LastUse.After(key.Copies[j].LastUse)
 		})
-		keys = append(keys, key)
+		l.keys = append(l.keys, key)
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i].Key < keys[j].Key })
-	return keys
+	sort.Slice(l.keys, func(i, j int) bool { return l.keys[i].Key < l.keys[j].Key })
+	return l
+}
+
+// bazelRepoContentsCopyLastUse re-reads a copy's last use: the later of the
+// directory mtime and its .recorded_inputs mtime.
+func bazelRepoContentsCopyLastUse(dir string, now time.Time) (time.Time, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !info.IsDir() {
+		return time.Time{}, fmt.Errorf("%s is not a directory", dir)
+	}
+	last := effectiveModTime(info, now)
+	if rec, err := os.Lstat(dir + bazelRepoContentsRecorded); err == nil {
+		if t := effectiveModTime(rec, now); t.After(last) {
+			last = t
+		}
+	} else if !os.IsNotExist(err) {
+		return time.Time{}, err
+	}
+	return last, nil
 }
 
 // bazelAllocatedTree is a du-style walk: allocated bytes of every entry below
@@ -219,6 +279,7 @@ func bazelAllocatedTree(ctx context.Context, root string, seen map[[2]uint64]boo
 // of its key's walked copies, because copies of one key hold the same tree.
 func measureBazelRepoCache(ctx context.Context, root string, now time.Time, timeout time.Duration) bazelRepoCacheMeasure {
 	m := bazelRepoCacheMeasure{Root: root}
+	var others []string
 	mctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	seen := map[[2]uint64]bool{}
@@ -235,7 +296,10 @@ func measureBazelRepoCache(ctx context.Context, root string, now time.Time, time
 
 	if contents := bazelRepoContentsDir(root); contents != "" {
 		m.ContentsDir = contents
-		m.Keys = listBazelRepoContents(contents, now)
+		listing := listBazelRepoContentsFull(contents, now)
+		m.Keys = listing.keys
+		m.Unreadable = listing.unreadable
+		others = listing.others
 		for pass := 0; pass < 2; pass++ {
 			for k := range m.Keys {
 				for c := range m.Keys[k].Copies {
@@ -280,6 +344,15 @@ func measureBazelRepoCache(ctx context.Context, root string, now time.Time, time
 				m.Logical += cp.Logical
 			}
 		}
+	}
+
+	for _, other := range others {
+		l, p, ok := walk(other)
+		if !ok {
+			m.Partial = true
+		}
+		m.Logical += l
+		m.Bytes += p
 	}
 
 	entries, err := os.ReadDir(root)
@@ -363,6 +436,12 @@ func collectBazelRepoContentsRefs(outputBases []string) *bazelRepoContentsRefs {
 	r := &bazelRepoContentsRefs{held: map[string]string{}}
 	for _, ob := range outputBases {
 		ext := filepath.Join(ob, "external")
+		// A relative link resolves against the real directory, as the kernel
+		// does, when external/ is itself a symlink.
+		realExt := ext
+		if r, err := filepath.EvalSymlinks(ext); err == nil {
+			realExt = r
+		}
 		entries, err := os.ReadDir(ext)
 		if err != nil {
 			if !os.IsNotExist(err) {
@@ -381,10 +460,13 @@ func collectBazelRepoContentsRefs(outputBases []string) *bazelRepoContentsRefs {
 				r.incomplete = append(r.incomplete, fmt.Sprintf("cannot read link %s: %v", link, err))
 				continue
 			}
+			r.links++
 			if !filepath.IsAbs(target) {
+				if realExt != ext {
+					r.add(filepath.Join(realExt, target), link)
+				}
 				target = filepath.Join(ext, target)
 			}
-			r.links++
 			r.add(target, link)
 		}
 	}
@@ -568,9 +650,11 @@ func (p *BazelPlugin) planBazelRepoContents(ctx context.Context, cfg *config.Con
 
 	var contentsDirs []string
 	type decided struct {
-		key    bazelRepoContentsKey
-		remove []bazelRepoContentsCopy
+		key      bazelRepoContentsKey
+		remove   []bazelRepoContentsCopy
+		gcLocked bool
 	}
+	var unreadable int
 	var all []decided
 	anyRemove := false
 	var keyCount, estimated int
@@ -582,6 +666,14 @@ func (p *BazelPlugin) planBazelRepoContents(ctx context.Context, cfg *config.Con
 			continue
 		}
 		contentsDirs = append(contentsDirs, m.ContentsDir)
+		unreadable += len(m.Unreadable)
+		// Probe Bazel's gc_lock without creating it: a plan never writes.
+		gcLocked := false
+		if release, err := bazelGCLockTry(filepath.Join(m.ContentsDir, bazelRepoContentsGCLock), false); err != nil {
+			gcLocked = true
+		} else {
+			release()
+		}
 		for _, key := range m.Keys {
 			keyCount++
 			if len(key.Copies) < 2 {
@@ -590,11 +682,14 @@ func (p *BazelPlugin) planBazelRepoContents(ctx context.Context, cfg *config.Con
 			key.Copies = append([]bazelRepoContentsCopy(nil), key.Copies...)
 			remove := decideBazelRepoContentsKey(&key, refs, nil, pol, now)
 			anyRemove = anyRemove || len(remove) > 0
-			all = append(all, decided{key, remove})
+			all = append(all, decided{key, remove, gcLocked})
 		}
 	}
 	meta["repo_contents_keys"] = strconv.Itoa(keyCount)
 	meta["repo_contents_duplicate_keys"] = strconv.Itoa(len(all))
+	if unreadable > 0 {
+		meta["repo_contents_unreadable_dirs"] = strconv.Itoa(unreadable)
+	}
 	if estimated > 0 {
 		meta["repo_contents_estimated_copies"] = strconv.Itoa(estimated)
 	}
@@ -626,6 +721,8 @@ func (p *BazelPlugin) planBazelRepoContents(ctx context.Context, cfg *config.Con
 			t.Action, t.Protected, t.Reason = "keep", true, "bazel.repo_contents_dedupe is off: "+summary
 		case len(refs.incomplete) > 0:
 			t.Action, t.Protected, t.Reason = "keep", true, "output-base external/ scan incomplete ("+refs.incomplete[0]+"): "+summary
+		case d.gcLocked && len(d.remove) > 0:
+			t.Action, t.Protected, t.Reason = "keep", true, errBazelGCLockHeld.Error()+": "+summary
 		case activityBlock != "" && len(d.remove) > 0:
 			t.Action, t.Protected, t.Reason = "keep", true, activityBlock+": "+summary
 		case len(d.remove) == 0:
@@ -737,42 +834,90 @@ func (p *BazelPlugin) applyBazelRepoContents(ctx context.Context, cfg *config.Co
 			result.Error = ctx.Err()
 			return
 		}
-		now := time.Now()
-		var key *bazelRepoContentsKey
-		for _, k := range listBazelRepoContents(filepath.Dir(t.Path), now) {
-			if k.Dir == t.Path {
-				k := k
-				key = &k
-				break
-			}
-		}
-		if key == nil {
+		freed, removed, kept, err := p.applyBazelRepoContentsKey(ctx, t.Path, refs, activity, pol, planned, outputBases, logger)
+		if errors.Is(err, errBazelGCLockHeld) {
+			logger.Info("Bazel repo contents dedupe skipped", "reason", errBazelGCLockHeld.Error(), "path", t.Path)
 			continue
 		}
-		remove := decideBazelRepoContentsKey(key, refs, activity, pol, now)
-		var freed int64
-		removed := 0
-		for _, cp := range remove {
-			bytes, ok := planned[cp.Dir]
-			if !ok {
-				_, bytes, _ = bazelAllocatedTree(ctx, cp.Dir, map[[2]uint64]bool{})
-			}
-			if err := deleteBazelRepoContentsCopy(cp.Dir, logger); err != nil {
-				logger.Warn("failed to delete Bazel repo contents copy", "path", cp.Dir, "error", err)
-				continue
-			}
-			logger.Debug("deleted unreferenced Bazel repo contents copy", "path", cp.Dir, "estimated_bytes", bytes)
-			freed += bytes
-			removed++
+		if err != nil {
+			logger.Warn("Bazel repo contents dedupe stopped for key", "path", t.Path, "error", err)
 		}
-		logger.Info("removed unreferenced duplicate Bazel repo contents copies",
-			"key", key.Key, "path", key.Dir, "copies", len(key.Copies),
-			"kept", len(key.Copies)-removed, "removed", removed, "estimated_bytes", freed,
-			"min_age", pol.minAge.String(), "keep_recent", pol.keep)
+		if removed > 0 || err != nil {
+			logger.Info("removed unreferenced duplicate Bazel repo contents copies",
+				"key", filepath.Base(t.Path), "path", t.Path,
+				"kept", kept, "removed", removed, "estimated_bytes", freed,
+				"min_age", pol.minAge.String(), "keep_recent", pol.keep)
+		}
 		result.BytesFreed += freed
 		result.EstimatedBytesFreed += freed
 		result.ItemsCleaned += removed
 	}
+}
+
+// applyBazelRepoContentsKey removes one key's unreferenced copies while it
+// holds Bazel's contents/gc_lock exclusively, so no Bazel command can use or
+// add a copy of the cache during the pass. A busy lock skips the key. Just
+// before each deletion it re-reads every external/ link and the copy's last
+// use, so a copy that became referenced or used since planning stays.
+func (p *BazelPlugin) applyBazelRepoContentsKey(ctx context.Context, keyDir string, refs *bazelRepoContentsRefs, activity *bbActivity, pol bazelRepoContentsPolicy, planned map[string]int64, outputBases []string, logger *slog.Logger) (freed int64, removed, kept int, err error) {
+	contentsDir := filepath.Dir(keyDir)
+	release, err := bazelGCLockTry(filepath.Join(contentsDir, bazelRepoContentsGCLock), true)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer release()
+
+	now := time.Now()
+	var key *bazelRepoContentsKey
+	for _, k := range listBazelRepoContents(contentsDir, now) {
+		if k.Dir == keyDir {
+			k := k
+			key = &k
+			break
+		}
+	}
+	if key == nil {
+		return 0, 0, 0, nil
+	}
+	remove := decideBazelRepoContentsKey(key, refs, activity, pol, now)
+	kept = len(key.Copies)
+	for _, cp := range remove {
+		if err := ctx.Err(); err != nil {
+			return freed, removed, kept, err
+		}
+		fresh := collectBazelRepoContentsRefs(outputBases)
+		if len(fresh.incomplete) > 0 {
+			return freed, removed, kept, fmt.Errorf("output-base external/ scan incomplete: %s", fresh.incomplete[0])
+		}
+		if why, ok := fresh.referencedBy(cp.Dir); ok {
+			logger.Info("keeping Bazel repo contents copy referenced since planning", "path", cp.Dir, "link", why)
+			continue
+		}
+		last, err := bazelRepoContentsCopyLastUse(cp.Dir, time.Now())
+		if err != nil {
+			logger.Info("keeping Bazel repo contents copy whose last use cannot be re-read", "path", cp.Dir, "error", err)
+			continue
+		}
+		if time.Since(last) < pol.minAge {
+			logger.Info("keeping Bazel repo contents copy used since planning", "path", cp.Dir, "last_use", last.UTC().Format(time.RFC3339))
+			continue
+		}
+		bytes, ok := planned[cp.Dir]
+		if !ok {
+			pctx, cancel := context.WithTimeout(ctx, bazelRepoContentsProbeTimeout)
+			_, bytes, _ = bazelAllocatedTree(pctx, cp.Dir, map[[2]uint64]bool{})
+			cancel()
+		}
+		if err := deleteBazelRepoContentsCopy(cp.Dir, logger); err != nil {
+			logger.Warn("failed to delete Bazel repo contents copy", "path", cp.Dir, "error", err)
+			continue
+		}
+		logger.Debug("deleted unreferenced Bazel repo contents copy", "path", cp.Dir, "estimated_bytes", bytes)
+		freed += bytes
+		removed++
+		kept--
+	}
+	return freed, removed, kept, nil
 }
 
 // guardBazelRepositoryCacheTiers withholds the over-budget whole-tier deletion
@@ -808,6 +953,8 @@ func guardBazelRepositoryCacheTiers(targets []CleanupTarget, measures []bazelRep
 			why = fmt.Sprintf("%d copies are referenced by output bases", referenced)
 		case duplicateKeys > 0:
 			why = fmt.Sprintf("%d keys hold duplicate copies", duplicateKeys)
+		case len(m.Unreadable) > 0:
+			why = "the repository contents listing is incomplete (" + m.Unreadable[0] + ")"
 		case len(refs.incomplete) > 0:
 			why = "the output-base external/ scan is incomplete"
 		case activeErr != nil:

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -424,7 +425,7 @@ func TestBazelRepositoryCacheTierDeletableOnlyWhenUnreferencedAndInactive(t *tes
 	}
 }
 
-func TestDiscoverBazelRootFollowsOneTopLevelUserRootLink(t *testing.T) {
+func TestBazelUserRootLinkReachesOnlyTheRepositoryCache(t *testing.T) {
 	real := t.TempDir()
 	_, repoCache, copyDir, outputBase := singleCopyCache(t, true)
 	userRoot := filepath.Dir(filepath.Dir(filepath.Dir(repoCache)))
@@ -439,18 +440,32 @@ func TestDiscoverBazelRootFollowsOneTopLevelUserRootLink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	candidates := discoverBazelRootCandidates(home)
+	// Default-like config: bazel.roots is the directory holding the link.
+	candidates := NewBazelPlugin().discoverCandidates(t.TempDir(), config.BazelConfig{Roots: []string{home}}, bazelProcessInfo{})
 	var sawCache, sawOutputBase int
 	for _, c := range candidates {
 		switch {
 		case c.Type == "repository_cache" && c.Path == resolvedOrSelf(repoCache):
 			sawCache++
-		case c.Type == "output_base" && c.Path == resolvedOrSelf(outputBase):
+		case bazelCandidateIsOutputBaseLike(c.Type):
 			sawOutputBase++
 		}
 	}
-	if sawCache != 1 || sawOutputBase != 1 {
-		t.Fatalf("candidates = %#v, want the linked cache and output base once each", candidates)
+	if sawCache != 1 || sawOutputBase != 0 {
+		t.Fatalf("candidates = %#v, want the linked cache once and no output-base deletion candidate", candidates)
+	}
+	// The root's own discovery never follows the link to output bases.
+	for _, c := range discoverBazelRootCandidates(home) {
+		if bazelCandidateIsOutputBaseLike(c.Type) || pathInsideRoot(c.Path, resolvedOrSelf(userRoot)) {
+			t.Fatalf("root discovery followed the _bazel_* link: %#v", c)
+		}
+	}
+	// And the plan never targets the output base for deletion.
+	targets, _ := bazelPlanTargets(candidates, config.BazelConfig{StaleAfter: "1h", CriticalStaleAfter: "1h"}, LevelCritical, time.Now().Add(1000*time.Hour), false)
+	for _, tg := range targets {
+		if tg.Path == resolvedOrSelf(outputBase) {
+			t.Fatalf("output base behind the link became a target: %#v", tg)
+		}
 	}
 	measures := measureBazelRepoCacheCandidates(context.Background(), candidates, time.Now())
 	if len(measures) != 1 || len(measures[0].Keys) != 1 {
@@ -497,5 +512,58 @@ func TestDiscoverCandidatesAddsDefaultOutputRootRepositoryCache(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("output-base scan %v missed %s behind the default-root link", obs, outputBase)
+	}
+}
+
+func TestBazelRepoContentsSkipsWhileGCLockIsHeldExclusively(t *testing.T) {
+	f := newRepoContentsFixture(t)
+	cfg := repoContentsTestConfig(f.root, 1)
+	p := &BazelPlugin{activityScan: repoContentsActivity()}
+	lock, err := os.OpenFile(filepath.Join(f.contentsDir, bazelRepoContentsGCLock), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+	// The plan reports the busy lock instead of a removal.
+	targets, _, state := planRepoContentsFixture(t, p, f, cfg, LevelCritical)
+	if len(targets) != 1 || targets[0].Action != "keep" || !strings.HasPrefix(targets[0].Reason, "bazel active (gc_lock)") {
+		t.Fatalf("targets = %#v, want kept with bazel active (gc_lock)", targets)
+	}
+	// A lock taken after planning stops apply too.
+	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	targets, _, state = planRepoContentsFixture(t, p, f, cfg, LevelCritical)
+	if targets[0].Action != bazelRepoContentsDelete {
+		t.Fatalf("target = %#v, want a deletion with the lock free", targets[0])
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+	var held CleanupResult
+	p.applyBazelRepoContents(context.Background(), cfg, targets, state.repoCaches, state.outputBases, slog.New(slog.NewTextHandler(io.Discard, nil)), &held)
+	if held.ItemsCleaned != 0 {
+		t.Fatalf("apply removed %d copies while the gc_lock was held", held.ItemsCleaned)
+	}
+
+	// Once the lock is free, apply removes and leaves the lock file alone.
+	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	var r CleanupResult
+	p.applyBazelRepoContents(context.Background(), cfg, targets, state.repoCaches, state.outputBases, slog.New(slog.NewTextHandler(io.Discard, nil)), &r)
+	if r.ItemsCleaned == 0 {
+		t.Fatal("apply removed nothing with the gc_lock free")
+	}
+	if _, err := os.Stat(filepath.Join(f.contentsDir, bazelRepoContentsGCLock)); err != nil {
+		t.Fatalf("gc_lock was removed: %v", err)
+	}
+}
+
+func TestBazelRepoContentsDefaultMinAgeIs72h(t *testing.T) {
+	if got := bazelRepoContentsPolicyFor(config.DefaultConfig().Bazel).minAge; got != 72*time.Hour {
+		t.Fatalf("default min age = %s, want 72h", got)
+	}
+	if got := bazelRepoContentsPolicyFor(config.BazelConfig{}).minAge; got != 72*time.Hour {
+		t.Fatalf("unset min age = %s, want 72h", got)
 	}
 }
