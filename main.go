@@ -79,7 +79,9 @@ const (
 // Zero-yield suppression defaults (TIN-3342), used when the matching policy
 // key is unset or invalid.
 const (
-	defaultZeroYieldLimit       = 2
+	defaultZeroYieldLimit = 2
+	// defaultStalledAlertCycles is policy.stalled_alert_cycles when unset.
+	defaultStalledAlertCycles   = 6
 	defaultZeroYieldBackoffBase = 30 * time.Minute
 	defaultZeroYieldBackoffMax  = 6 * time.Hour
 	// Mount pressure lifts suppression at most once per this interval since
@@ -568,6 +570,9 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 			d.logger.Info("zero-yield suppression lifted", "reason", "pressure_cleared")
 			dirty = true
 		}
+		if !d.dryRun && stateErr == nil && state.clearStalls() {
+			dirty = true
+		}
 		if dirty {
 			if err := saveCleanupState(report.StateFile, state); err != nil {
 				report.StateError = err.Error()
@@ -879,6 +884,11 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		}
 	}
 
+	if !d.dryRun && stateErr == nil {
+		report.StalledMounts = d.recordStalls(state, report, totalFreed < minYield, anyPluginRan(report.Plugins))
+		stateDirty = true
+	}
+
 	if stateDirty {
 		if err := saveCleanupState(report.StateFile, state); err != nil {
 			report.StateError = err.Error()
@@ -994,10 +1004,82 @@ type cycleReport struct {
 	// LadderBytesFreed is the part of TotalBytesFreed freed by plugins the
 	// level ladder gates (every plugin that is not level-independent). It is
 	// the plugin side of byte progress.
-	LadderBytesFreed int64               `json:"ladder_bytes_freed"`
-	Mounts           []mountReport       `json:"mounts"`
-	PluginFilter     []string            `json:"plugin_filter,omitempty"`
-	Plugins          []pluginCycleReport `json:"plugins"`
+	LadderBytesFreed int64 `json:"ladder_bytes_freed"`
+	// StalledMounts lists the monitored mounts that have stayed at the
+	// critical level for at least policy.stalled_alert_cycles consecutive
+	// cycles while every plugin together reclaimed nothing (TIN-5770).
+	StalledMounts []stalledMount      `json:"stalled_mounts,omitempty"`
+	Mounts        []mountReport       `json:"mounts"`
+	PluginFilter  []string            `json:"plugin_filter,omitempty"`
+	Plugins       []pluginCycleReport `json:"plugins"`
+}
+
+// anyPluginRan reports whether any plugin, ladder or level-independent, ran.
+func anyPluginRan(reports []pluginCycleReport) bool {
+	for _, r := range reports {
+		if r.Ran {
+			return true
+		}
+	}
+	return false
+}
+
+// stalledMount is one mount the stall alert names.
+type stalledMount struct {
+	Path        string  `json:"path"`
+	UsedPercent float64 `json:"used_percent"`
+	Cycles      int     `json:"cycles"`
+}
+
+// stalledAlertCycles resolves policy.stalled_alert_cycles: zero uses the
+// default, a negative value disables the alert (0).
+func (d *daemon) stalledAlertCycles() int {
+	if d.config == nil || d.config.Policy.StalledAlertCycles == 0 {
+		return defaultStalledAlertCycles
+	}
+	if d.config.Policy.StalledAlertCycles < 0 {
+		return 0
+	}
+	return d.config.Policy.StalledAlertCycles
+}
+
+// recordStalls updates each monitored mount's stall count and warns, once
+// every stalled_alert_cycles cycles, for a mount that stays at the critical
+// level while every plugin together reclaims nothing (TIN-5770). The daemon
+// has no notification sender, so the warning line and the report's
+// stalled_mounts field are the alert.
+//
+// Only a cycle that ran at least one plugin advances the count. A cycle whose
+// plugins were all held back by cooldown or backoff leaves it unchanged, so
+// the count measures cleanup attempts, not poll intervals.
+func (d *daemon) recordStalls(state *cleanupState, report cycleReport, zeroYield, ran bool) []stalledMount {
+	limit := d.stalledAlertCycles()
+	var out []stalledMount
+	for _, m := range report.Mounts {
+		if m.Path == "" || m.Error != "" {
+			continue
+		}
+		critical := zeroYield && m.Level == monitor.LevelCritical.String()
+		if critical && !ran {
+			continue
+		}
+		count := state.recordStall(m.Path, critical)
+		if limit <= 0 || count < limit {
+			continue
+		}
+		out = append(out, stalledMount{Path: m.Path, UsedPercent: m.UsedPercent, Cycles: count})
+		if (count-limit)%limit == 0 {
+			d.logger.Warn("cleanup stalled: mount stays at the critical level and every plugin reclaimed nothing",
+				"path", m.Path,
+				"label", m.Label,
+				"used_percent", m.UsedPercent,
+				"free_bytes", m.FreeBytes,
+				"cycles", count,
+				"total_bytes_freed", report.TotalBytesFreed,
+			)
+		}
+	}
+	return out
 }
 
 type mountReport struct {

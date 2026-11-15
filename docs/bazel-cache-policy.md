@@ -90,6 +90,86 @@ inspection failed, re-checks clients before removing anything and each
 entry's last use just before its removal. With the flag set it runs at every
 level the plugin runs, warning included; the whole-tier rule is unchanged.
 
+## Repository contents cache duplicates
+
+Bazel keeps each fetched repository in its repository contents cache at
+`<repository_cache>/contents/<key>/<uuid>/`, next to a file
+`<uuid>.recorded_inputs`. A refetch can add a new UUID copy of the same key.
+On honey on 2026-11-14 one rules_python key held 287 copies (98 GB). Only one
+copy was the target of a live output base's `external/` symlink (TIN-5770).
+
+The plugin measures each repository cache by entry. It walks the newest copy
+of every key first, then the other copies, then the rest of the cache, all
+within the 30 second estimate bound. A copy the bound leaves unwalked takes
+the mean size of its key's walked copies, and the plan sets
+`repo_contents_estimated_copies` and `repository_cache_size_partial`.
+
+Each key with more than one copy gets one `repo_contents_duplicates` target.
+Its bytes are the reclaim, and its reason counts the copies kept by reason and
+the copies removed. A copy is kept when:
+
+| Reason | Rule |
+|--------|------|
+| referenced | an `external/*` symlink of an output base resolves to it or below it |
+| newest | it is one of the newest `repo_contents_keep_recent` unreferenced copies |
+| recent | its last use, the later of its mtime and its `.recorded_inputs` mtime, is within `repo_contents_min_age` |
+| open | a process holds, maps or names anything under it |
+| foreign | another user owns it |
+
+The output bases read are every discovered output base, plus a shallow scan
+of `bazel.roots` and, when `bazel_bases` is on, `bazel_bases.roots`. The scan
+covers each root, its children and the children of each `_bazel_*` child. An
+unreadable `external/` directory or link, or an incomplete process inventory,
+keeps every copy.
+
+This class runs while a Bazel server is up, because the symlink check protects
+the copies a server uses. It removes copies at moderate or higher levels and
+reports `report_repo_contents_duplicates` at warning. Before removing, it
+re-lists each key, re-reads every link and takes a fresh process inventory. It
+removes `<uuid>.recorded_inputs` before `<uuid>/`, so Bazel never sees a
+recorded entry without its tree.
+
+The over-budget whole-tier rule never deletes a repository cache that holds
+a copy an output base references or a key with duplicate copies. It also
+holds off while the `external/` scan or the Bazel process inspection is
+incomplete. The target stays `keep` with the reason, and the dedupe class
+reclaims the cache instead. Whole-cache deletion stays possible only for a
+cache with no referenced copy and no duplicates, while no Bazel process is
+visible.
+
+An output base outside the scanned set is not seen. Its copies are guarded
+only by `repo_contents_keep_recent` and `repo_contents_min_age`, and every
+plan carries a warning that says so. For that reason the default minimum age
+is 72h.
+
+Bazel commands hold `contents/gc_lock` shared, and Bazel's own GC takes it
+exclusively with a non-blocking try. The dedupe takes it the same way, as a
+flock(2) lock and a POSIX record lock, once per key. A busy lock skips the
+key and the plan reports `bazel active (gc_lock)`. As in Bazel's own GC, the
+lock is held only for a bounded batch of renames: at most 8 copies or 2
+seconds. Under it, each copy's links and last use are re-read, its
+`.recorded_inputs` is removed and the copy is renamed into
+`contents/_trash/<uuid>`. The trees are removed after the lock is released.
+Every apply first sweeps leftover `_trash/<uuid>` directories, so a crash
+between the rename and the removal is finished on the next cycle. Bazel's `_trash/`
+and any other non-key entry of `contents/` are measured, never deduplicated.
+An unreadable `contents/` or key directory withholds the whole-tier rule.
+
+Discovery follows a top-level `_bazel_*` link in a root only to measure and
+deduplicate its repository cache and to read its output bases' links. Output
+bases behind a link never become deletion candidates.
+
+The link is resolved by one hop, as on sting, where `~/.cache/bazel/_bazel_jess`
+links to the fast-local output user root. The target must be a real
+directory, so a chain of links is never followed.
+
+```yaml
+bazel:
+  repo_contents_dedupe: true
+  repo_contents_min_age: 72h     # floor 1h
+  repo_contents_keep_recent: 3   # at least 1
+```
+
 ## Orphaned output bases
 
 Bazel writes a `DO_NOT_BUILD_HERE` file into every output base containing the

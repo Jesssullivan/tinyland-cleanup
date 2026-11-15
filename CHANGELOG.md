@@ -6,6 +6,25 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Bazel repository contents dedupe and a stall alert (TIN-5770).** On honey
+  on 2026-11-14 `/home` reached 99 percent. One repository contents cache key
+  held 287 UUID copies (98 GB) of one rules_python repository, and the plugin
+  measured the 101 GB tier as 96 KiB from its top level. It now measures
+  repository caches by entry within the existing 30 second bound. It removes
+  unreferenced copies of a key at moderate or higher levels, also while a
+  Bazel server runs. It keeps every copy an output base's `external/` symlink
+  resolves to, the newest `bazel.repo_contents_keep_recent` (3) unreferenced
+  copies, copies used within `bazel.repo_contents_min_age` (72h) and copies a
+  process holds. It takes Bazel's `contents/gc_lock` exclusively only to rename
+  a batch of at most 8 copies into `contents/_trash/`, removes them after
+  releasing it, and skips while a Bazel command holds the lock. A mount that stays critical for `policy.stalled_alert_cycles`
+  (6) cycles while every plugin reclaims nothing gets a warning and a
+  `stalled_mounts` report entry.
+  The over-budget whole-tier rule no longer deletes a repository cache that
+  holds a referenced copy or duplicate copies; the dedupe class reclaims it
+  instead. Discovery follows a top-level `_bazel_*` symlink in a root by one
+  hop, so sting's `~/.cache/bazel/_bazel_jess` cache is measured.
+
 - **Podman keep rule: `podman.protected_labels` and
   `podman.protected_images_file` (TIN-5770).** On sting on 2026-10-28 the
   plugin pruned the mail-lacein harness's pinned rspamd and postfix images and

@@ -27,6 +27,10 @@ type cleanupState struct {
 	// detect byte pressure that repeated cleanup cycles fail to relieve and
 	// back off instead of rescanning every poll interval (TIN-3342).
 	Bytes map[string]byteProgressRecord `json:"bytes,omitempty"`
+	// Stalls counts, per monitored mount path, the consecutive cleanup
+	// cycles that left the mount at the critical level while every plugin
+	// together reclaimed nothing (TIN-5770).
+	Stalls map[string]int `json:"stalls,omitempty"`
 }
 
 type pluginStateRecord struct {
@@ -474,4 +478,31 @@ func (s *cleanupState) recordByteProgress(path string, freeBytes uint64, level s
 	record.LastLevelValue = levelValue
 	record.Engaged = engaged
 	s.Bytes[path] = record
+}
+
+// recordStall advances or clears the stall count for mount path and returns
+// the new count. stalled is true for a cycle that left the mount critical
+// with no reclaim.
+func (s *cleanupState) recordStall(path string, stalled bool) int {
+	if s == nil || path == "" {
+		return 0
+	}
+	if !stalled {
+		delete(s.Stalls, path)
+		return 0
+	}
+	if s.Stalls == nil {
+		s.Stalls = map[string]int{}
+	}
+	s.Stalls[path]++
+	return s.Stalls[path]
+}
+
+// clearStalls drops every stall count and reports whether any was set.
+func (s *cleanupState) clearStalls() bool {
+	if s == nil || len(s.Stalls) == 0 {
+		return false
+	}
+	s.Stalls = nil
+	return true
 }
