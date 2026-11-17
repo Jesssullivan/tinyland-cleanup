@@ -89,6 +89,71 @@ targeted prunes already reach the VM's store.
 `TINYLAND_PODMAN_STORE_TEST=1 go test ./plugins -run ThrowawayStore` checks
 the rule against a real podman with a throwaway store under `$TMPDIR`.
 
+### Podman prune by use
+
+`podman.prune_by_use` (TIN-8526) is `off` by default. It acts only on Linux
+with rootless podman. Darwin and the Podman machine paths never reach it.
+
+| Mode | Effect |
+|---|---|
+| `off` | Nothing changes. |
+| `report` | Logs each image and volume the pass would remove. Removes nothing. The age prune runs as before. |
+| `apply` | Removes them. Replaces the moderate age prune and the aggressive dangling-volume prune. |
+
+The pass runs at the moderate and aggressive levels. It also runs at
+critical whenever the broad system prune does not: `critical_system_prune`
+is off, or the keep rule sends critical through the aggressive passes. Before this, a host held
+at critical removed no unused image (`plugins/podman.go`, `cleanCritical`).
+
+An image is removed when all of these hold:
+
+- `podman images` lists it with a full ID and `Containers: 0`.
+- No pin in `protected_images` or `protected_images_file` names it. A pin
+  counts when `podman image inspect` resolves it to the image's ID, or when
+  it equals one of the image's names or digests.
+- It carries no label in `protected_labels` and is not read-only.
+- It is older than `prune_images_age`. The age runs from the later of its
+  build time and the time it entered the local store. The store time is the
+  modification or change time of `<graphroot>/<driver>-images/<id>`. A
+  missing directory, or one that is not a plain directory, keeps the image.
+
+Podman records no last use. An image a container used after its pull, where
+that container is now gone, is eligible once the age has passed. A container
+that still exists, in any state, blocks the removal.
+
+A dangling volume (`podman volume ls --filter dangling=true`) is removed when
+its driver is `local`, it carries no protected label and its `CreatedAt` is
+older than `prune_images_age`. A volume whose last container was removed a
+minute ago is eligible when the volume itself is old. Protect such volumes
+with a label.
+
+Just before each removal the pass asks `podman image inspect` or `podman
+volume inspect` again and re-reads the keep file. It keeps the item when the
+answer differs: a new protected label, a recreated volume, a store time
+inside the age, or a keep file that changed during the pass. It then runs
+`podman rmi <id>` or `podman volume rm <name>` without `--force`. Podman
+refuses an image or volume a container uses at that moment.
+
+The pass skips the whole cycle when the keep file cannot be read, a pin
+cannot be resolved, `podman info` gives an unexpected answer, podman is not
+rootless, a listing does not parse or `prune_images_age` is under 1h. In
+`apply` mode the prunes it replaces do not run in that cycle either.
+
+`--dry-run` plans the pass and removes nothing. The plan names each item
+with `delete_podman_image`, `delete_podman_volume`, `report` or `keep`, and
+gives the planned bytes. Image bytes are listed sizes, which count shared
+layers once per image. Volume bytes count only the files the daemon can
+read. The measured host free-space delta remains the authority.
+
+```yaml
+podman:
+  prune_images_age: 24h
+  prune_by_use: apply
+  protected_images_file: ~/.config/tinyland-cleanup/keep-images
+  protected_labels:
+    - io.xoxd.lacein-harness
+```
+
 ### Retention
 
 `retention` owns age retention for the temp, cache and build output that

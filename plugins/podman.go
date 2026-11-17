@@ -209,6 +209,11 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 		return plan
 	}
 
+	if p.byUseOn(cfg) && podmanByUseRunsAt(level, cfg, loadPodmanKeep(cfg.Podman, podmanHome())) {
+		addPodmanByUsePlanToCleanupPlan(&plan, p.planByUse(ctx, cfg, time.Now(), logger))
+		plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
+	}
+
 	switch level {
 	case LevelWarning:
 		plan.Steps = append(plan.Steps, "Prune dangling Podman images")
@@ -220,16 +225,21 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 		if keep.FileErr != nil {
 			plan.Warnings = append(plan.Warnings, "protected_images_file unreadable; the age prune is skipped: "+keep.FileErr.Error())
 		}
+		agePrune := podmanAgePruneStep(cfg, keep)
+		if p.byUseApplies(cfg) {
+			agePrune = "Skip the Podman age prune: prune-by-use replaces it"
+		}
 		plan.Steps = append(plan.Steps,
 			"Prune dangling Podman images",
-			podmanAgePruneStep(cfg, keep),
+			agePrune,
 			"Prune old stopped Podman containers",
 		)
 	case LevelAggressive:
-		plan.Steps = append(plan.Steps,
-			"Prune Podman volumes and networks no container uses",
-			"Run moderate Podman cleanup",
-		)
+		volumes := "Prune Podman volumes and networks no container uses"
+		if p.byUseApplies(cfg) {
+			volumes = "Prune Podman networks no container uses (prune-by-use removes volumes)"
+		}
+		plan.Steps = append(plan.Steps, volumes, "Run moderate Podman cleanup")
 		if runtime.GOOS == "darwin" && p.environment.VMRunning && cfg.Podman.TrimVMDisk && !p.fstrimReclaimsHostSpace() {
 			plan.Warnings = append(plan.Warnings, "guest fstrim output is not counted as host bytes for this provider; measured host free-space delta remains authoritative")
 		}
@@ -396,9 +406,19 @@ func (p *PodmanPlugin) cleanModerate(ctx context.Context, cfg *config.Config, lo
 		result.ItemsCleaned++
 	}
 
+	// Prune by use (TIN-8526). In apply mode it replaces the age prune below;
+	// in report mode it only logs and the age prune runs as before.
+	if p.byUseOn(cfg) {
+		freed, removed := p.pruneByUse(ctx, cfg, logger)
+		result.BytesFreed += freed
+		result.ItemsCleaned += removed
+	}
+
 	// Clean old images (with age filter)
 	logger.Debug("cleaning old podman images", "age", cfg.Podman.PruneImagesAge)
-	if keep.FileErr != nil {
+	if p.byUseApplies(cfg) {
+		logger.Debug("podman age prune replaced by prune-by-use")
+	} else if keep.FileErr != nil {
 		// Fail closed: an unreadable keep file may hold the only pin.
 		logger.Warn("skipping podman age prune: protected_images_file unreadable", "file", keep.File, "error", keep.FileErr)
 	} else if keep.active() {
@@ -607,7 +627,11 @@ func (p *PodmanPlugin) pruneUnusedVolumesAndNetworks(ctx context.Context, cfg *c
 	keep := loadPodmanKeep(cfg.Podman, podmanHome())
 	labelFilters := keep.labelFilterArgs()
 	logger.Debug("cleaning unused podman volumes")
-	if len(keep.Labels) > 0 {
+	if p.byUseApplies(cfg) {
+		// The prune-by-use pass in cleanModerate removes dangling volumes
+		// once they are older than prune_images_age.
+		logger.Debug("podman volume prune replaced by prune-by-use")
+	} else if len(keep.Labels) > 0 {
 		// Same libpod all-labels negation as container prune: list the
 		// volumes no container uses and remove each unprotected one.
 		result.ItemsCleaned += p.removeUnusedVolumes(ctx, keep, logger)
@@ -669,6 +693,11 @@ func (p *PodmanPlugin) cleanCritical(ctx context.Context, cfg *config.Config, lo
 		}
 	} else {
 		logger.Warn("skipping broad Podman system prune with volumes", "reason", "critical_system_prune_disabled")
+		if p.byUseOn(cfg) {
+			freed, removed := p.pruneByUse(ctx, cfg, logger)
+			result.BytesFreed += freed
+			result.ItemsCleaned += removed
+		}
 	}
 
 	// On Darwin, aggressive VM cleanup

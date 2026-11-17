@@ -168,6 +168,12 @@ podman:
   # Labels (key or key=value) whose images, containers, volumes and networks
   # no prune removes.
   protected_labels: []
+  # Prune by use on Linux rootless podman (TIN-8526): off, report or apply.
+  # Apply removes each image no container uses and each dangling volume once
+  # older than prune_images_age (at least 1h), by ID and without --force.
+  # Image age is the later of build time and the time it entered the local
+  # store. Protected images and labels are kept. Darwin is unaffected.
+  prune_by_use: "off"
   machine_names:
     - podman-machine-default
 

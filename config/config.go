@@ -415,6 +415,13 @@ type PodmanConfig struct {
 	// carries one of these labels (a key, or key=value) out of every prune.
 	// Each becomes a `--filter label!=<entry>` on the prune commands.
 	ProtectedLabels []string `yaml:"protected_labels"`
+	// PruneByUse is the prune-by-use pass on Linux rootless podman (TIN-8526):
+	// "off" (default), "report" (log what it would remove) or "apply" (remove
+	// each image no container uses and each dangling volume once older than
+	// PruneImagesAge, by ID, without --force). Apply replaces the moderate age
+	// prune and the aggressive dangling-volume prune. The pass also runs at
+	// critical whenever the broad system prune does not. Darwin is unaffected.
+	PruneByUse string `yaml:"prune_by_use"`
 	// MachineNames to check for cleanup (Darwin)
 	MachineNames []string `yaml:"machine_names"`
 	// BuildKitPrune enables targeted BuildKit cache pruning at critical level
@@ -719,6 +726,18 @@ type AgentSessionConfig struct {
 	// output roots under CODEX_HOME, R-C620). Nothing else under them is ever
 	// touched, and no other plugin honours them.
 	BazelBaseCarveouts []string `yaml:"bazel_base_carveouts"`
+}
+
+// ValidatePruneByUse checks podman.prune_by_use. A value other than off,
+// report or apply refuses to load rather than guessing. An empty value is
+// off.
+func (c PodmanConfig) ValidatePruneByUse() error {
+	switch strings.ToLower(strings.TrimSpace(c.PruneByUse)) {
+	case "", "off", "report", "apply":
+		return nil
+	default:
+		return fmt.Errorf("podman.prune_by_use %q: want off, report or apply", c.PruneByUse)
+	}
 }
 
 // ParseDuration parses Go durations plus a trailing "d" for days.
@@ -1249,6 +1268,7 @@ func DefaultConfig() *Config {
 		Podman: PodmanConfig{
 			PruneImagesAge:                   "24h",
 			ProtectRunningContainers:         true,
+			PruneByUse:                       "off",
 			MachineNames:                     []string{"podman-machine-default"},
 			BuildKitPrune:                    true,
 			BuildKitPruneKeepDuration:        "24h",
@@ -1557,6 +1577,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Enable.Retention {
 		if err := config.Retention.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if config.Enable.Podman {
+		if err := config.Podman.ValidatePruneByUse(); err != nil {
 			return nil, err
 		}
 	}
