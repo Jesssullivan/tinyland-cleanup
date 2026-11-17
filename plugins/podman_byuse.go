@@ -54,6 +54,9 @@ var (
 	podmanFullIDPattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	podmanVolumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 	podmanDriverPattern     = regexp.MustCompile(`^[a-z0-9_]+$`)
+	// podmanPinDigestPattern takes the digest from a pin that is a bare
+	// digest or ends in @<digest>.
+	podmanPinDigestPattern = regexp.MustCompile(`(?:^|@)(sha256:[0-9a-f]{64})$`)
 )
 
 // podmanByUseMode returns the configured mode. Any value other than "report"
@@ -260,6 +263,27 @@ func podmanNamesPinned(set map[string]struct{}, names ...[]string) bool {
 	return false
 }
 
+// podmanDigestPinned reports whether the digest of any pin, bare or after
+// '@', equals the image ID or the digest of any of its RepoDigests, whatever
+// the repository name. Podman inspect answers "image not known" for a bare
+// digest and for repo@digest under another repository (TIN-8526 review B1).
+func podmanDigestPinned(set map[string]struct{}, img podmanByUseImage) bool {
+	have := map[string]struct{}{"sha256:" + img.ID: {}}
+	for _, rd := range img.RepoDigests {
+		if m := podmanPinDigestPattern.FindStringSubmatch(rd); m != nil {
+			have[m[1]] = struct{}{}
+		}
+	}
+	for pin := range set {
+		if m := podmanPinDigestPattern.FindStringSubmatch(pin); m != nil {
+			if _, ok := have[m[1]]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // selectPodmanByUseImages decides each listed image from the listing, the
 // resolved pins and the store time. Unknown means keep.
 func selectPodmanByUseImages(images []podmanByUseImage, protected map[string]string, keep podmanKeep, store podmanStoreInfo, age time.Duration, now time.Time) []podmanByUseItem {
@@ -295,6 +319,9 @@ func podmanByUseImageKeepReason(img podmanByUseImage, protected map[string]strin
 	}
 	if podmanNamesPinned(refs, img.Names, img.RepoDigests) {
 		return "a name or digest is pinned"
+	}
+	if podmanDigestPinned(refs, img) {
+		return "a pinned digest matches"
 	}
 	if keep.protectsLabels(img.Labels) {
 		return "carries a protected label"
@@ -400,6 +427,17 @@ func (p *PodmanPlugin) planByUse(ctx context.Context, cfg *config.Config, now ti
 		plan.Warnings = append(plan.Warnings, plan.Keep.FileErr.Error())
 		return plan
 	}
+	if plan.Keep.FileMissing {
+		// The file may hold the only pin, so its absence is unknown, not
+		// "no pins" (TIN-8526 review B2).
+		plan.SkipReason = "protected_images_file_missing"
+		plan.Warnings = append(plan.Warnings, "protected_images_file "+plan.Keep.File+" does not exist")
+		return plan
+	}
+	if plan.Keep.File != "" && plan.Keep.FileRefs == 0 {
+		logger.Warn("podman keep file holds no pins", "file", plan.Keep.File, "pins", plan.Keep.FileRefs)
+		plan.Warnings = append(plan.Warnings, "protected_images_file "+plan.Keep.File+" holds no pins")
+	}
 
 	out, err := p.runPodmanCommand(ctx, "info", "--format", podmanByUseInfoFormat)
 	if err != nil {
@@ -422,6 +460,13 @@ func (p *PodmanPlugin) planByUse(ctx context.Context, cfg *config.Config, now ti
 	if !ok {
 		plan.SkipReason = "protected_image_unresolved"
 		return plan
+	}
+	for id, ref := range protected {
+		if !podmanFullIDPattern.MatchString(id) {
+			plan.SkipReason = "protected_image_unresolved"
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("pin %s resolved to %q, not a full image ID", ref, id))
+			return plan
+		}
 	}
 	plan.Protected = protected
 
@@ -471,7 +516,7 @@ func (p *PodmanPlugin) recheckPodmanByUseItem(ctx context.Context, cfg *config.C
 	cutoff := now.Add(-plan.Age)
 	keepNow := func() (podmanKeep, bool) {
 		keep := loadPodmanKeep(cfg.Podman, podmanHome())
-		same := keep.FileErr == nil && strings.Join(keep.Refs, "\n") == strings.Join(plan.Keep.Refs, "\n")
+		same := keep.FileErr == nil && !keep.FileMissing && strings.Join(keep.Refs, "\n") == strings.Join(plan.Keep.Refs, "\n")
 		return keep, same
 	}
 	const keepChanged = "keep file changed or became unreadable during the pass"
@@ -591,9 +636,9 @@ func (p *PodmanPlugin) pruneByUse(ctx context.Context, cfg *config.Config, logge
 func addPodmanByUsePlanToCleanupPlan(plan *CleanupPlan, byUse podmanByUsePlan) {
 	plan.Metadata["prune_by_use_mode"] = byUse.Mode
 	plan.Metadata["prune_by_use_skip_reason"] = byUse.SkipReason
+	plan.Warnings = append(plan.Warnings, byUse.Warnings...)
 	if byUse.SkipReason != "" {
 		plan.Steps = append(plan.Steps, "Skip the Podman prune-by-use pass: "+byUse.SkipReason)
-		plan.Warnings = append(plan.Warnings, byUse.Warnings...)
 		return
 	}
 	imagesRemove, imagesKeep, volumesRemove, volumesKeep, planned := byUse.counts()

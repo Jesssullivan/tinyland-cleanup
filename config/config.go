@@ -418,9 +418,10 @@ type PodmanConfig struct {
 	// PruneByUse is the prune-by-use pass on Linux rootless podman (TIN-8526):
 	// "off" (default), "report" (log what it would remove) or "apply" (remove
 	// each image no container uses and each dangling volume once older than
-	// PruneImagesAge, by ID, without --force). Apply replaces the moderate age
-	// prune and the aggressive dangling-volume prune. The pass also runs at
-	// critical whenever the broad system prune does not. Darwin is unaffected.
+	// PruneImagesAge, images by ID and volumes by name, without --force).
+	// Apply replaces the moderate age prune and the aggressive dangling-volume
+	// prune. The pass also runs at critical whenever the broad system prune
+	// does not. Darwin is unaffected.
 	PruneByUse string `yaml:"prune_by_use"`
 	// MachineNames to check for cleanup (Darwin)
 	MachineNames []string `yaml:"machine_names"`

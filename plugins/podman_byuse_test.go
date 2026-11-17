@@ -176,6 +176,7 @@ case "$1 $2" in
   "image inspect")
     if [ "$4" = json ]; then
       [ -f "$D/side-$5" ] && cat "$D/side-$5" >> "$D/keep-images"
+      [ -f "$D/rmkeep-$5" ] && rm -f "$D/keep-images"
       [ -f "$D/inspect-$5.json" ] && { cat "$D/inspect-$5.json"; exit 0; }
       echo "Error: $5: image not known" >&2; exit 125
     fi
@@ -241,7 +242,7 @@ func byUseInspectImage(id, created string, labels map[string]string) []map[strin
 }
 
 // stage writes a live-like store: four images and three dangling volumes.
-// Image a is old and unused; b is in use; p is pinned in the keep file; y
+// Image a is old and unused; b is in use; c is pinned in the keep file; 9
 // was pulled an hour ago. Volume v-old is old; v-young is new; v-re was
 // recreated between listing and inspect.
 func (f *byUseFake) stage(t *testing.T) *config.Config {
@@ -251,7 +252,7 @@ func (f *byUseFake) stage(t *testing.T) *config.Config {
 	f.write(t, "images.json", []podmanByUseImage{
 		{ID: byUseID('a'), Names: []string{"localhost/a:1"}, Containers: byUseInt(0), Created: old.Unix(), Size: 1000},
 		{ID: byUseID('b'), Names: []string{"localhost/b:1"}, Containers: byUseInt(2), Created: old.Unix(), Size: 2000},
-		{ID: byUseID('p'), Names: []string{"ghcr.io/x/p@sha256:1"}, Containers: byUseInt(0), Created: old.Unix(), Size: 3000},
+		{ID: byUseID('c'), Names: []string{"ghcr.io/x/p@sha256:1"}, Containers: byUseInt(0), Created: old.Unix(), Size: 3000},
 		{ID: byUseID('9'), Names: []string{"docker.io/y:1"}, Containers: byUseInt(0), Created: old.Unix(), Size: 4000},
 	})
 	f.write(t, "volumes.json", []podmanByUseVolume{
@@ -265,10 +266,10 @@ func (f *byUseFake) stage(t *testing.T) *config.Config {
 	// The new one is also older than the age, so only the CreatedAt
 	// comparison keeps it.
 	f.write(t, "inspect-v-re.json", []podmanByUseVolume{{Name: "v-re", Driver: "local", CreatedAt: time.Now().Add(-50 * time.Hour).UTC().Format(time.RFC3339Nano)}})
-	f.write(t, "pins", "ghcr.io/x/p@sha256:1 "+byUseID('p')+"\n")
+	f.write(t, "pins", "ghcr.io/x/p@sha256:1 "+byUseID('c')+"\n")
 	f.write(t, "keep-images", "ghcr.io/x/p@sha256:1\n")
 	byUseStore(t, map[string]time.Time{
-		byUseID('a'): old, byUseID('b'): old, byUseID('p'): old, byUseID('9'): time.Now().Add(-time.Hour),
+		byUseID('a'): old, byUseID('b'): old, byUseID('c'): old, byUseID('9'): time.Now().Add(-time.Hour),
 	})
 	byUseVolumeBytes(t, 500)
 
@@ -443,6 +444,14 @@ func TestPodmanByUsePlanSkipsOnUnknowns(t *testing.T) {
 		{"pin unresolvable", func(t *testing.T, f *byUseFake, cfg *config.Config) {
 			f.write(t, "pinfail", "")
 		}, "protected_image_unresolved"},
+		{"pin resolves to no full ID", func(t *testing.T, f *byUseFake, cfg *config.Config) {
+			f.write(t, "pins", "ghcr.io/x/p@sha256:1 WARN[0000]\n")
+		}, "protected_image_unresolved"},
+		{"keep file missing", func(t *testing.T, f *byUseFake, cfg *config.Config) {
+			if err := os.Remove(f.keepFile); err != nil {
+				t.Fatal(err)
+			}
+		}, "protected_images_file_missing"},
 		{"age below floor", func(t *testing.T, f *byUseFake, cfg *config.Config) {
 			cfg.Podman.PruneImagesAge = "30m"
 		}, "prune_images_age_below_floor"},
@@ -501,5 +510,100 @@ func TestPodmanByUseConfig(t *testing.T) {
 	}
 	if got := podmanByUseMode(&config.Config{Podman: config.PodmanConfig{PruneByUse: "garbage"}}); got != podmanByUseOff {
 		t.Fatalf("unknown mode maps to %q", got)
+	}
+}
+
+// The fixture's image c is pinned only in the keep file. A missing keep file
+// must not read as "no pins" (review B2).
+func TestPodmanByUseMissingKeepFileRemovesNothing(t *testing.T) {
+	f := newByUseFake(t)
+	cfg := f.stage(t)
+	if err := os.Remove(f.keepFile); err != nil {
+		t.Fatal(err)
+	}
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	byUsePlugin().cleanModerate(context.Background(), cfg, logger)
+	if strings.Contains(f.log(t), "rmi ") || strings.Contains(f.log(t), "volume rm ") {
+		t.Fatalf("removed with the keep file missing:\n%s", f.log(t))
+	}
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "protected_images_file_missing") {
+		t.Fatalf("no warning for the missing keep file:\n%s", buf.String())
+	}
+}
+
+func TestPodmanByUseEmptyKeepFileWarns(t *testing.T) {
+	f := newByUseFake(t)
+	cfg := f.stage(t)
+	f.write(t, "keep-images", "# no pins yet\n")
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	plan := byUsePlugin().planByUse(context.Background(), cfg, time.Now(), logger)
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "pins=0") {
+		t.Fatalf("no Warn with the pin count for an empty keep file:\n%s", buf.String())
+	}
+	if len(plan.Warnings) != 1 || !strings.Contains(plan.Warnings[0], "holds no pins") {
+		t.Fatalf("plan warnings = %q", plan.Warnings)
+	}
+	dry := byUsePlugin().PlanCleanup(context.Background(), LevelModerate, cfg, byUseLogger())
+	found := false
+	for _, w := range dry.Warnings {
+		found = found || strings.Contains(w, "holds no pins")
+	}
+	if !found {
+		t.Fatalf("dry-run plan omits the empty keep file: %q", dry.Warnings)
+	}
+}
+
+func TestPodmanByUseRecheckKeepsWhenTheKeepFileDisappears(t *testing.T) {
+	f := newByUseFake(t)
+	cfg := f.stage(t)
+	f.write(t, "keep-images", "")
+	f.write(t, "rmkeep-"+byUseID('a'), "")
+	byUsePlugin().pruneByUse(context.Background(), cfg, byUseLogger())
+	if got := f.removals(t); len(got) != 0 {
+		t.Fatalf("removals after the keep file disappeared: %q", got)
+	}
+}
+
+// A pinned digest keeps the image under any repository name, and as a bare
+// digest, although podman inspect answers "image not known" for both
+// (review B1). The check runs at plan time and at the re-check.
+func TestPodmanByUseDigestPinKeepsImageUnderAnyName(t *testing.T) {
+	const digest = "sha256:b544b2f4d2b1a5c3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9"
+	for _, pin := range []string{
+		"ghcr.io/xoxd-ai/blahaj/rspamd@" + digest,
+		"ghcr.io/xoxd-ai/blahaj/rspamd:1@" + digest,
+		digest,
+		"sha256:" + byUseID('a'),
+	} {
+		t.Run(pin, func(t *testing.T) {
+			f := newByUseFake(t)
+			cfg := f.stage(t)
+			old := time.Now().Add(-72 * time.Hour)
+			f.write(t, "images.json", []podmanByUseImage{{
+				ID: byUseID('a'), Names: []string{"localhost/rspamd:pinned"},
+				RepoDigests: []string{"localhost/rspamd@" + digest},
+				Containers:  byUseInt(0), Created: old.Unix(), Size: 1000,
+			}})
+			f.write(t, "keep-images", pin+"\n")
+			plan := byUsePlugin().planByUse(context.Background(), cfg, time.Now(), byUseLogger())
+			if plan.SkipReason != "" || len(plan.Items) == 0 || plan.Items[0].Remove {
+				t.Fatalf("pin %s did not keep the image: %#v", pin, plan)
+			}
+			// The re-check alone must also keep it.
+			item := podmanByUseItem{Kind: "image", ID: byUseID('a'), Remove: true}
+			insp := []map[string]any{{"Id": byUseID('a'), "Created": old.UTC().Format(time.RFC3339Nano), "RepoDigests": []string{"localhost/rspamd@" + digest}}}
+			f.write(t, "inspect-"+byUseID('a')+".json", insp)
+			if reason := byUsePlugin().recheckPodmanByUseItem(context.Background(), cfg, plan, item, time.Now()); reason == "" {
+				t.Fatalf("re-check allows removal under pin %s", pin)
+			}
+		})
+	}
+	// Control: an unrelated digest pins nothing.
+	img := podmanByUseImage{ID: byUseID('a'), RepoDigests: []string{"localhost/rspamd@" + digest}}
+	other := map[string]struct{}{"ghcr.io/x/y@sha256:" + byUseID('f'): {}, "sha256:" + byUseID('f'): {}}
+	if podmanDigestPinned(other, img) {
+		t.Fatal("an unrelated digest pinned the image")
 	}
 }
