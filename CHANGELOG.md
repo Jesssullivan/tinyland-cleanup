@@ -30,8 +30,12 @@ All notable changes to this project will be documented in this file.
   contents copies at moderate or higher (#176). Mount pressure now lifts
   zero-yield backoff once `policy.zero_yield_pressure_min_interval` has passed
   since the plugin's last run. It defaults to `1h` and is never under `5m`.
-- Every other key this release adds is off or keeps the earlier behaviour by
-  default.
+- Five more keys that are new since 0.4.3 act by default:
+  `nix.max_busy_deferrals` (72) and `nix.max_busy_deferral_duration` (6h)
+  release a Nix collection that 0.4.3 deferred without bound,
+  `nix.min_gc_interval` (30m) blocks a collection within 30 minutes of the
+  last one, `nix.max_freed_per_pass` (50G) caps each pass, and
+  `policy.stalled_alert_cycles` (6) adds the stalled-mount warning.
 
 ### Added
 
