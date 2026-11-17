@@ -72,7 +72,21 @@ mail-lacein harness run's pinned images, networks and volumes between runs.
    prune-by-use pass below skips instead. A file that cannot be read, a
    dangling symlink or anything but a regular file skips the age prune for
    that cycle. So does a pin that `podman image inspect`
-   fails on for any reason other than "image not known".
+   fails on for any reason other than "image not known". A pin with a
+   digest is also asked as
+   `podman images --all --no-trunc --quiet --filter digest=<digest>`, and
+   each image podman returns is kept. Podman answers from every digest it
+   stored for the image, under any name or none. An error, a line that is
+   not `sha256:<64 hex>`, or an `@` part that is not a sha256 or sha512
+   digest skips the age prune. While any image pin or keep file is
+   configured, the dangling-image prune (`podman image prune -f`) does not
+   run: it takes no reference exclusion, and an image whose tag moved to a
+   newer pull is dangling while a digest pin still names it. The age prune
+   and the prune-by-use pass still remove old, unpinned dangling images.
+
+   A pin by tag keeps the image the tag names now. Once the tag moves, the
+   image it named before is not kept by that pin. Pin by digest to keep a
+   given image.
 
 ```yaml
 podman:
@@ -111,9 +125,14 @@ An image is removed when all of these hold:
 - `podman images` lists it with a full ID and `Containers: 0`.
 - No pin in `protected_images` or `protected_images_file` names it. A pin
   counts when `podman image inspect` resolves it to the image's ID, or when
-  it equals one of the image's names or digests. A pin whose `sha256:<hex>`
-  part, bare or after `@`, equals the image ID or the digest of any of its
-  `RepoDigests` also counts, whatever the repository name.
+  it equals one of the image's names or digests. A pin's digest counts too:
+  the part after `@`, a bare digest, or a bare 64-hex pin read as sha256.
+  It keeps the image when it equals the image ID, the listed `Digest`, any
+  listed `Digests`, or the digest of any `RepoDigests` entry, whatever the
+  repository name. It also keeps each image that
+  `podman images --filter digest=` returns for it. That covers an image
+  with no name (`Names` null, `RepoDigests` empty) and a manifest-list
+  digest.
 - It carries no label in `protected_labels` and is not read-only.
 - It is older than `prune_images_age`. The age runs from the later of its
   build time and the time it entered the local store. The store time is the
@@ -142,9 +161,12 @@ runs and logs `podman keep file holds no pins` at Warn with `pins=0`. The
 dry-run plan carries the same warning.
 
 The pass skips the whole cycle when the keep file is configured but missing
-or cannot be read, a pin cannot be resolved to a full image ID, `podman
-info` gives an unexpected answer, podman is not rootless, a listing does
-not parse or `prune_images_age` is under 1h. In `apply` mode the prunes it
+or cannot be read, `podman image inspect` of a pin fails for any reason but
+"image not known" or resolves to anything but a full image ID, the digest
+question for a pin fails or gives a line that is not a full image ID, a
+pin's `@` part is not a digest the pass can compare, `podman info` gives an
+unexpected answer, podman is not rootless, a listing does not parse or
+`prune_images_age` is under 1h. In `apply` mode the prunes it
 replaces do not run in that cycle either.
 
 `--dry-run` plans the pass and removes nothing. The plan names each item

@@ -54,10 +54,28 @@ var (
 	podmanFullIDPattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	podmanVolumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 	podmanDriverPattern     = regexp.MustCompile(`^[a-z0-9_]+$`)
-	// podmanPinDigestPattern takes the digest from a pin that is a bare
-	// digest or ends in @<digest>.
-	podmanPinDigestPattern = regexp.MustCompile(`(?:^|@)(sha256:[0-9a-f]{64})$`)
+	// podmanDigestPattern is a digest the pass can compare: sha256 or
+	// sha512 in lower-case hex.
+	podmanDigestPattern = regexp.MustCompile(`^(?:sha256:[0-9a-f]{64}|sha512:[0-9a-f]{128})$`)
 )
+
+// podmanPinDigest returns the digest a pin carries: the part after '@', a
+// bare digest, or a bare 64-hex pin read as sha256. It returns "" for a pin
+// with no digest. ok is false when the pin has an '@' and the part after it
+// is not a digest the pass can compare, so the caller keeps everything.
+func podmanPinDigest(pin string) (digest string, ok bool) {
+	if i := strings.LastIndexByte(pin, '@'); i >= 0 {
+		d := pin[i+1:]
+		return d, podmanDigestPattern.MatchString(d)
+	}
+	if podmanFullIDPattern.MatchString(pin) {
+		return "sha256:" + pin, true
+	}
+	if podmanDigestPattern.MatchString(pin) {
+		return pin, true
+	}
+	return "", true
+}
 
 // podmanByUseMode returns the configured mode. Any value other than "report"
 // or "apply" is off; config validation refuses such values at load.
@@ -103,10 +121,15 @@ func podmanByUseRunsAt(level CleanupLevel, cfg *config.Config, keep podmanKeep) 
 
 // podmanByUseImage is the part of `podman images --format json` the pass
 // reads. Containers is a pointer so a listing without the field is kept.
+// Digest is the image's own manifest digest. Podman 5.8 lists it even for an
+// image with no name, where Names is null and RepoDigests is empty. Digests
+// is read in case a podman lists it.
 type podmanByUseImage struct {
 	ID          string            `json:"Id"`
 	Names       []string          `json:"Names"`
 	RepoDigests []string          `json:"RepoDigests"`
+	Digest      string            `json:"Digest"`
+	Digests     []string          `json:"Digests"`
 	Containers  *int              `json:"Containers"`
 	ReadOnly    bool              `json:"ReadOnly"`
 	Created     int64             `json:"Created"`
@@ -263,20 +286,27 @@ func podmanNamesPinned(set map[string]struct{}, names ...[]string) bool {
 	return false
 }
 
-// podmanDigestPinned reports whether the digest of any pin, bare or after
-// '@', equals the image ID or the digest of any of its RepoDigests, whatever
-// the repository name. Podman inspect answers "image not known" for a bare
-// digest and for repo@digest under another repository (TIN-8526 review B1).
+// podmanDigestPinned reports whether the digest of any pin equals the image
+// ID, its Digest, any of its Digests or the digest of any of its
+// RepoDigests, whatever the repository name. Podman inspect answers "image
+// not known" for a bare digest, for repo@digest under another repository
+// and for an image with no name (TIN-8526 reviews B1, B3). A manifest-list
+// digest is not in these fields once the image has no name; the plan's
+// `--filter digest=` question covers it (resolveProtectedImageIDs).
 func podmanDigestPinned(set map[string]struct{}, img podmanByUseImage) bool {
-	have := map[string]struct{}{"sha256:" + img.ID: {}}
+	have := map[string]struct{}{"sha256:" + img.ID: {}, img.Digest: {}}
+	for _, d := range img.Digests {
+		have[d] = struct{}{}
+	}
 	for _, rd := range img.RepoDigests {
-		if m := podmanPinDigestPattern.FindStringSubmatch(rd); m != nil {
-			have[m[1]] = struct{}{}
+		if d, _ := podmanPinDigest(rd); d != "" {
+			have[d] = struct{}{}
 		}
 	}
+	delete(have, "")
 	for pin := range set {
-		if m := podmanPinDigestPattern.FindStringSubmatch(pin); m != nil {
-			if _, ok := have[m[1]]; ok {
+		if d, _ := podmanPinDigest(pin); d != "" {
+			if _, ok := have[d]; ok {
 				return true
 			}
 		}
@@ -535,6 +565,8 @@ func (p *PodmanPlugin) recheckPodmanByUseItem(ctx context.Context, cfg *config.C
 			Labels      map[string]string `json:"Labels"`
 			RepoTags    []string          `json:"RepoTags"`
 			RepoDigests []string          `json:"RepoDigests"`
+			Digest      string            `json:"Digest"`
+			Digests     []string          `json:"Digests"`
 		}
 		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil || len(got) != 1 || got[0].ID != item.ID {
 			return "image inspect answer unexpected"
@@ -548,6 +580,8 @@ func (p *PodmanPlugin) recheckPodmanByUseItem(ctx context.Context, cfg *config.C
 			ID:          got[0].ID,
 			Names:       got[0].RepoTags,
 			RepoDigests: got[0].RepoDigests,
+			Digest:      got[0].Digest,
+			Digests:     got[0].Digests,
 			Containers:  &zero, // podman rmi without --force refuses an image in use
 			Created:     created.Unix(),
 			Labels:      got[0].Labels,

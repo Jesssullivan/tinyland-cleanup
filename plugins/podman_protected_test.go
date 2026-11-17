@@ -174,7 +174,7 @@ exit 0
 	cfg := config.DefaultConfig()
 	cfg.Podman.ProtectedImages = []string{
 		"docker.io/kicad/kicad@sha256:c8f05703e865a1caa7266851cf4986dd01d5fb1148e4f63382b6a73466ba7e71",
-		"docker.io/absent/image@sha256:0000",
+		"docker.io/absent/image@sha256:0000000000000000000000000000000000000000000000000000000000000000",
 	}
 	p := &PodmanPlugin{environment: &PodmanEnvironment{Runtime: "podman"}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

@@ -216,7 +216,6 @@ func TestPodmanAggressiveKeepRule(t *testing.T) {
 		"network prune -f " + filters,
 		"ps -a --format json",
 		"rm c-plain",
-		"image prune -f " + filters,
 		"rmi docker.io/library/old:1",
 	} {
 		if !strings.Contains(joined, want) {
@@ -224,7 +223,9 @@ func TestPodmanAggressiveKeepRule(t *testing.T) {
 		}
 	}
 	// B1: a resource with only one of the protected labels is still kept.
-	for _, never := range []string{"system prune", "image prune -af", "--build-cache", "container prune", "volume prune",
+	// The keep file pins images, so the dangling prune, which takes no
+	// reference exclusion, does not run (TIN-8526 review B3).
+	for _, never := range []string{"system prune", "image prune", "--build-cache", "container prune", "volume prune",
 		"volume rm v-one", "rm c-both", "rm c-one", "rm c-young", "rm c-running", "rm c-pod",
 		"rmi ghcr.io/xoxd-ai/blahaj/rspamd", "rmi localhost/lacein-probe", "rmi ghcr.io/xoxd-ai/blahaj/postfix-rocky", "--force", " -f c-"} {
 		if strings.Contains(joined, never) {
@@ -297,7 +298,7 @@ func TestPodmanMissingKeepFileStillBlocksSystemPrune(t *testing.T) {
 func TestPodmanInspectErrorKeepsThePin(t *testing.T) {
 	logPath := fakePodman(t, laceinImagesFixture)
 	cfg := config.DefaultConfig()
-	cfg.Podman.ProtectedImages = []string{"broken/image@sha256:1", "absent/image@sha256:2"}
+	cfg.Podman.ProtectedImages = []string{"broken/image@sha256:" + strings.Repeat("1", 64), "absent/image@sha256:" + strings.Repeat("2", 64)}
 	p := &PodmanPlugin{environment: &PodmanEnvironment{Runtime: "podman"}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	p.cleanModerate(context.Background(), cfg, logger)

@@ -18,6 +18,9 @@ import (
 
 func byUseID(c byte) string { return strings.Repeat(string(c), 64) }
 
+// byUsePinC is the keep-file pin of the stage fixture's image c.
+var byUsePinC = "ghcr.io/x/p@sha256:" + byUseID('1')
+
 func byUseInt(n int) *int { return &n }
 
 var byUseNow = time.Date(2026, 11, 17, 3, 0, 0, 0, time.UTC)
@@ -172,6 +175,10 @@ echo "$*" >> "$D/calls.log"
 case "$1 $2" in
   "info --format") printf 'true\t%s\toverlay\n' "$D/storage" ;;
   "images --format") cat "$D/images.json" ;;
+  "images --all")
+    [ -f "$D/digestfail" ] && { echo "Error: database is locked" >&2; exit 125; }
+    d="${6#digest=}"
+    [ -f "$D/digest-$d" ] && cat "$D/digest-$d" ;;
   "volume ls") cat "$D/volumes.json" ;;
   "image inspect")
     if [ "$4" = json ]; then
@@ -252,7 +259,7 @@ func (f *byUseFake) stage(t *testing.T) *config.Config {
 	f.write(t, "images.json", []podmanByUseImage{
 		{ID: byUseID('a'), Names: []string{"localhost/a:1"}, Containers: byUseInt(0), Created: old.Unix(), Size: 1000},
 		{ID: byUseID('b'), Names: []string{"localhost/b:1"}, Containers: byUseInt(2), Created: old.Unix(), Size: 2000},
-		{ID: byUseID('c'), Names: []string{"ghcr.io/x/p@sha256:1"}, Containers: byUseInt(0), Created: old.Unix(), Size: 3000},
+		{ID: byUseID('c'), Names: []string{byUsePinC}, Containers: byUseInt(0), Created: old.Unix(), Size: 3000},
 		{ID: byUseID('9'), Names: []string{"docker.io/y:1"}, Containers: byUseInt(0), Created: old.Unix(), Size: 4000},
 	})
 	f.write(t, "volumes.json", []podmanByUseVolume{
@@ -266,8 +273,8 @@ func (f *byUseFake) stage(t *testing.T) *config.Config {
 	// The new one is also older than the age, so only the CreatedAt
 	// comparison keeps it.
 	f.write(t, "inspect-v-re.json", []podmanByUseVolume{{Name: "v-re", Driver: "local", CreatedAt: time.Now().Add(-50 * time.Hour).UTC().Format(time.RFC3339Nano)}})
-	f.write(t, "pins", "ghcr.io/x/p@sha256:1 "+byUseID('c')+"\n")
-	f.write(t, "keep-images", "ghcr.io/x/p@sha256:1\n")
+	f.write(t, "pins", byUsePinC+" "+byUseID('c')+"\n")
+	f.write(t, "keep-images", byUsePinC+"\n")
 	byUseStore(t, map[string]time.Time{
 		byUseID('a'): old, byUseID('b'): old, byUseID('c'): old, byUseID('9'): time.Now().Add(-time.Hour),
 	})
@@ -445,7 +452,7 @@ func TestPodmanByUsePlanSkipsOnUnknowns(t *testing.T) {
 			f.write(t, "pinfail", "")
 		}, "protected_image_unresolved"},
 		{"pin resolves to no full ID", func(t *testing.T, f *byUseFake, cfg *config.Config) {
-			f.write(t, "pins", "ghcr.io/x/p@sha256:1 WARN[0000]\n")
+			f.write(t, "pins", byUsePinC+" WARN[0000]\n")
 		}, "protected_image_unresolved"},
 		{"keep file missing", func(t *testing.T, f *byUseFake, cfg *config.Config) {
 			if err := os.Remove(f.keepFile); err != nil {
@@ -605,5 +612,200 @@ func TestPodmanByUseDigestPinKeepsImageUnderAnyName(t *testing.T) {
 	other := map[string]struct{}{"ghcr.io/x/y@sha256:" + byUseID('f'): {}, "sha256:" + byUseID('f'): {}}
 	if podmanDigestPinned(other, img) {
 		t.Fatal("an unrelated digest pinned the image")
+	}
+}
+
+// An image whose tag moved to a newer pull has no name. Podman 5.8.8 on
+// sting lists such an image with "Names": null, "RepoDigests": [] and its own
+// "Digest", and `podman image inspect` gives "RepoTags": [], "RepoDigests": []
+// and the same "Digest". Inspect of repo@digest answers "image not known". A
+// pin must still keep the image however podman lists it (review B3).
+func TestPodmanByUsePinKeepsTheImageHoweverPodmanListsIt(t *testing.T) {
+	const instance = "sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657"
+	const list = "sha256:43f9275df91e012c3da3d86bea5d7bb5e67a473296cc906c5f9e80b8176b1a37"
+	id := byUseID('a')
+	cases := []struct {
+		name, pin string
+		names     []string
+		repoDig   []string
+		digests   []string // listed Digests, absent on podman 5.8.8
+		filter    string   // `--filter digest=` answer for the pin's digest
+		resolves  bool     // `image inspect <pin>` resolves to id
+	}{
+		// Only the Digest field matches: the filter answers nothing.
+		{name: "no name, instance digest pin", pin: "docker.io/library/postgres@" + instance},
+		{name: "no name, bare instance digest", pin: instance},
+		{name: "no name, tag and digest pin", pin: "docker.io/library/postgres:16@" + instance},
+		// A manifest-list digest is in no listed field; only podman's
+		// digest filter knows it.
+		{name: "no name, manifest list digest pin", pin: "docker.io/library/postgres@" + list, filter: "sha256:" + id + "\n"},
+		{name: "no name, Digests field", pin: "docker.io/library/postgres@" + list, digests: []string{list}},
+		{name: "renamed, instance digest", pin: "docker.io/library/postgres@" + instance,
+			names: []string{"localhost/pg:keep"}, repoDig: []string{"localhost/pg@" + instance}},
+		{name: "image id pin", pin: id},
+		{name: "sha256 image id pin", pin: "sha256:" + id},
+		{name: "short id pin", pin: id[:12], resolves: true},
+		{name: "named, tag pin", pin: "docker.io/library/postgres:16", names: []string{"docker.io/library/postgres:16"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newByUseFake(t)
+			cfg := f.stage(t)
+			old := time.Now().Add(-72 * time.Hour)
+			repoDig := c.repoDig
+			if repoDig == nil {
+				repoDig = []string{}
+			}
+			f.write(t, "images.json", []podmanByUseImage{{
+				ID: id, Names: c.names, RepoDigests: repoDig, Digest: instance, Digests: c.digests,
+				Containers: byUseInt(0), Created: old.Unix(), Size: 1000,
+			}})
+			f.write(t, "keep-images", c.pin+"\n")
+			pins := ""
+			if c.resolves {
+				pins = c.pin + " " + id + "\n"
+			}
+			f.write(t, "pins", pins)
+			if c.filter != "" {
+				d, _ := podmanPinDigest(c.pin)
+				f.write(t, "digest-"+d, c.filter)
+			}
+			tags := c.names
+			if tags == nil {
+				tags = []string{}
+			}
+			f.write(t, "inspect-"+id+".json", []map[string]any{{
+				"Id": id, "Created": old.UTC().Format(time.RFC3339Nano), "Digest": instance,
+				"Digests": c.digests, "RepoTags": tags, "RepoDigests": repoDig,
+			}})
+
+			plan := byUsePlugin().planByUse(context.Background(), cfg, time.Now(), byUseLogger())
+			if remove, listed := byUseDecisions(plan.Items)[id]; plan.SkipReason != "" || !listed || remove {
+				t.Fatalf("pin %s did not keep the image: skip=%q items=%#v", c.pin, plan.SkipReason, plan.Items)
+			}
+			// The re-check alone must keep it too.
+			item := podmanByUseItem{Kind: "image", ID: id, Remove: true}
+			if reason := byUsePlugin().recheckPodmanByUseItem(context.Background(), cfg, plan, item, time.Now()); reason == "" {
+				t.Fatalf("re-check allows removal under pin %s", c.pin)
+			}
+			byUsePlugin().pruneByUse(context.Background(), cfg, byUseLogger())
+			if strings.Contains(f.log(t), "rmi ") {
+				t.Fatalf("pinned image removed:\n%s", f.log(t))
+			}
+		})
+	}
+
+	// Control: the same image under an unrelated pin is removed, so each
+	// case above is kept by its pin and not by the fixture.
+	f := newByUseFake(t)
+	cfg := f.stage(t)
+	old := time.Now().Add(-72 * time.Hour)
+	f.write(t, "images.json", []podmanByUseImage{{ID: id, RepoDigests: []string{}, Digest: instance, Containers: byUseInt(0), Created: old.Unix(), Size: 1000}})
+	f.write(t, "keep-images", "docker.io/library/postgres@sha256:"+byUseID('f')+"\n")
+	plan := byUsePlugin().planByUse(context.Background(), cfg, time.Now(), byUseLogger())
+	if plan.SkipReason != "" || !byUseDecisions(plan.Items)[id] {
+		t.Fatalf("control: unrelated pin kept the image: skip=%q items=%#v", plan.SkipReason, plan.Items)
+	}
+}
+
+// The digest question is closed: an error, an unexpected line or a digest
+// the pass cannot compare skips the pass.
+func TestPodmanByUseDigestQuestionSkipsOnAnyUnexpectedAnswer(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*testing.T, *byUseFake)
+	}{
+		{"listing error", func(t *testing.T, f *byUseFake) { f.write(t, "digestfail", "") }},
+		{"warning line", func(t *testing.T, f *byUseFake) {
+			f.write(t, "digest-sha256:"+byUseID('1'), "WARN[0000] something\n")
+		}},
+		{"short id line", func(t *testing.T, f *byUseFake) {
+			f.write(t, "digest-sha256:"+byUseID('1'), "sha256:"+byUseID('c')[:12]+"\n")
+		}},
+		{"short digest pin", func(t *testing.T, f *byUseFake) { f.write(t, "keep-images", "ghcr.io/x/p@sha256:1\n") }},
+		{"unknown algorithm pin", func(t *testing.T, f *byUseFake) { f.write(t, "keep-images", "ghcr.io/x/p@md5:"+byUseID('1')[:32]+"\n") }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newByUseFake(t)
+			cfg := f.stage(t)
+			c.setup(t, f)
+			plan := byUsePlugin().planByUse(context.Background(), cfg, time.Now(), byUseLogger())
+			if plan.SkipReason != "protected_image_unresolved" {
+				t.Fatalf("skip reason = %q", plan.SkipReason)
+			}
+			byUsePlugin().pruneByUse(context.Background(), cfg, byUseLogger())
+			if got := f.removals(t); len(got) != 0 {
+				t.Fatalf("removed despite %s: %q", c.name, got)
+			}
+		})
+	}
+	// Control: the staged answer with a full ID line runs the pass.
+	f := newByUseFake(t)
+	cfg := f.stage(t)
+	f.write(t, "digest-sha256:"+byUseID('1'), "sha256:"+byUseID('c')+"\n")
+	if plan := byUsePlugin().planByUse(context.Background(), cfg, time.Now(), byUseLogger()); plan.SkipReason != "" {
+		t.Fatalf("control skipped: %q %q", plan.SkipReason, plan.Warnings)
+	}
+	if !strings.Contains(f.log(t), "images --all --no-trunc --quiet --filter digest=sha256:"+byUseID('1')) {
+		t.Fatalf("digest question not asked:\n%s", f.log(t))
+	}
+}
+
+// `podman image prune -f` removes every dangling image and takes no reference
+// exclusion. While an image pin is configured it does not run.
+func TestPodmanDanglingPruneWaitsForNoImagePins(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*config.Config, string)
+		runs  bool
+	}{
+		{"labels only", func(cfg *config.Config, _ string) { cfg.Podman.ProtectedLabels = []string{laceinLabel} }, true},
+		{"protected_images", func(cfg *config.Config, _ string) { cfg.Podman.ProtectedImages = []string{"sha256:" + byUseID('1')} }, false},
+		{"keep file missing", func(cfg *config.Config, dir string) {
+			cfg.Podman.ProtectedImagesFile = filepath.Join(dir, "not-written-yet")
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			logPath := fakePodman(t, "[]")
+			cfg := config.DefaultConfig()
+			c.setup(cfg, t.TempDir())
+			p := &PodmanPlugin{environment: &PodmanEnvironment{Runtime: "podman"}}
+			p.cleanDangling(context.Background(), cfg, byUseLogger())
+			p.cleanModerate(context.Background(), cfg, byUseLogger())
+			raw, _ := os.ReadFile(logPath)
+			n := strings.Count(string(raw), "image prune -f")
+			if c.runs && n != 2 || !c.runs && n != 0 {
+				t.Fatalf("dangling prunes = %d, want runs=%v:\n%s", n, c.runs, raw)
+			}
+			plan := p.PlanCleanup(context.Background(), LevelWarning, cfg, byUseLogger())
+			if skip := strings.Contains(strings.Join(plan.Steps, "\n"), "Skip the dangling"); skip == c.runs {
+				t.Fatalf("plan steps %q, want runs=%v", plan.Steps, c.runs)
+			}
+		})
+	}
+}
+
+// The older age prune shares the pin resolution, so a digest pin keeps an
+// image with no name there as well.
+func TestPodmanAgePruneKeepsADigestPinnedImageWithNoName(t *testing.T) {
+	logPath := fakePodman(t, `[{"Id":"`+byUseID('a')+`","Names":null,"Containers":0,"Size":5},
+ {"Id":"`+byUseID('b')+`","Names":null,"Containers":0,"Size":7}]`)
+	dir := filepath.Dir(logPath)
+	script := filepath.Join(dir, "podman")
+	raw, _ := os.ReadFile(script)
+	digestCase := `  "images --all") [ "$6" = "digest=sha256:` + byUseID('1') + `" ] && echo "sha256:` + byUseID('a') + `" ;;
+  "images --format")`
+	if err := os.WriteFile(script, []byte(strings.Replace(string(raw), `  "images --format")`, digestCase, 1)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Podman.ProtectedImages = []string{"docker.io/library/postgres@sha256:" + byUseID('1')}
+	p := &PodmanPlugin{environment: &PodmanEnvironment{Runtime: "podman"}}
+	p.cleanModerate(context.Background(), cfg, byUseLogger())
+	calls, _ := os.ReadFile(logPath)
+	if strings.Contains(string(calls), "rmi "+byUseID('a')) || !strings.Contains(string(calls), "rmi "+byUseID('b')) {
+		t.Fatalf("age prune calls:\n%s", calls)
 	}
 }

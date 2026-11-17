@@ -112,6 +112,17 @@ func readPodmanKeepFileState(path string) ([]string, bool, error) {
 	return refs, false, nil
 }
 
+// pinsImages reports whether an image pin is configured, in the config or
+// through a keep file, present or not. `podman image prune -f` removes every
+// dangling image and takes no reference or digest exclusion. An image whose
+// tag moved to a newer pull is dangling while a digest pin still names it
+// (TIN-8526 review B3), so the plugin skips that prune while this holds. The
+// age prune and the prune-by-use pass still remove old unpinned dangling
+// images.
+func (k podmanKeep) pinsImages() bool {
+	return len(k.Refs) > 0 || k.File != ""
+}
+
 // active reports whether the keep rule is on. A configured keep file counts
 // even when it is missing or empty, so a harness that has not written its
 // pins yet still keeps the critical system prune off.
