@@ -40,7 +40,9 @@ const (
 //   - no stash exists;
 //   - no commit reachable from HEAD, a local branch or a local tag is
 //     missing from every remote-tracking ref. A repository with no remote
-//     therefore always stays, and so does a HEAD on no remote.
+//     therefore always stays, and so does a HEAD that no remote-tracking
+//     ref contains. The refs are local: a remote repository deleted after
+//     the last fetch still reads as holding its commits.
 //
 // GIT_OPTIONAL_LOCKS=0 stops git status from rewriting the index, so a probe
 // does not refresh the age it was asked about. core.fsmonitor is off so a
@@ -129,7 +131,7 @@ func (p *HomeLanesPlugin) homeLanesGitKeepReason(ctx context.Context, dir string
 		return unknown("unpushed commit count", err)
 	}
 	if n != 0 {
-		return "git checkout " + dir + " has " + strconv.Itoa(n) + " commit(s) on no remote"
+		return "git checkout " + dir + " has " + strconv.Itoa(n) + " commit(s) missing from every remote-tracking ref"
 	}
 	return ""
 }

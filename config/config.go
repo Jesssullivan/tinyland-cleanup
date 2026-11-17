@@ -761,7 +761,8 @@ type HomeLanesConfig struct {
 	// direct entries are removed once stale (TIN-8526). An entry is stale when
 	// no file under it was modified within StaleWorkIdleAfter. A Git checkout
 	// anywhere inside with uncommitted changes, a stash, linked work trees or
-	// commits on no remote keeps the entry. Empty inspects none.
+	// commits missing from every remote-tracking ref keeps the entry. Empty
+	// inspects none.
 	StaleWorkRoots []string `yaml:"stale_work_roots"`
 	// StaleWorkIdleAfter is how long the newest modification in a stale work
 	// entry must be past (at least 7d).

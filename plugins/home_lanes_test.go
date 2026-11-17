@@ -1,3 +1,5 @@
+//go:build linux
+
 package plugins
 
 import (
@@ -539,7 +541,7 @@ func gitRun(t *testing.T, dir string, args ...string) string {
 }
 
 // checkout makes a clone at dir whose main branch is pushed to a bare remote
-// outside the build root. It is clean and has nothing on no remote.
+// outside the build root. It is clean and every commit is on a remote-tracking ref.
 func checkout(t *testing.T, dir string) string {
 	t.Helper()
 	remote := filepath.Join(t.TempDir(), "remote.git")
@@ -621,25 +623,25 @@ func TestHomeLanesStaleWorkKeepsUnsavedGitWork(t *testing.T) {
 		}, "has a stash"},
 		"unpushed commit": {func(t *testing.T, repo string) {
 			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "two")
-		}, "on no remote"},
+		}, "missing from every remote-tracking ref"},
 		"local branch on no remote": {func(t *testing.T, repo string) {
 			gitRun(t, repo, "branch", "side")
 			gitRun(t, repo, "checkout", "-q", "side")
 			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "side")
 			gitRun(t, repo, "checkout", "-q", "main")
-		}, "on no remote"},
+		}, "missing from every remote-tracking ref"},
 		"detached head on no remote": {func(t *testing.T, repo string) {
 			gitRun(t, repo, "checkout", "-q", "--detach")
 			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "detached")
-		}, "on no remote"},
+		}, "missing from every remote-tracking ref"},
 		"local tag on no remote": {func(t *testing.T, repo string) {
 			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "tagged")
 			gitRun(t, repo, "tag", "v1")
 			gitRun(t, repo, "reset", "-q", "--hard", "origin/main")
-		}, "on no remote"},
+		}, "missing from every remote-tracking ref"},
 		"no remote": {func(t *testing.T, repo string) {
 			gitRun(t, repo, "remote", "remove", "origin")
-		}, "on no remote"},
+		}, "missing from every remote-tracking ref"},
 		"linked work tree": {func(t *testing.T, repo string) {
 			gitRun(t, repo, "worktree", "add", "-q", "--detach", filepath.Join(t.TempDir(), "wt"))
 		}, "other work trees"},
@@ -738,6 +740,30 @@ func TestHomeLanesStaleWorkKeepsWhatItCannotInspect(t *testing.T) {
 		if !exists(p) {
 			t.Fatalf("%s was removed", p)
 		}
+	}
+}
+
+// The recheck asks git again just before removal. A checkout that turns
+// dirty after the plan keeps its entry. The freeBytes seam runs between the
+// plan and the recheck, and resets the ages so only git can keep the entry.
+func TestHomeLanesStaleWorkRecheckAsksGitAgain(t *testing.T) {
+	f, build := staleFixture(t)
+	f.cfg.HomeLanes.FreeTargetGB = 30
+	entry := filepath.Join(build, "entry")
+	repo := checkout(t, filepath.Join(entry, "repo"))
+	f.age(entry, homeLanesOld, homeLanesOld)
+	if got := f.staleReason("entry"); got != "" {
+		t.Fatalf("plan keeps the clean entry: %q", got)
+	}
+	f.plugin.freeBytes = func(string) (uint64, error) {
+		if err := os.WriteFile(filepath.Join(repo, "late-work"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.age(entry, homeLanesOld, homeLanesOld)
+		return 0, nil
+	}
+	if res := f.run(LevelCritical); res.ItemsCleaned != 0 || !exists(filepath.Join(repo, "late-work")) {
+		t.Fatalf("result = %+v, the entry dirtied after the plan was removed", res)
 	}
 }
 

@@ -52,7 +52,8 @@ package plugins
 //     question to git, whether it holds work found nowhere else
 //     (homeLanesGitKeepReason). Any yes, any failed or timed-out probe, a bare
 //     repository, a .hg or .jj directory, or more than homeLanesMaxCheckouts
-//     checkouts keeps the entry. Every other rule above applies unchanged.
+//     checkouts keeps the entry. The rules above on agent-session data,
+//     owner and device, live holders and kernel file locks apply unchanged.
 //
 // free_target_gb makes removal a budget: in apply mode the free space of a
 // root's mount is read before each removal, and once it reaches the target,
@@ -139,7 +140,7 @@ func (p *HomeLanesPlugin) Name() string { return homeLanesPluginName }
 
 // Description returns the plugin description.
 func (p *HomeLanesPlugin) Description() string {
-	return "Removes stale ~/.cache lanes and orphaned Hermes installs that no process holds (lab A-082)"
+	return "Removes stale ~/.cache lanes, orphaned Hermes installs and stale work entries that no process holds (lab A-082, TIN-8526)"
 }
 
 // SupportedPlatforms returns supported platforms.
@@ -656,7 +657,10 @@ func (p *HomeLanesPlugin) keepReason(ctx context.Context, path string, info os.F
 	return ""
 }
 
-// recheck repeats every check for one tree just before removal.
+// recheck repeats every check for one tree just before removal. A write can
+// go unseen when it lands in a part of the tree the walk has already passed,
+// during the Git probes or between the recheck and the rename. Such a write
+// goes with the tree.
 func (p *HomeLanesPlugin) recheck(ctx context.Context, cfg *config.Config, c homeLanesCandidate) string {
 	current, err := os.Lstat(c.target.Path)
 	if err != nil || !os.SameFile(c.info, current) {
