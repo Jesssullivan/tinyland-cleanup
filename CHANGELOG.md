@@ -41,9 +41,12 @@ All notable changes to this project will be documented in this file.
   `(sd-pam)`, sd-pam and systemd, so the temp inventory no longer stops at
   those processes it cannot read. With `nix_temp_roots` on, a Linux host that
   0.4.3 left alone can now remove stale Nix temp roots at aggressive or
-  critical. A mount that sets `threshold_moderate` or `threshold_aggressive`
-  under `monitored_mounts` gets its own level bands, and a mount that sets
-  neither keeps the global steps. `bazel.disk_cache_max_age` (14d) makes the
+  critical. Under `monitored_mounts`, a mount with its own warning or
+  critical threshold that leaves `threshold_moderate` and
+  `threshold_aggressive` unset now takes its critical threshold for a global
+  moderate or aggressive step that falls outside the mount's warning to
+  critical band, where 0.4.3 applied the global step as it was.
+  `bazel.disk_cache_max_age` (14d) makes the
   bazel plugin walk each disk cache and plan report targets, and it removes
   nothing. Where `bazel_bases` is enabled,
   `bazel_bases.early_walk_min_yield_mb` (256) and
