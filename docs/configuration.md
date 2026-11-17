@@ -365,11 +365,11 @@ dev_artifacts:
   paths, age, content, Git and a fresh process inventory. A write after that
   inventory goes with the root. Ignored files in a clean, pushed checkout do
   not keep it.
-- Each removal by the temp lanes logs one Info line with the path, its
-  `bytes` and its `rule`: `removed stale Nix temporary root` (rule
-  `nix_temp_roots`) and `removed rebuildable directory in idle temporary
-  root` (rule `node_modules`, `python-venv`, `rust-target` or
-  `zig-artifact`).
+- Each removal by the stale Nix root rule and the rebuildable directory
+  rule logs one Info line with the path, its `bytes` and its `rule`:
+  `removed stale Nix temporary root` (rule `nix_temp_roots`) and `removed
+  rebuildable directory in idle temporary root` (rule `node_modules`,
+  `python-venv`, `rust-target` or `zig-artifact`).
 
 ## Bazel output bases: walk scope and early walks
 

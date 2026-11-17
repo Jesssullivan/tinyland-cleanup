@@ -28,9 +28,10 @@ All notable changes to this project will be documented in this file.
   the unit holds nothing under the `home_lanes` roots. An unlisted unit is
   named in the keep reason. The shared inventory takes the list for fd tables
   and environments; no other plugin passes one yet.
-- **Per-path Info lines for temp lane removals (TIN-8526).** `removed stale
-  Nix temporary root` and `removed rebuildable directory in idle temporary
-  root` each give `path`, `bytes` and `rule`. The Nix root line was at Debug,
+- **Per-path Info lines for stale Nix root and rebuildable directory
+  removals (TIN-8526).** `removed stale Nix temporary root` and `removed
+  rebuildable directory in idle temporary root` each give `path`, `bytes`
+  and `rule`. The Nix root line was at Debug,
   and the rebuildable directory rule logged nothing.
 
 ### Changed

@@ -618,6 +618,15 @@ func TestNixTempRootUnverifiableContentKeeps(t *testing.T) {
 		t.Fatalf("the same root under the bound must pass, got %q", why)
 	}
 
+	// A walk past its time bound keeps the root.
+	savedTimeout := nixTempRootContentTimeout
+	nixTempRootContentTimeout = time.Nanosecond
+	t.Cleanup(func() { nixTempRootContentTimeout = savedTimeout })
+	if why := p.nixTempRootContentKeepReason(context.Background(), big, 24*time.Hour); !strings.Contains(why, "content could not be verified: context deadline exceeded") {
+		t.Fatalf("a walk past its time bound must keep the root, got %q", why)
+	}
+	nixTempRootContentTimeout = savedTimeout
+
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a mode 000 directory")
 	}
@@ -668,5 +677,108 @@ func TestNixTempRootRechecksHoldersBeforeRemoval(t *testing.T) {
 	p.cleanNixTemporaryRoots(context.Background(), scan, 0, 24*time.Hour, cfg, map[string]string{}, logger)
 	if !pathExists(other) {
 		t.Fatal("an incomplete inventory at removal time must keep the root")
+	}
+}
+
+// A repository the Git probe cannot question keeps the root unprobed: a bare
+// repository three levels down, a .hg, a .jj, or more checkouts than
+// homeLanesMaxCheckouts. Cleanup leaves the root.
+func TestNixTempRootUncheckableRepositoryKeeps(t *testing.T) {
+	mkdirs := func(t *testing.T, dirs ...string) {
+		t.Helper()
+		for _, dir := range dirs {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cases := map[string]struct {
+		build func(t *testing.T, root string)
+		want  string
+	}{
+		"bare repository at depth 3": {func(t *testing.T, root string) {
+			bare := filepath.Join(root, "x", "y", "store.git")
+			mkdirs(t, filepath.Join(bare, "objects"), filepath.Join(bare, "refs"))
+			if err := os.WriteFile(filepath.Join(bare, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "contains a bare Git repository at "},
+		"hg": {func(t *testing.T, root string) { mkdirs(t, filepath.Join(root, "x", ".hg")) }, "contains .hg"},
+		"jj": {func(t *testing.T, root string) { mkdirs(t, filepath.Join(root, "x", ".jj")) }, "contains .jj"},
+		"too many checkouts": {func(t *testing.T, root string) {
+			for i := 0; i <= homeLanesMaxCheckouts; i++ {
+				mkdirs(t, filepath.Join(root, fmt.Sprintf("c%02d", i), ".git"))
+			}
+		}, fmt.Sprintf("more than %d Git checkouts inside", homeLanesMaxCheckouts)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			scan := t.TempDir()
+			root := nixRootFixture(t, scan, "nix-shell.repo01")
+			tc.build(t, root)
+			ageTempRoot(t, root, 72*time.Hour)
+			p := newDevArtifactsPluginWithActive(nil)
+			if why := p.nixTempRootContentKeepReason(context.Background(), root, 24*time.Hour); !strings.Contains(why, "content could not be verified: "+tc.want) {
+				t.Fatalf("want a keep for %q, got %q", tc.want, why)
+			}
+			p.Cleanup(context.Background(), LevelCritical, nixTempRootConfig(scan), devArtifactTestLogger())
+			if !pathExists(root) {
+				t.Fatal("Cleanup removed a root holding a repository the Git probe cannot question")
+			}
+		})
+	}
+}
+
+// The recheck before removal keeps a root that was swapped after listing,
+// for a symlink or for another directory, a root a protect path covers by
+// then, and a root whose own mtime became recent.
+func TestNixTempRootRecheckIdentityProtectAndAge(t *testing.T) {
+	cases := map[string]struct {
+		change func(t *testing.T, root string, cfg *config.DevArtifactsConfig)
+		want   string
+	}{
+		"swapped for a symlink": {func(t *testing.T, root string, _ *config.DevArtifactsConfig) {
+			moved := filepath.Join(t.TempDir(), "moved")
+			if err := os.Rename(root, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, root); err != nil {
+				t.Fatal(err)
+			}
+		}, "temporary root identity changed"},
+		"swapped for another directory": {func(t *testing.T, root string, _ *config.DevArtifactsConfig) {
+			if err := os.Rename(root, filepath.Join(t.TempDir(), "gone")); err != nil {
+				t.Fatal(err)
+			}
+			nixRootFixture(t, filepath.Dir(root), filepath.Base(root))
+		}, "temporary root identity changed"},
+		"protected": {func(_ *testing.T, root string, cfg *config.DevArtifactsConfig) {
+			cfg.ProtectPaths = []string{root}
+		}, "dev_artifacts.protect_paths"},
+		"root touched": {func(t *testing.T, root string, _ *config.DevArtifactsConfig) {
+			now := time.Now()
+			if err := os.Chtimes(root, now, now); err != nil {
+				t.Fatal(err)
+			}
+		}, "Nix temporary root is newer than"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			scan := t.TempDir()
+			root := nixRootFixture(t, scan, "nix-shell.rchk01")
+			listed, err := os.Lstat(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := nixTempRootConfig(scan).DevArtifacts
+			p := newDevArtifactsPluginWithActive(nil)
+			if why := p.recheckNixTemporaryRoot(context.Background(), root, listed, 24*time.Hour, cfg); why != "" {
+				t.Fatalf("an unchanged stale root must pass the recheck, got %q", why)
+			}
+			tc.change(t, root, &cfg)
+			if why := p.recheckNixTemporaryRoot(context.Background(), root, listed, 24*time.Hour, cfg); !strings.Contains(why, tc.want) {
+				t.Fatalf("want a keep for %q, got %q", tc.want, why)
+			}
+		})
 	}
 }
