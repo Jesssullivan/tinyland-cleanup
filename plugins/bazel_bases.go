@@ -117,6 +117,12 @@ type bbActivityOptions struct {
 	LsofTimeout time.Duration
 	UseLsof     bool
 	OKComms     []string
+	// OKUnits are systemd user units (procUserUnit, the exact last segment
+	// of the process's cgroup v2 path) whose processes may have unreadable
+	// fd tables or environments without making the inventory incomplete.
+	// Each entry is the operator's assertion that the unit holds nothing
+	// under Within: the daemon cannot check it. Linux only.
+	OKUnits []string
 	// Within limits the indexed paths to these trees (the roots); processes'
 	// command lines are always kept.
 	Within []string

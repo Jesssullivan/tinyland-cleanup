@@ -34,7 +34,10 @@ package plugins
 //     Hermes install's metadata files (homeLanesHermesMetadata);
 //   - no live holder: no inspected process has its cwd or root there, an open
 //     file there, a mapping there, or names it on its command line, and an
-//     incomplete inventory keeps every tree;
+//     incomplete inventory keeps every tree. A process of a systemd user unit
+//     in uninspectable_ok_units does not make it incomplete: each entry is
+//     the operator's assertion that the unit holds nothing under these roots
+//     (TIN-8526);
 //   - no kernel file lock on any file in the tree. /proc/locks lists every
 //     process in every namespace, so this also sees a Hermes install lock or
 //     generation lease that a sandboxed process holds through a bind mount,
@@ -414,7 +417,7 @@ func (p *HomeLanesPlugin) plan(ctx context.Context, cfg *config.Config, apply bo
 	if len(within) == 0 {
 		return nil, warnings
 	}
-	activity := p.scan(ctx, bbActivityOptions{OKComms: hc.UninspectableOKComms, Within: within})
+	activity := p.scan(ctx, bbActivityOptions{OKComms: hc.UninspectableOKComms, OKUnits: hc.UninspectableOKUnits, Within: within})
 	incomplete := activity.complete()
 	locked, lockErr := p.locks()
 	if lockErr != nil {
@@ -596,21 +599,8 @@ func (p *HomeLanesPlugin) keepReason(ctx context.Context, path string, info os.F
 			return errors.New("contains .git: Git-owner custody")
 		}
 		if stale {
-			rel, _ := filepath.Rel(path, walked)
-			inGit := rel != "." && homeLanesInGitDir(filepath.Dir(rel))
-			switch {
-			case inGit:
-			case d.Name() == ".git" && walked == path:
-				return errors.New("the entry itself is a .git")
-			case d.Name() == ".git":
-				if len(checkouts) >= homeLanesMaxCheckouts {
-					return fmt.Errorf("more than %d Git checkouts inside", homeLanesMaxCheckouts)
-				}
-				checkouts = append(checkouts, filepath.Dir(walked))
-			case d.Name() == ".hg" || d.Name() == ".jj":
-				return errors.New("contains " + d.Name() + ": a repository this plugin cannot inspect")
-			case d.IsDir() && homeLanesBareRepo(walked):
-				return errors.New("contains a bare Git repository at " + walked)
+			if err := homeLanesRepoCheck(path, walked, d, &checkouts); err != nil {
+				return err
 			}
 		}
 		if walked != path && d.IsDir() && isAgentSessionDir(walked) {
@@ -673,7 +663,7 @@ func (p *HomeLanesPlugin) recheck(ctx context.Context, cfg *config.Config, c hom
 		}
 	}
 	idle, _ := config.ParseDuration(homeLanesIdleSetting(hc, c.kind))
-	activity := p.scan(ctx, bbActivityOptions{OKComms: hc.UninspectableOKComms, Within: []string{c.root}})
+	activity := p.scan(ctx, bbActivityOptions{OKComms: hc.UninspectableOKComms, OKUnits: hc.UninspectableOKUnits, Within: []string{c.root}})
 	if why := activity.complete(); why != "" {
 		return why
 	}

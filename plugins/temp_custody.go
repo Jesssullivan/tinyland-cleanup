@@ -445,6 +445,74 @@ func temporaryRootIdleReason(ctx context.Context, root string, age time.Duration
 	return ""
 }
 
+// nixTempRootContentWalkLimit and nixTempRootContentTimeout bound the content
+// walk of one Nix temp root, as the custody and idle walks above are bounded.
+// A walk cut by either keeps the root. Tests lower the limit.
+var (
+	nixTempRootContentWalkLimit = 100000
+	nixTempRootContentTimeout   = 5 * time.Second
+)
+
+// nixTempRootContentKeepReason reads a stale Nix temp root's content and
+// returns why it stays, or "" (TIN-8526). A write deeper in a root does not
+// change the root's own mtime, so the age rule alone missed live work:
+//
+//   - an entry modified within staleAfter keeps the root (recent content);
+//   - each Git checkout inside is asked the stale work rule's closed
+//     questions (gitCheckoutKeepReason). Uncommitted or untracked changes,
+//     a stash, linked work trees, commits missing from every remote-tracking
+//     ref, or a probe that fails or runs past its timeout keep the root. A
+//     bare repository, a .hg or .jj, or more than homeLanesMaxCheckouts
+//     checkouts keep it unprobed (homeLanesRepoCheck);
+//   - an unreadable entry, or a walk cut by its entry or time bound, keeps it.
+//
+// The walk reads modification times only. A file read but not written does
+// not count, and neither does a write after the walk passed its directory.
+func (p *DevArtifactsPlugin) nixTempRootContentKeepReason(ctx context.Context, root string, staleAfter time.Duration) string {
+	walkCtx, cancel := context.WithTimeout(ctx, nixTempRootContentTimeout)
+	defer cancel()
+	now := time.Now()
+	cutoff := now.Add(-staleAfter)
+	recent := ""
+	var checkouts []string
+	count := 0
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := walkCtx.Err(); err != nil {
+			return err
+		}
+		if count++; count > nixTempRootContentWalkLimit {
+			return fmt.Errorf("content walk bound of %d entries exceeded", nixTempRootContentWalkLimit)
+		}
+		if err := homeLanesRepoCheck(root, path, entry, &checkouts); err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if t := effectiveModTime(info, now); t.After(cutoff) {
+			recent = "recent content: " + path + " modified " + t.UTC().Format(time.RFC3339) + ", within " + formatDevArtifactAge(staleAfter)
+			return errHomeLanesRecent
+		}
+		return nil
+	})
+	switch {
+	case recent != "":
+		return recent
+	case err != nil:
+		return "content could not be verified: " + err.Error()
+	}
+	for _, dir := range checkouts {
+		if why := gitCheckoutKeepReason(ctx, p.gitPath, p.gitTimeout, dir); why != "" {
+			return why
+		}
+	}
+	return ""
+}
+
 func (p *DevArtifactsPlugin) planDisposableTemporaryRoots(ctx context.Context, scanPath, home string, level CleanupLevel, cfg config.DevArtifactsConfig, activity map[string]string, targets *[]CleanupTarget, budget *devArtifactScanBudget) {
 	if !cfg.TempRootCleanup {
 		return

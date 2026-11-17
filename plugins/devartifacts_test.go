@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"io"
@@ -1175,7 +1176,8 @@ func TestPlanCleanupReportsGeneratedArtifactsInsideStaleTemporaryRoots(t *testin
 
 func TestCleanupPrunesGeneratedArtifactsInsideStaleTemporaryRoots(t *testing.T) {
 	p := newDevArtifactsPluginWithActive(nil)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	tmpDir := t.TempDir()
 	root := filepath.Join(tmpDir, "temp-rust-worktree")
 	targetDir := filepath.Join(root, "target", "debug")
@@ -1213,6 +1215,11 @@ func TestCleanupPrunesGeneratedArtifactsInsideStaleTemporaryRoots(t *testing.T) 
 	if result.BytesFreed <= 0 {
 		t.Fatalf("expected cleanup to report freed bytes, got %#v", result)
 	}
+	// One Info line per removed path, with its size and rule (TIN-8526).
+	want := `level=INFO msg="removed rebuildable directory in idle temporary root" path=` + filepath.Join(root, "target") + " bytes="
+	if !strings.Contains(logs.String(), want) || !strings.Contains(logs.String(), "rule=rust-target") {
+		t.Fatalf("no per-path Info line for the removal:\n%s", logs.String())
+	}
 }
 
 func TestPlanCleanupDeletesStaleNixTemporaryRoots(t *testing.T) {
@@ -1225,10 +1232,8 @@ func TestPlanCleanupDeletesStaleNixTemporaryRoots(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
+	// Age the content too: a root is aged by its newest entry (TIN-8526).
+	ageTempRoot(t, root, 48*time.Hour)
 
 	cfg := nixTempRootConfig(tmpDir)
 	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, slog.Default())
@@ -1253,10 +1258,8 @@ func TestCleanupPrunesNixTemporaryRootsBeforeWorkspaceScanBudget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
+	// Age the content too: a root is aged by its newest entry (TIN-8526).
+	ageTempRoot(t, root, 48*time.Hour)
 
 	workspace := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(workspace, "project", "node_modules", "pkg"), 0755); err != nil {
@@ -1290,10 +1293,8 @@ func TestPlanCleanupProtectsActiveNixTemporaryRoots(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
+	// Age the content too: a root is aged by its newest entry (TIN-8526).
+	ageTempRoot(t, root, 48*time.Hour)
 
 	var targets []CleanupTarget
 	p.planNixTemporaryRoots(
@@ -2519,10 +2520,8 @@ func perPathTempBudgetFixture(t *testing.T) (*config.Config, string) {
 	if err := os.WriteFile(filepath.Join(staleRoot, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(staleRoot, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
+	// Age the content too: a root is aged by its newest entry (TIN-8526).
+	ageTempRoot(t, staleRoot, 48*time.Hour)
 	cfg := nixTempRootConfig(crowded)
 	cfg.DevArtifacts.TempScanPaths = []string{crowded, second}
 	cfg.DevArtifacts.TempScanMaxRoots = 3
@@ -2578,10 +2577,8 @@ func TestCleanupRemembersUndeletableTempRoots(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "scratch"), make([]byte, 2*1024*1024), 0644); err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(root, oldTime, oldTime); err != nil {
-		t.Fatal(err)
-	}
+	// Age the content too: a root is aged by its newest entry (TIN-8526).
+	ageTempRoot(t, root, 48*time.Hour)
 	cfg := nixTempRootConfig(tmpDir)
 
 	for cycle := 0; cycle < 3; cycle++ {

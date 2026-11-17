@@ -387,11 +387,11 @@ func TestNixTempRootsOldestFirstWithinRootBudget(t *testing.T) {
 	cfg.TempScanPaths = []string{scan}
 	cfg.TempScanMaxRoots = 3
 	cfg.NixTempRootMinMB = 0
-	p := &DevArtifactsPlugin{}
+	p := newDevArtifactsPluginWithActive(nil)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	budget := newDevArtifactScanBudget(cfg)
-	p.cleanNixTemporaryRoots(context.Background(), scan, nixTempRootMinBytes(cfg), 24*time.Hour, nil, map[string]string{}, logger, budget)
+	p.cleanNixTemporaryRoots(context.Background(), scan, nixTempRootMinBytes(cfg), 24*time.Hour, cfg, map[string]string{}, logger, budget)
 	for i, name := range names {
 		if gone := !pathExists(filepath.Join(scan, name)); gone != (i >= 3) {
 			t.Errorf("%s removed=%v; the three oldest (dddddd..ffffff) must go first", name, gone)
@@ -401,7 +401,7 @@ func TestNixTempRootsOldestFirstWithinRootBudget(t *testing.T) {
 		t.Error("a path with more roots than the budget must report its truncation")
 	}
 
-	p.cleanNixTemporaryRoots(context.Background(), scan, nixTempRootMinBytes(cfg), 24*time.Hour, nil, map[string]string{}, logger, newDevArtifactScanBudget(cfg))
+	p.cleanNixTemporaryRoots(context.Background(), scan, nixTempRootMinBytes(cfg), 24*time.Hour, cfg, map[string]string{}, logger, newDevArtifactScanBudget(cfg))
 	for _, name := range names {
 		if pathExists(filepath.Join(scan, name)) {
 			t.Errorf("the next cycle must continue with the remaining roots: %s kept", name)
@@ -419,13 +419,13 @@ func TestNixTempRootMinMBZeroReapsEmptyRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	ageTempRoot(t, root, 72*time.Hour)
-	p := &DevArtifactsPlugin{}
+	p := newDevArtifactsPluginWithActive(nil)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	p.cleanNixTemporaryRoots(context.Background(), scan, nixTempRootMinBytes(config.DevArtifactsConfig{NixTempRootMinMB: 1}), 24*time.Hour, nil, map[string]string{}, logger)
+	p.cleanNixTemporaryRoots(context.Background(), scan, nixTempRootMinBytes(config.DevArtifactsConfig{NixTempRootMinMB: 1}), 24*time.Hour, config.DevArtifactsConfig{}, map[string]string{}, logger)
 	if !pathExists(root) {
 		t.Fatal("the 1 MB floor keeps an empty root")
 	}
-	p.cleanNixTemporaryRoots(context.Background(), scan, nixTempRootMinBytes(config.DevArtifactsConfig{NixTempRootMinMB: 0}), 24*time.Hour, nil, map[string]string{}, logger)
+	p.cleanNixTemporaryRoots(context.Background(), scan, nixTempRootMinBytes(config.DevArtifactsConfig{NixTempRootMinMB: 0}), 24*time.Hour, config.DevArtifactsConfig{}, map[string]string{}, logger)
 	if pathExists(root) {
 		t.Fatal("nix_temp_root_min_mb 0 must reap an empty stale root")
 	}
@@ -544,4 +544,129 @@ func TestTempLaneReapsPastUninspectableHelpersAndKeepsHeldAndSessionRoots(t *tes
 		}
 		assertSessionsKept(t, sessions)
 	})
+}
+
+// ---- Nix temp roots aged by content, rechecked before removal (TIN-8526) ----
+
+// nixRootFixture makes a stale Nix temp root whose every entry is 72h old,
+// with a 2 MB file at depth 3.
+func nixRootFixture(t *testing.T, scan, name string) string {
+	t.Helper()
+	root := filepath.Join(scan, name)
+	deep := filepath.Join(root, "pytest-of-u", "pytest-0", "case")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "out.log"), make([]byte, 2*1024*1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ageTempRoot(t, root, 72*time.Hour)
+	return root
+}
+
+// A write deep in a root leaves the root's own mtime old. The newest entry
+// keeps the root, in the plan and in Cleanup, while a sibling root whose
+// content is all old goes.
+func TestNixTempRootKeepsRecentContent(t *testing.T) {
+	scan := t.TempDir()
+	live := nixRootFixture(t, scan, "nix-shell.live01")
+	dead := nixRootFixture(t, scan, "nix-shell.dead01")
+	fresh := filepath.Join(live, "pytest-of-u", "pytest-0", "case", "fresh.log")
+	if err := os.WriteFile(fresh, []byte("today"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-72 * time.Hour)
+	for _, dir := range []string{live, filepath.Dir(fresh)} {
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := nixTempRootConfig(scan)
+	p := newDevArtifactsPluginWithActive(nil)
+
+	plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	kept := findDevArtifactTarget(t, plan.Targets, "nix-temp-root", live)
+	if kept.Action != "protect" || !kept.Protected || !strings.Contains(kept.Reason, "recent content: "+fresh) {
+		t.Fatalf("a root with a fresh file inside must be kept for recent content, got %#v", kept)
+	}
+	if gone := findDevArtifactTarget(t, plan.Targets, "nix-temp-root", dead); gone.Action != "delete" {
+		t.Fatalf("a root whose content is all old must stay deletable, got %#v", gone)
+	}
+
+	p.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+	if !pathExists(fresh) {
+		t.Fatal("Cleanup removed a root holding a file written within the stale age")
+	}
+	if pathExists(dead) {
+		t.Fatal("Cleanup kept a root whose content is all older than the stale age")
+	}
+}
+
+// A walk cut by its entry bound, or an entry it cannot read, keeps the root.
+func TestNixTempRootUnverifiableContentKeeps(t *testing.T) {
+	scan := t.TempDir()
+	big := nixRootFixture(t, scan, "nix-shell.big001")
+	saved := nixTempRootContentWalkLimit
+	nixTempRootContentWalkLimit = 3
+	t.Cleanup(func() { nixTempRootContentWalkLimit = saved })
+	p := newDevArtifactsPluginWithActive(nil)
+	if why := p.nixTempRootContentKeepReason(context.Background(), big, 24*time.Hour); !strings.Contains(why, "content walk bound of 3 entries exceeded") {
+		t.Fatalf("a walk over its bound must keep the root, got %q", why)
+	}
+	nixTempRootContentWalkLimit = saved
+	if why := p.nixTempRootContentKeepReason(context.Background(), big, 24*time.Hour); why != "" {
+		t.Fatalf("the same root under the bound must pass, got %q", why)
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 000 directory")
+	}
+	locked := filepath.Join(big, "pytest-of-u")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if why := p.nixTempRootContentKeepReason(context.Background(), big, 24*time.Hour); !strings.Contains(why, "content could not be verified") {
+		t.Fatalf("an unreadable directory must keep the root, got %q", why)
+	}
+}
+
+// The cycle's holder snapshot saw no holder; a process that took the root
+// after it is seen by the inventory taken again before removal. The removal
+// is logged at Info with its size and rule.
+func TestNixTempRootRechecksHoldersBeforeRemoval(t *testing.T) {
+	scan := t.TempDir()
+	root := nixRootFixture(t, scan, "nix-shell.held01")
+	free := nixRootFixture(t, scan, "nix-shell.free01")
+	cfg := nixTempRootConfig(scan).DevArtifacts
+	p := newDevArtifactsPluginWithActive(nil)
+	p.tempActivity = func(context.Context, []string, string) (map[string]string, error) {
+		return map[string]string{canonicalTempArtifactPath(root): "cwd/open file held by pid 4242"}, nil
+	}
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	p.cleanNixTemporaryRoots(context.Background(), scan, 0, 24*time.Hour, cfg, map[string]string{}, logger)
+	if !pathExists(root) {
+		t.Fatal("a root held at removal time was removed on the cycle's stale snapshot")
+	}
+	if pathExists(free) {
+		t.Fatal("an unheld stale root was kept")
+	}
+	want := `level=INFO msg="removed stale Nix temporary root" path=` + free + " bytes="
+	if !strings.Contains(logs.String(), want) || !strings.Contains(logs.String(), "rule=nix_temp_roots") {
+		t.Fatalf("no per-path Info line for the removal:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "path="+root) {
+		t.Fatalf("a kept root must not get an Info line:\n%s", logs.String())
+	}
+
+	// An incomplete inventory at removal time keeps every root.
+	p.tempActivity = func(context.Context, []string, string) (map[string]string, error) {
+		return nil, fmt.Errorf("owned process cwd unavailable: pid 9")
+	}
+	other := nixRootFixture(t, scan, "nix-shell.other1")
+	p.cleanNixTemporaryRoots(context.Background(), scan, 0, 24*time.Hour, cfg, map[string]string{}, logger)
+	if !pathExists(other) {
+		t.Fatal("an incomplete inventory at removal time must keep the root")
+	}
 }

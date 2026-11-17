@@ -72,9 +72,9 @@ func bbScanActivity(ctx context.Context, opts bbActivityOptions) *bbActivity {
 // readable) and, where readable, cwd, root, open fds and mappings. A process
 // of this user whose fd table cannot be read makes the inventory incomplete,
 // which keeps every base (R-C622 own_uninspectable). The exceptions are a
-// zombie, a listed comm and, for a lane that sets SkipSSHDSessions, a process
-// the kernel's own parent chain proves is an SSH session process. That one is
-// recorded in skipped.
+// zombie, a listed comm, a process in a listed user unit (opts.OKUnits) and,
+// for a lane that sets SkipSSHDSessions, a process the kernel's own parent
+// chain proves is an SSH session process. That one is recorded in skipped.
 func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActivityOptions) *bbActivity {
 	a := newBBActivity()
 	entries, err := os.ReadDir(procRoot)
@@ -83,6 +83,7 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 		return a
 	}
 	okComms := procCommSet(opts.OKComms)
+	okUnits := procCommSet(opts.OKUnits)
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			a.incomplete = append(a.incomplete, "process scan interrupted")
@@ -108,10 +109,16 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 			if st, err := os.Stat(d); err == nil {
 				if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) == uid {
 					comm, state := procCommState(d)
+					unit, inUnit := procUserUnit(d, uid)
 					switch {
 					case state == "Z" || okComms[comm]:
+					case inUnit && okUnits[unit]:
 					case opts.SkipSSHDSessions && procIsSSHDSessionChild(procRoot, pid, uid):
 						a.skipped = append(a.skipped, pid)
+					case inUnit:
+						// Named so the operator can review the unit for an
+						// uninspectable_ok_units list.
+						a.incomplete = append(a.incomplete, fmt.Sprintf("pid %d (%s) in unit %s fd unreadable: %v", pid, comm, unit, ferr))
 					default:
 						a.incomplete = append(a.incomplete, fmt.Sprintf("pid %d (%s) fd unreadable: %v", pid, comm, ferr))
 					}
@@ -125,7 +132,7 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 			}
 		}
 		if len(opts.EnvVars) > 0 {
-			bbIndexProcEnviron(a, d, pid, uid, okComms, opts)
+			bbIndexProcEnviron(a, d, pid, uid, okComms, okUnits, opts)
 		}
 		if f, err := os.Open(filepath.Join(d, "maps")); err == nil {
 			sc := bufio.NewScanner(f)
@@ -257,8 +264,9 @@ func bbReadMountinfo(path string) ([]string, error) {
 // process's initial environment (/proc/<pid>/environ). A nix-shell keeps its
 // TMPDIR in a temp root without holding a descriptor there, so its environment
 // is the only witness. A same-user process whose environment cannot be read
-// makes the inventory incomplete unless it is a zombie or a listed comm.
-func bbIndexProcEnviron(a *bbActivity, d string, pid, uid int, okComms map[string]bool, opts bbActivityOptions) {
+// makes the inventory incomplete unless it is a zombie, a listed comm or in a
+// listed user unit.
+func bbIndexProcEnviron(a *bbActivity, d string, pid, uid int, okComms, okUnits map[string]bool, opts bbActivityOptions) {
 	raw, err := os.ReadFile(filepath.Join(d, "environ"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -267,7 +275,8 @@ func bbIndexProcEnviron(a *bbActivity, d string, pid, uid int, okComms map[strin
 		if st, serr := os.Stat(d); serr == nil {
 			if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) == uid {
 				comm, state := procCommState(d)
-				if state != "Z" && !okComms[comm] {
+				unit, inUnit := procUserUnit(d, uid)
+				if state != "Z" && !okComms[comm] && !(inUnit && okUnits[unit]) {
 					a.incomplete = append(a.incomplete, fmt.Sprintf("pid %d (%s) environment unreadable: %v", pid, comm, err))
 				}
 			}

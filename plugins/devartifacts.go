@@ -58,6 +58,10 @@ type DevArtifactsPlugin struct {
 	tempMounts      temporaryMountInventory
 	// removeAll is os.RemoveAll unless a test injects a fake.
 	removeAll func(string) error
+	// gitPath and gitTimeout override the git binary and the per-command
+	// timeout of the Nix temp root Git probe (gitCheckoutKeepReason).
+	gitPath    string
+	gitTimeout time.Duration
 
 	// undeletable remembers paths whose removal failed with EACCES, EPERM
 	// or EBUSY so the daemon does not size and retry them every cycle
@@ -560,7 +564,7 @@ func (p *DevArtifactsPlugin) cleanTemporaryScanPath(ctx context.Context, expande
 		return
 	}
 	if daCfg.NixTempRoots && level >= LevelAggressive {
-		record(p.cleanNixTemporaryRoots(ctx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, daCfg.ProtectPaths, activeTempRoots, logger, budget))
+		record(p.cleanNixTemporaryRoots(ctx, expanded, nixTempRootMinBytes, nixTempRootStaleAfter, daCfg, activeTempRoots, logger, budget))
 	}
 	if budget.exhausted() {
 		return
@@ -1444,6 +1448,11 @@ func (p *DevArtifactsPlugin) planNixTemporaryRoots(ctx context.Context, scanPath
 		activeReason := temporaryRootActivityReason(activeRoots, path)
 		protected := p.isProtected(path, daCfg.ProtectPaths)
 		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, protected, activeReason, canDelete)
+		if target.Action == "delete" {
+			if why := p.nixTempRootContentKeepReason(ctx, path, staleAfter); why != "" {
+				nixTemporaryRootKept(&target, why)
+			}
+		}
 		if target.Action != "delete" {
 			if err := budget.checkTempRoot(ctx, path); err != nil {
 				return
@@ -1467,7 +1476,11 @@ func (p *DevArtifactsPlugin) planNixTemporaryRoots(ctx context.Context, scanPath
 	}
 }
 
-func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, protectPaths []string, activeRoots map[string]string, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+// cleanNixTemporaryRoots removes stale Nix temp roots. The cycle's holder
+// snapshot (activeRoots) only filters; each root is checked again by
+// recheckNixTemporaryRoot immediately before its removal.
+func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPath string, minBytes int64, staleAfter time.Duration, daCfg config.DevArtifactsConfig, activeRoots map[string]string, logger *slog.Logger, budgets ...*devArtifactScanBudget) int64 {
+	protectPaths := daCfg.ProtectPaths
 	budget := optionalDevArtifactScanBudget(budgets)
 	roots, err := tempScanRootsOldestFirst(scanPath)
 	if err != nil {
@@ -1508,13 +1521,17 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 		if err := budget.checkTempRoot(ctx, path); err != nil {
 			return totalFreed
 		}
-		logger.Debug("removing stale Nix temporary root", "path", path, "size_mb", size/(1024*1024))
+		if why := p.recheckNixTemporaryRoot(ctx, path, info, staleAfter, daCfg); why != "" {
+			logger.Debug("preserving stale Nix temporary root after final check", "path", path, "reason", why)
+			continue
+		}
 		if err := p.removeDevArtifactPath(path, logger); err != nil {
 			if !errors.Is(err, errUndeletableDevArtifactPath) {
 				logger.Debug("failed to remove stale Nix temporary root", "path", path, "error", err)
 			}
 			continue
 		}
+		logger.Info("removed stale Nix temporary root", "path", path, "bytes", size, "rule", "nix_temp_roots")
 		totalFreed += size
 	}
 	if totalFreed > 0 {
@@ -1581,6 +1598,7 @@ func (p *DevArtifactsPlugin) cleanTemporaryGeneratedArtifacts(ctx context.Contex
 			if err := p.removeDevArtifactPath(target.Path, logger); err != nil {
 				continue
 			}
+			logger.Info("removed rebuildable directory in idle temporary root", "path", target.Path, "bytes", target.Bytes, "rule", target.Type)
 			totalFreed += target.Bytes
 		}
 	}, budget)
@@ -1706,6 +1724,41 @@ func (p *DevArtifactsPlugin) nixTemporaryRootTarget(path string, physicalBytes i
 	}
 	annotateCleanupTargetPolicy(&target, CleanupTierWarm, hostReclaimForAction(target.Action))
 	return target
+}
+
+// nixTemporaryRootKept turns a delete target into a kept one, for a reason
+// found in the root's content (nixTempRootContentKeepReason).
+func nixTemporaryRootKept(target *CleanupTarget, why string) {
+	target.Action = "protect"
+	target.Protected = true
+	target.Reason = "Nix temporary root kept: " + why
+	annotateCleanupTargetPolicy(target, CleanupTierWarm, hostReclaimForAction(target.Action))
+}
+
+// recheckNixTemporaryRoot repeats every keep check for one stale Nix temp
+// root immediately before removal: identity, protect paths, the root's own
+// age, its content and Git state, and a fresh holder inventory, taken last.
+// A write can still land after the inventory and before the removal; it
+// goes with the root.
+func (p *DevArtifactsPlugin) recheckNixTemporaryRoot(ctx context.Context, root string, previous os.FileInfo, staleAfter time.Duration, daCfg config.DevArtifactsConfig) string {
+	current, err := os.Lstat(root)
+	if err != nil || !os.SameFile(previous, current) {
+		return "temporary root identity changed"
+	}
+	if p.isProtected(root, daCfg.ProtectPaths) {
+		return "path is covered by dev_artifacts.protect_paths"
+	}
+	if staleAfter > 0 && staleModTime(current).After(time.Now().Add(-staleAfter)) {
+		return "Nix temporary root is newer than " + formatDevArtifactAge(staleAfter)
+	}
+	if why := p.nixTempRootContentKeepReason(ctx, root, staleAfter); why != "" {
+		return why
+	}
+	home, _ := os.UserHomeDir()
+	if why := temporaryRootActivityReason(p.activeTemporaryRoots(ctx, daCfg, home), root); why != "" {
+		return "active process references this temporary path: " + why
+	}
+	return ""
 }
 
 func tempArtifactMinBytes(cfg config.DevArtifactsConfig) int64 {

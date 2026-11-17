@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Stale Nix temp roots are now aged by their content and Git state
+  (TIN-8526).** On by default, with no key. `dev_artifacts.nix_temp_roots`
+  keeps a root that 0.5.0 removed when any entry inside was modified within
+  `nix_temp_root_stale_after`, or when a Git checkout inside has uncommitted
+  or untracked changes, a stash, linked work trees or commits missing from
+  every remote-tracking ref. A bare repository, `.hg`, `.jj`, a failed or
+  timed-out git probe, an unreadable entry, or a walk over 100,000 entries
+  or 5 seconds also keeps it. A Git checkout with no remote therefore keeps
+  its root until it is removed by other means. The rule deletes less than
+  in 0.5.0.
+
+### Added
+
+- **`home_lanes.uninspectable_ok_units` (TIN-8526).** Default empty. On sting
+  `home_lanes` removed nothing: the process inventory met the unreadable
+  process of `cade-annotation-page.service` and kept every tree. A listed
+  systemd user unit, matched exactly on the last segment of its cgroup v2
+  path as `dev_artifacts.temp_uninspectable_ok_units` is, no longer makes the
+  inventory incomplete. The temp list is not read here: each entry asserts
+  the unit holds nothing under the `home_lanes` roots. An unlisted unit is
+  named in the keep reason. The shared inventory takes the list for fd tables
+  and environments; no other plugin passes one yet.
+- **Per-path Info lines for temp lane removals (TIN-8526).** `removed stale
+  Nix temporary root` and `removed rebuildable directory in idle temporary
+  root` each give `path`, `bytes` and `rule`. The Nix root line was at Debug,
+  and the rebuildable directory rule logged nothing.
+
+### Changed
+
+- **Nix temp roots are checked again immediately before removal (TIN-8526).**
+  The holder inventory was taken once per cycle. Before each removal the lane
+  now checks identity, protect paths, age, content, Git and a fresh process
+  inventory, in that order.
+
 ## [0.5.0] - 2026-11-17
 
 ### Upgrade notes
