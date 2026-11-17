@@ -2,6 +2,46 @@
 
 Updated: 2026-11-17
 
+## v0.5.1 (TIN-8526)
+
+- **Scope:** #180 (fe664600) and #181 (4c0c3f57), the two changes on main
+  since v0.5.0. Each merge commit has the same tree as its reviewed head,
+  af8bfc7f for #180 and 3a0468e4 for #181.
+- **Validated** on sting (Linux x86_64), by the merge-gating reviews
+  (comments 6946441523 and 6955652884 on the pull requests). At af8bfc7f:
+  gofmt clean, `go vet ./...`, `go test -count=1 ./...`, a race run of the
+  Nix root and `home_lanes` tests, and the Darwin arm64 build and test build
+  (`CGO_ENABLED=0`). At 3a0468e4: gofmt clean, `go vet ./...`,
+  `go test -count=1 ./...`, and the Darwin arm64 build and vet of
+  `./plugins`. All passed.
+- **Mutation records.** On #180 each of five mutants (MA to ME) failed
+  `go test ./plugins`. On #181 the builder killed 13 mutations and the
+  reviewer reran 4 of them, all killed.
+- **Read-only dry runs on sting.** A dry run of #180's rule on the agent
+  temp root kept 14 roots for Git state, 6 for recent content, 1 for a bare
+  repository and 5 held by a process. The #181 review ran `dev-artifacts`
+  dry runs at fe664600 and at 3a0468e4 with no new key: 3,819 Nix temp root
+  targets each, one root apart by live drift. Its `bazel_bases` dry runs at
+  both commits were the same apart from the idle clock.
+- **The release commit** was checked with gofmt on `main.go`,
+  `go vet ./...`, `go test .`, `go build ./...` and `--version`, which
+  prints 0.5.1.
+- **Not validated:** CI, the Bazel build and test graph and the Nix package
+  build. No runner serves this repository, so none of them ran. No
+  apply-mode run of 0.5.1 on any host, no run on a Darwin host, and no run
+  of `nix_temp_root_make_writable` or `nix_temp_root_holder_max_age`
+  outside test fixtures.
+- **The live 0.5.0 daemon on sting, 2026-11-17** (TIN-8526 comments
+  03064e64 and 010bf2a6). The temp scan of `/srv/fast-local/tmp-agents`
+  stopped at its 5 second share in every cycle from 10:12Z to 12:45Z, with
+  40 roots not deletable. From 12:45Z to 13:23Z four cycles freed 0.21,
+  0.55, 0.55 and 0.40 GiB, and at 13:42Z the plugin was suppressed. Stale
+  Nix temp roots there fell from 2,863 at 10:48Z to 15 at 16:02Z. Eight
+  roots that #180's dry run would keep for a Git checkout were removed. The
+  `bazel_bases` cycle from 16:41Z to 16:55Z removed 38 of 39 eligible
+  output bases, 50.2 GiB. It ran only because the unreadable annotation
+  page process was stopped at about 16:34Z.
+
 ## v0.5.0 (TIN-8526)
 
 - **Scope:** every change on main since v0.4.3. That includes the Bazel

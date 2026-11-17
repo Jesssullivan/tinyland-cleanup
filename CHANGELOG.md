@@ -4,75 +4,114 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-17
+
 ### Upgrade notes
 
-- **Stale Nix temp roots are now aged by their content and Git state
-  (TIN-8526).** On by default, with no key. `dev_artifacts.nix_temp_roots`
-  keeps a root that 0.5.0 removed when any entry inside was modified within
+- **Stale Nix temp roots are now aged by their content and Git state (#180).**
+  On by default, with no key, and it deletes less than 0.5.0. Before,
+  `dev_artifacts.nix_temp_roots` aged a root by its own mtime only. Now a
+  root is kept when any entry inside was modified within
   `nix_temp_root_stale_after`, or when a Git checkout inside has uncommitted
   or untracked changes, a stash, linked work trees or commits missing from
-  every remote-tracking ref. A bare repository, `.hg`, `.jj`, a failed or
-  timed-out git probe, an unreadable entry, or a walk over 100,000 entries
-  or 5 seconds also keeps it. A Git checkout with no remote therefore keeps
-  its root until it is removed by other means. The rule deletes less than
-  in 0.5.0.
-- **The final check before each Nix temp root removal takes a fresh process
-  inventory (TIN-8526).** On sting one inventory took about 1 second, so a
-  temp scan path's 5 second share removes about 5 roots a cycle where 0.5.0
-  removed hundreds. `dev_artifacts.nix_temp_root_holder_max_age` (below)
-  lifts that limit on hosts that set it.
+  every remote-tracking ref. A bare repository, a `.hg` or `.jj`, more than
+  64 checkouts, a git probe that fails or runs past its timeout, an
+  unreadable entry, or a walk over 100,000 entries or 5 seconds also keeps
+  it. Such a root is kept for as long as that holds. A checkout with no
+  remote and at least one commit keeps its root until something else
+  removes it. A removal that fails part way touches the directories it
+  emptied, so the content rule then keeps that root for
+  `nix_temp_root_stale_after`.
+- **Each Nix temp root removal now takes a fresh holder inventory (#180).**
+  On by default. Immediately before each removal the lane checks the root's
+  identity, protect paths, its own age, content and Git state, and then a
+  process inventory. With no new key the inventory is fresh for every root.
+  On a busy host that limits how many roots one temp scan path's share
+  removes. On sting one inventory took 0.85 to 1.33 seconds, and the #181
+  review measured about 5 roots in one 5 second share.
+  `dev_artifacts.nix_temp_root_holder_max_age` (#181) trades that for a
+  stated window: an inventory that started at most that long ago stands in,
+  and a process that starts using a root inside the window is not seen. The
+  key has no upper bound. A value such as `7d` lets one inventory serve the
+  whole pass. A value that does not parse, or a negative one, means a fresh
+  inventory.
+- **`dev_artifacts.nix_temp_root_make_writable` changes directory modes
+  (#181).** Off by default. With it on, the lane adds owner read, write and
+  search permission to the root and to each directory in it that lacks one,
+  in a root already chosen for removal. The repair runs after the holder
+  check, so it widens the time between that check and the removal by up to
+  100,000 directories. It checks the directory's device, not its mount, so
+  a bind mount of the same filesystem inside a root is entered. It is Linux
+  only and does nothing on other systems.
+- **The three unit allowlists are assertions the daemon cannot check.**
+  `dev_artifacts.temp_uninspectable_ok_units` (0.5.0),
+  `home_lanes.uninspectable_ok_units` (#180) and
+  `bazel_bases.uninspectable_ok_units` (#181) each name systemd user units
+  whose unreadable processes no longer make the inventory incomplete. Each
+  entry asserts that the unit holds nothing under that rule's roots. A
+  process of the same user can join the listed unit's cgroup, and the
+  assertion then covers that process too. The lists are separate: a unit
+  listed for temp paths is not passed over by `home_lanes` or
+  `bazel_bases`.
+- **New keys and their defaults.** `home_lanes.uninspectable_ok_units` (`[]`),
+  `bazel_bases.uninspectable_ok_units` (`[]`),
+  `dev_artifacts.nix_temp_root_holder_max_age` (`""`, a fresh inventory per
+  root) and `dev_artifacts.nix_temp_root_make_writable` (`false`). With all
+  four left unset, the content and Git keeps and the fresh inventory per
+  removal above still apply.
 
 ### Added
 
-- **`home_lanes.uninspectable_ok_units` (TIN-8526).** Default empty. On sting
-  `home_lanes` removed nothing: the process inventory met the unreadable
-  process of `cade-annotation-page.service` and kept every tree. A listed
-  systemd user unit, matched exactly on the last segment of its cgroup v2
-  path as `dev_artifacts.temp_uninspectable_ok_units` is, no longer makes the
-  inventory incomplete. The temp list is not read here: each entry asserts
-  the unit holds nothing under the `home_lanes` roots. An unlisted unit is
-  named in the keep reason. The shared inventory takes the list for fd tables
-  and environments; no other plugin passes one yet.
-- **Per-path Info lines for stale Nix root and rebuildable directory
-  removals (TIN-8526).** `removed stale Nix temporary root` and `removed
-  rebuildable directory in idle temporary root` each give `path`, `bytes`
-  and `rule`. The Nix root line was at Debug,
-  and the rebuildable directory rule logged nothing.
-- **`bazel_bases.uninspectable_ok_units` (TIN-8526).** Default empty. On
-  sting `bazel_bases` removed nothing: "activity inventory incomplete: pid
+- **`home_lanes.uninspectable_ok_units` (#180, TIN-8526).** Default empty.
+  On sting `home_lanes` removed nothing: the process inventory met the
+  unreadable process of `cade-annotation-page.service` and kept every tree.
+  A listed systemd user unit no longer makes the inventory incomplete. It is
+  matched exactly on the last segment of the process's cgroup v2 path under
+  this user's manager, as `dev_artifacts.temp_uninspectable_ok_units` is. The
+  temp list is not read here. An unlisted unit is named in the keep reason.
+  Linux only.
+- **`bazel_bases.uninspectable_ok_units` (#181, TIN-8526).** Default empty.
+  On sting `bazel_bases` removed nothing: "activity inventory incomplete: pid
   36521 (python3) fd unreadable", the process of
-  `cade-annotation-page.service`. A listed systemd user unit, matched
-  exactly as the temp and `home_lanes` lists are, no longer makes the
-  inventory incomplete; it removes only its own processes from the reasons.
-  Each entry asserts the unit holds nothing in an output base. The temp and
-  `home_lanes` lists are not read here, and the repository contents dedupe
-  does not read this one.
-- **`dev_artifacts.nix_temp_root_make_writable` (TIN-8526).** Default off.
-  On sting all 34 roots the first 0.5.0 cycle tried failed with "unlinkat
-  ...: permission denied" inside directories without owner write
-  permission. With the key on, a root that passed its final check gets owner
-  read, write and search permission on each such directory before removal:
-  only directories this uid owns on the root's device, opened relative to
-  their parent without following a symlink, at most 100,000 a root. Linux
-  only.
-- **`dev_artifacts.nix_temp_root_holder_max_age` (TIN-8526).** Default
+  `cade-annotation-page.service`. A listed unit, matched as the
+  `home_lanes` list is, no longer makes the inventory incomplete. It removes
+  only its own processes from the reasons. The temp and `home_lanes` lists
+  are not read here, and the Bazel repository contents dedupe does not read
+  this one. Linux only.
+- **`dev_artifacts.nix_temp_root_make_writable` (#181, TIN-8526).** Default
+  off. On sting all 34 roots the first 0.5.0 cycle tried failed with
+  "unlinkat ...: permission denied" inside directories without owner write
+  permission. With the key on, a root that passed its final check gets
+  owner read, write and search permission on each such directory before
+  removal. Only directories this uid owns on the root's device change. Each
+  is opened relative to its parent without following a symlink, at most
+  100,000 a root. Files keep their modes. A root whose path no longer names
+  the checked directory is kept. A repair cut by the scan budget leaves the
+  root for a later cycle. Any other repair error still tries the removal.
+  A removal that fails does not end the pass: the lane goes on to the next
+  root. A root that fails with permission denied is logged once at Warn as
+  not deletable and skipped for the rest of the daemon's life.
+- **`dev_artifacts.nix_temp_root_holder_max_age` (#181, TIN-8526).** Default
   empty: the final holder check takes a fresh inventory for every root. A
-  duration lets an inventory that started at most that long ago stand in, so
-  a process that starts using a root within that window before its removal
-  is not seen.
+  duration lets an inventory that started at most that long ago stand in.
+- **Per-path Info lines for stale Nix root and rebuildable directory
+  removals (#180, TIN-8526).** `removed stale Nix temporary root` and
+  `removed rebuildable directory in idle temporary root` each give `path`,
+  `bytes` and `rule`. The Nix root line was at Debug, and the rebuildable
+  directory rule logged nothing.
 
 ### Changed
 
-- **Nix temp roots are checked again immediately before removal (TIN-8526).**
-  The holder inventory was taken once per cycle. Before each removal the lane
-  now checks identity, protect paths, age, content, Git and a fresh process
-  inventory, in that order.
+- **Nix temp roots are checked again immediately before removal (#180,
+  TIN-8526).** In 0.5.0 the holder inventory was taken once per cycle.
+  Before each removal the lane now checks identity, protect paths, age,
+  content, Git and a holder inventory, in that order.
 - **The removal pass reads a Nix temp root's content before sizing it
-  (TIN-8526).** A root kept for recent content or Git state is no longer
+  (#181, TIN-8526).** A root kept for recent content or Git state is not
   walked in full first, as the plan already did.
 - **The temp process inventory resolves each scan path once per inventory,
-  and each open file path once (TIN-8526).** It maps the same paths to the
-  same roots as before.
+  and each open file path once (#181, TIN-8526).** It maps the same paths to
+  the same roots as before.
 
 ## [0.5.0] - 2026-11-17
 
