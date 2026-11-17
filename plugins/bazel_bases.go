@@ -887,6 +887,7 @@ func (p *BazelBasesPlugin) run(ctx context.Context, pol *bbPolicy, apply bool, l
 		LsofTimeout: time.Duration(pol.cfg.LsofTimeoutSeconds) * time.Second,
 		UseLsof:     true,
 		OKComms:     pol.cfg.UninspectableOKComms,
+		OKUnits:     pol.cfg.UninspectableOKUnits,
 		// An output base holds no agent socket: the session process keeps
 		// that in its own /tmp/ssh-* directory, which is no base.
 		SkipSSHDSessions: true,

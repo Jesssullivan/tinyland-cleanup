@@ -298,6 +298,8 @@ dev_artifacts:
   temp_activity_probe_timeout: 10s
   nix_temp_root_min_mb: 1
   nix_temp_root_stale_after: 24h
+  nix_temp_root_holder_max_age: ""
+  nix_temp_root_make_writable: false
 ```
 
 - `temp_scan_max_roots` bounds the roots one cycle inspects in each temp scan
@@ -365,6 +367,31 @@ dev_artifacts:
   paths, age, content, Git and a fresh process inventory. A write after that
   inventory goes with the root. Ignored files in a clean, pushed checkout do
   not keep it.
+- `nix_temp_root_holder_max_age` (default empty) lets that final holder
+  check use an inventory that started at most this long ago (a Go duration).
+  Empty or `0s` takes a fresh inventory for every root. One inventory took
+  about 1 second on sting on November 17, 2026, at a load average near 30,
+  so a fresh one per root lets a 5 second temp path share remove about 5
+  roots. With `2s`, a fixture of 400 empty stale roots went in 1 second. The
+  cost: a process that starts using a root up to this long before its
+  removal is not seen. Identity, protect paths, age, content and Git are
+  still checked for each root just before its removal (TIN-8526).
+- `nix_temp_root_make_writable` (default `false`, Linux only) lets the lane
+  remove a root that holds read-only directories. Pytest fixtures and copied
+  store trees leave directories without owner write permission, and
+  `os.RemoveAll` then fails with `permission denied` on the files inside.
+  With the key on, after a root passes its final check, the lane adds owner
+  read, write and search permission to each directory in it that lacks one.
+  It changes only directories this uid owns on the root's device. It opens
+  each directory relative to its parent without following symlinks, so it
+  never leaves the root. It does not enter a directory it may not change,
+  and it stops after 100,000 directories. Files keep their modes. A root
+  that still cannot be removed is logged once as `dev artifact path is not
+  deletable`, skipped for the rest of the daemon's life, and the next roots
+  in the pass are still tried. A failed `os.RemoveAll` has already removed
+  what it could, and that touches the modification times of the directories
+  it emptied, so the content rule keeps such a root for
+  `nix_temp_root_stale_after` after the attempt.
 - Each removal by the stale Nix root rule and the rebuildable directory
   rule logs one Info line with the path, its `bytes` and its `rule`:
   `removed stale Nix temporary root` (rule `nix_temp_roots`) and `removed
@@ -411,6 +438,16 @@ OpenSSH's session process turns itself non-dumpable. The kernel then refuses
 its own user its `fd`, `cwd`, `root` and `maps` for the whole session, and an
 unreadable process makes the inventory incomplete. On honey on November 7,
 2026 that refused every apply cycle while anyone was logged in over SSH.
+
+`uninspectable_ok_units` (default empty) lists systemd user units whose
+processes may be unreadable, matched exactly on the cgroup v2 unit as
+`dev_artifacts.temp_uninspectable_ok_units` is. An entry asserts that the unit
+holds nothing in any output base under `roots`; the daemon cannot check it.
+A listed unit removes only its own processes from the incomplete reasons. The
+temp and `home_lanes` lists are not read here. The Bazel repository contents
+dedupe, which shares `uninspectable_ok_comms`, does not read this list: it
+works in the repository cache, not in output bases. `shm_scratch` and
+`retention` keep their own comm lists only (TIN-8526).
 
 `uninspectable_ok_comms` cannot carry this. Any process can set its own command
 name and turn non-dumpable. So `bazel_bases` passes over such a process only

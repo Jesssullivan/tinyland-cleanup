@@ -338,6 +338,12 @@ bazel_bases:
   lsof: ""              # required on Darwin (open-file inventory); optional second witness on Linux
   git: ""               # empty: git from PATH
   receipt_dir: ~/.local/state/tinyland-cleanup/bazel-bases
+  # Systemd user units whose processes may be unreadable without making the
+  # inventory incomplete. An entry asserts the unit holds nothing in any
+  # output base under these roots; the daemon cannot check it. Not read from
+  # the temp or home_lanes lists, and not read by the repository contents
+  # dedupe (TIN-8526).
+  uninspectable_ok_units: []
 
 # RAM-backed scratch reaper (lab R-C856, Linux). A top-level directory of a
 # tmpfs root is removed in apply mode when its newest change is older than
@@ -542,6 +548,15 @@ dev_artifacts:
   # 0 sets no size floor (empty stale roots are reaped too).
   nix_temp_root_min_mb: 1
   nix_temp_root_stale_after: 24h
+  # The final holder check before each removal takes a fresh process
+  # inventory. A duration lets an inventory that started at most that long
+  # ago stand in (TIN-8526). Empty or 0s: fresh every time.
+  nix_temp_root_holder_max_age: ""
+  # Give the owner write and search permission on read-only directories
+  # inside a root that passed its final check, so it can be removed. Only
+  # directories this uid owns on the root's device; no symlink is followed.
+  # Linux only (TIN-8526).
+  nix_temp_root_make_writable: false
   node_modules: true
   python_venvs: true
   rust_targets: true

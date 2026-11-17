@@ -206,7 +206,8 @@ immediately before removal:
   `TMP`, `TEMP` or `TEMPDIR` pointing inside it (Linux reads
   `/proc/<pid>/environ`, Darwin `kern.procargs2`);
 - the process inventory is incomplete (a same-user process whose fds or
-  environment cannot be read, other than `uninspectable_ok_comms`);
+  environment cannot be read, other than `uninspectable_ok_comms` and the
+  units in `uninspectable_ok_units`);
 - it belongs to another user, crosses a mount, or contains `.git` or
   agent-session data (TIN-5268). One exception, `tmp_agents` only (operator
   ruling TIN-7495 2026-10-29): a test fixture repository may go with its

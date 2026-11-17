@@ -619,6 +619,17 @@ type BazelBasesConfig struct {
 	// is only a claim: a process can set its own. SSH session processes are
 	// proved by their parent chain instead, so they are not listed here.
 	UninspectableOKComms []string `yaml:"uninspectable_ok_comms"`
+	// UninspectableOKUnits are systemd user units (the last segment of
+	// /proc/<pid>/cgroup under this user's manager, matched exactly, as
+	// dev_artifacts.temp_uninspectable_ok_units) whose processes may be
+	// unreadable without making the activity inventory incomplete. Each entry
+	// asserts that the unit holds nothing in any output base under these
+	// roots: the daemon cannot check it. It is separate from the temp and
+	// home_lanes lists because a unit that holds nothing there may still use
+	// an output base. Only bazel_bases reads it, not the Bazel repository
+	// contents dedupe that shares uninspectable_ok_comms. Empty by default.
+	// Linux only (TIN-8526).
+	UninspectableOKUnits []string `yaml:"uninspectable_ok_units"`
 	// Git is the git binary used for the tracked-files guard (empty: PATH).
 	Git string `yaml:"git"`
 	// Lsof is the lsof binary used as the second open-file witness. Required on
@@ -1263,6 +1274,19 @@ type DevArtifactsConfig struct {
 	NixTempRootMinMB int `yaml:"nix_temp_root_min_mb"`
 	// NixTempRootStaleAfter is the age after which Nix temp roots become deletion candidates
 	NixTempRootStaleAfter string `yaml:"nix_temp_root_stale_after"`
+	// NixTempRootHolderMaxAge lets the final holder check before a Nix temp
+	// root's removal reuse a process inventory that started at most this long
+	// ago (Go duration). Empty or 0s takes a fresh inventory for every root,
+	// as before. Each reuse widens the window in which a process can start
+	// using a root after the check (TIN-8526).
+	NixTempRootHolderMaxAge string `yaml:"nix_temp_root_holder_max_age"`
+	// NixTempRootMakeWritable gives the owner write and search permission on
+	// read-only directories inside a stale Nix temp root that passed its
+	// final check, before removing it. Only directories this uid owns on the
+	// root's device change; symlinks are never followed. Off by default: a
+	// root with read-only directories is then not removed, as before. Linux
+	// only (TIN-8526).
+	NixTempRootMakeWritable bool `yaml:"nix_temp_root_make_writable"`
 	// NodeModules enables node_modules cleanup
 	NodeModules bool `yaml:"node_modules"`
 	// PythonVenvs enables .venv cleanup
