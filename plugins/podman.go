@@ -209,9 +209,18 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 		return plan
 	}
 
+	if p.byUseOn(cfg) && podmanByUseRunsAt(level, cfg, loadPodmanKeep(cfg.Podman, podmanHome())) {
+		addPodmanByUsePlanToCleanupPlan(&plan, p.planByUse(ctx, cfg, time.Now(), logger))
+		plan.Metadata["target_count"] = strconv.Itoa(len(plan.Targets))
+	}
+
+	dangling := "Prune dangling Podman images"
+	if loadPodmanKeep(cfg.Podman, podmanHome()).pinsImages() {
+		dangling = "Skip the dangling Podman image prune: image pins are configured"
+	}
 	switch level {
 	case LevelWarning:
-		plan.Steps = append(plan.Steps, "Prune dangling Podman images")
+		plan.Steps = append(plan.Steps, dangling)
 	case LevelModerate:
 		keep := loadPodmanKeep(cfg.Podman, podmanHome())
 		plan.Metadata["protected_images"] = strconv.Itoa(len(keep.Refs))
@@ -220,16 +229,21 @@ func (p *PodmanPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg 
 		if keep.FileErr != nil {
 			plan.Warnings = append(plan.Warnings, "protected_images_file unreadable; the age prune is skipped: "+keep.FileErr.Error())
 		}
+		agePrune := podmanAgePruneStep(cfg, keep)
+		if p.byUseApplies(cfg) {
+			agePrune = "Skip the Podman age prune: prune-by-use replaces it"
+		}
 		plan.Steps = append(plan.Steps,
-			"Prune dangling Podman images",
-			podmanAgePruneStep(cfg, keep),
+			dangling,
+			agePrune,
 			"Prune old stopped Podman containers",
 		)
 	case LevelAggressive:
-		plan.Steps = append(plan.Steps,
-			"Prune Podman volumes and networks no container uses",
-			"Run moderate Podman cleanup",
-		)
+		volumes := "Prune Podman volumes and networks no container uses"
+		if p.byUseApplies(cfg) {
+			volumes = "Prune Podman networks no container uses (prune-by-use removes volumes)"
+		}
+		plan.Steps = append(plan.Steps, volumes, "Run moderate Podman cleanup")
 		if runtime.GOOS == "darwin" && p.environment.VMRunning && cfg.Podman.TrimVMDisk && !p.fstrimReclaimsHostSpace() {
 			plan.Warnings = append(plan.Warnings, "guest fstrim output is not counted as host bytes for this provider; measured host free-space delta remains authoritative")
 		}
@@ -366,6 +380,10 @@ func (p *PodmanPlugin) cleanDangling(ctx context.Context, cfg *config.Config, lo
 	result := CleanupResult{Plugin: p.Name(), Level: LevelWarning}
 	keep := loadPodmanKeep(cfg.Podman, podmanHome())
 
+	if keep.pinsImages() {
+		logger.Debug("skipping podman dangling-image prune: image pins are configured")
+		return result
+	}
 	logger.Debug("cleaning dangling podman images")
 	output, err := p.runPodmanCommand(ctx, append([]string{"image", "prune", "-f"}, keep.labelFilterArgs()...)...)
 	if err != nil {
@@ -389,16 +407,29 @@ func (p *PodmanPlugin) cleanModerate(ctx context.Context, cfg *config.Config, lo
 	keep := loadPodmanKeep(cfg.Podman, podmanHome())
 	labelFilters := keep.labelFilterArgs()
 
-	// Clean dangling images
+	// Clean dangling images, unless an image pin is configured
+	// (podmanKeep.pinsImages).
 	logger.Debug("cleaning dangling podman images")
-	if output, err := p.runPodmanCommand(ctx, append([]string{"image", "prune", "-f"}, labelFilters...)...); err == nil {
+	if keep.pinsImages() {
+		logger.Debug("skipping podman dangling-image prune: image pins are configured")
+	} else if output, err := p.runPodmanCommand(ctx, append([]string{"image", "prune", "-f"}, labelFilters...)...); err == nil {
 		result.BytesFreed += p.parseReclaimedSpace(output)
 		result.ItemsCleaned++
 	}
 
+	// Prune by use (TIN-8526). In apply mode it replaces the age prune below;
+	// in report mode it only logs and the age prune runs as before.
+	if p.byUseOn(cfg) {
+		freed, removed := p.pruneByUse(ctx, cfg, logger)
+		result.BytesFreed += freed
+		result.ItemsCleaned += removed
+	}
+
 	// Clean old images (with age filter)
 	logger.Debug("cleaning old podman images", "age", cfg.Podman.PruneImagesAge)
-	if keep.FileErr != nil {
+	if p.byUseApplies(cfg) {
+		logger.Debug("podman age prune replaced by prune-by-use")
+	} else if keep.FileErr != nil {
 		// Fail closed: an unreadable keep file may hold the only pin.
 		logger.Warn("skipping podman age prune: protected_images_file unreadable", "file", keep.File, "error", keep.FileErr)
 	} else if keep.active() {
@@ -498,12 +529,43 @@ func (p *PodmanPlugin) pruneOldImagesProtected(ctx context.Context, cfg *config.
 // locally to its full image ID. A reference podman definitely does not know
 // needs no protection and is skipped. Any other inspect failure returns
 // ok=false: the pin cannot be honored, so the caller prunes nothing.
+//
+// A pin that carries a digest is also asked as a closed question,
+// `podman images --all --no-trunc --quiet --filter digest=<digest>`. Podman
+// answers from every digest it stored for the image, under any name or none,
+// a manifest-list digest included, while inspect answers "image not known"
+// for an image with no name (TIN-8526 review B3). Each answer line must be
+// sha256:<64 hex>; an error, any other line, or a digest the pass cannot
+// compare returns ok=false.
 func (p *PodmanPlugin) resolveProtectedImageIDs(ctx context.Context, refs []string, logger *slog.Logger) (map[string]string, bool) {
 	ids := make(map[string]string, len(refs))
 	for _, ref := range refs {
 		ref = strings.TrimSpace(ref)
 		if ref == "" {
 			continue
+		}
+		digest, ok := podmanPinDigest(ref)
+		if !ok {
+			logger.Warn("protected podman image pin carries a digest that cannot be compared; skipping the age prune", "ref", ref)
+			return ids, false
+		}
+		if digest != "" {
+			output, err := p.runPodmanCommand(ctx, "images", "--all", "--no-trunc", "--quiet", "--filter", "digest="+digest)
+			if err != nil {
+				logger.Warn("protected podman image digest could not be listed; skipping the age prune", "ref", ref, "error", err)
+				return ids, false
+			}
+			for _, line := range strings.Split(output, "\n") {
+				if line = strings.TrimSpace(line); line == "" {
+					continue
+				}
+				id, found := strings.CutPrefix(line, "sha256:")
+				if !found || !podmanFullIDPattern.MatchString(id) {
+					logger.Warn("protected podman image digest listing gave an unexpected line; skipping the age prune", "ref", ref, "line", line)
+					return ids, false
+				}
+				ids[id] = ref
+			}
 		}
 		output, err := p.runPodmanCommand(ctx, "image", "inspect", "--format", "{{.Id}}", ref)
 		if err != nil {
@@ -607,7 +669,11 @@ func (p *PodmanPlugin) pruneUnusedVolumesAndNetworks(ctx context.Context, cfg *c
 	keep := loadPodmanKeep(cfg.Podman, podmanHome())
 	labelFilters := keep.labelFilterArgs()
 	logger.Debug("cleaning unused podman volumes")
-	if len(keep.Labels) > 0 {
+	if p.byUseApplies(cfg) {
+		// The prune-by-use pass in cleanModerate removes dangling volumes
+		// once they are older than prune_images_age.
+		logger.Debug("podman volume prune replaced by prune-by-use")
+	} else if len(keep.Labels) > 0 {
 		// Same libpod all-labels negation as container prune: list the
 		// volumes no container uses and remove each unprotected one.
 		result.ItemsCleaned += p.removeUnusedVolumes(ctx, keep, logger)
@@ -669,6 +735,11 @@ func (p *PodmanPlugin) cleanCritical(ctx context.Context, cfg *config.Config, lo
 		}
 	} else {
 		logger.Warn("skipping broad Podman system prune with volumes", "reason", "critical_system_prune_disabled")
+		if p.byUseOn(cfg) {
+			freed, removed := p.pruneByUse(ctx, cfg, logger)
+			result.BytesFreed += freed
+			result.ItemsCleaned += removed
+		}
 	}
 
 	// On Darwin, aggressive VM cleanup

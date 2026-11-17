@@ -33,6 +33,9 @@ type podmanKeep struct {
 	File     string
 	FileErr  error
 	FileRefs int
+	// FileMissing is true when File is configured and does not exist. The
+	// older keep rule reads that as no pins; the prune-by-use pass skips.
+	FileMissing bool
 }
 
 // loadPodmanKeep reads the keep rule for one cycle. The keep file is re-read
@@ -51,8 +54,9 @@ func loadPodmanKeep(cfg config.PodmanConfig, home string) podmanKeep {
 	}
 	if keep.File != "" {
 		keep.File = expandHome(keep.File, home)
-		refs, err := readPodmanKeepFile(keep.File)
+		refs, missing, err := readPodmanKeepFileState(keep.File)
 		keep.FileErr = err
+		keep.FileMissing = missing
 		keep.FileRefs = len(refs)
 		keep.Refs = append(keep.Refs, refs...)
 	}
@@ -64,25 +68,32 @@ func loadPodmanKeep(cfg config.PodmanConfig, home string) podmanKeep {
 // A dangling symlink, or anything but a regular file (a FIFO would block the
 // daemon on open), is an error, so the caller fails closed.
 func readPodmanKeepFile(path string) ([]string, error) {
+	refs, _, err := readPodmanKeepFileState(path)
+	return refs, err
+}
+
+// readPodmanKeepFileState is readPodmanKeepFile that also reports whether
+// the file was missing at the Lstat.
+func readPodmanKeepFileState(path string) ([]string, bool, error) {
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, true, nil
 	} else if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	st, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("keep file %s: %w", path, err)
+		return nil, false, fmt.Errorf("keep file %s: %w", path, err)
 	}
 	if !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("keep file %s is not a regular file (%s)", path, st.Mode().Type())
+		return nil, false, fmt.Errorf("keep file %s is not a regular file (%s)", path, st.Mode().Type())
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer f.Close()
 	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("keep file %s changed type while opening", path)
+		return nil, false, fmt.Errorf("keep file %s changed type while opening", path)
 	}
 	var refs []string
 	sc := bufio.NewScanner(f)
@@ -96,9 +107,20 @@ func readPodmanKeepFile(path string) ([]string, error) {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return refs, nil
+	return refs, false, nil
+}
+
+// pinsImages reports whether an image pin is configured, in the config or
+// through a keep file, present or not. `podman image prune -f` removes every
+// dangling image and takes no reference or digest exclusion. An image whose
+// tag moved to a newer pull is dangling while a digest pin still names it
+// (TIN-8526 review B3), so the plugin skips that prune while this holds. The
+// age prune and the prune-by-use pass still remove old unpinned dangling
+// images.
+func (k podmanKeep) pinsImages() bool {
+	return len(k.Refs) > 0 || k.File != ""
 }
 
 // active reports whether the keep rule is on. A configured keep file counts
