@@ -302,6 +302,7 @@ go_library(
         "plugins/exec_deadline.go",
         "plugins/fs.go",
         "plugins/home_lanes.go",
+        "plugins/home_lanes_git.go",
         "plugins/nix.go",
         "plugins/nix_cadence.go",
         "plugins/nix_gclock.go",

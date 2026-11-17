@@ -353,6 +353,9 @@ home_lanes:
   hermes_installs_root: "" # for example ~/.hermes/installs; empty inspects none
   hermes_checkout_roots: [] # a recorded checkout's absence proves deletion only here
   hermes_idle_after: 72h   # A-082 floor: 24h
+  stale_work_roots: []     # for example ~/build; empty inspects none (TIN-8526)
+  stale_work_idle_after: 14d # newest file modification must be older; floor 7d
+  free_target_gb: 0        # stop removing once a root's mount has this much free; 0 sets no target
   max_removals_per_cycle: 8
   uninspectable_ok_comms: [tailscaled, "(sd-pam)", sd-pam, systemd]
 

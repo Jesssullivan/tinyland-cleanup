@@ -727,6 +727,9 @@ const (
 const (
 	HomeLanesMinCacheIdleAfter  = 72 * time.Hour
 	HomeLanesMinHermesIdleAfter = 24 * time.Hour
+	// HomeLanesMinStaleWorkIdleAfter is the floor for stale_work_idle_after
+	// (TIN-8526). The operator ruled 14 days for ~/build.
+	HomeLanesMinStaleWorkIdleAfter = 7 * 24 * time.Hour
 )
 
 // HomeLanesConfig configures the stale home tree reaper (lab A-082, TIN-5770).
@@ -754,6 +757,19 @@ type HomeLanesConfig struct {
 	// HermesIdleAfter is how long the newest use in an orphaned install must
 	// be past (at least 24h).
 	HermesIdleAfter string `yaml:"hermes_idle_after"`
+	// StaleWorkRoots are directories of work trees, such as ~/build, whose
+	// direct entries are removed once stale (TIN-8526). An entry is stale when
+	// no file under it was modified within StaleWorkIdleAfter. A Git checkout
+	// anywhere inside with uncommitted changes, a stash, linked work trees or
+	// commits on no remote keeps the entry. Empty inspects none.
+	StaleWorkRoots []string `yaml:"stale_work_roots"`
+	// StaleWorkIdleAfter is how long the newest modification in a stale work
+	// entry must be past (at least 7d).
+	StaleWorkIdleAfter string `yaml:"stale_work_idle_after"`
+	// FreeTargetGB is the free space, in GiB, at which the plugin stops
+	// removing on a root's mount for the cycle. 0 sets no target, and every
+	// eligible tree up to max_removals_per_cycle goes.
+	FreeTargetGB int `yaml:"free_target_gb"`
 	// MaxRemovalsPerCycle bounds the trees one cycle removes.
 	MaxRemovalsPerCycle int `yaml:"max_removals_per_cycle"`
 	// UninspectableOKComms are process names of this user whose fd tables may
@@ -799,8 +815,55 @@ func (c HomeLanesConfig) Validate() error {
 			return fmt.Errorf("home_lanes.hermes_checkout_roots: %q must be absolute or start with ~", root)
 		}
 	}
+	if len(c.StaleWorkRoots) > 0 || c.StaleWorkIdleAfter != "" {
+		staleIdle, err := ParseDuration(c.StaleWorkIdleAfter)
+		if err != nil {
+			return fmt.Errorf("home_lanes.stale_work_idle_after: %w", err)
+		}
+		if staleIdle < HomeLanesMinStaleWorkIdleAfter {
+			return fmt.Errorf("home_lanes.stale_work_idle_after %s is below the floor %s", staleIdle, HomeLanesMinStaleWorkIdleAfter)
+		}
+	}
+	home, _ := os.UserHomeDir()
+	for _, root := range c.StaleWorkRoots {
+		if err := validateStaleWorkRoot(root, home); err != nil {
+			return err
+		}
+	}
+	if c.FreeTargetGB < 0 {
+		return fmt.Errorf("home_lanes.free_target_gb must not be negative")
+	}
 	if c.MaxRemovalsPerCycle < 1 {
 		return fmt.Errorf("home_lanes.max_removals_per_cycle must be at least 1")
+	}
+	return nil
+}
+
+// validateStaleWorkRoot refuses a root whose entries would include the home
+// directory or the filesystem root, since every entry of a stale work root
+// without a Git checkout is removable.
+func validateStaleWorkRoot(root, home string) error {
+	expanded := root
+	switch {
+	case root == "~":
+		expanded = home
+	case strings.HasPrefix(root, "~/"):
+		if home == "" {
+			return fmt.Errorf("home_lanes.stale_work_roots: %q needs a home directory", root)
+		}
+		expanded = filepath.Join(home, root[2:])
+	case !filepath.IsAbs(root):
+		return fmt.Errorf("home_lanes.stale_work_roots: %q must be absolute or start with ~/", root)
+	}
+	expanded = filepath.Clean(expanded)
+	if expanded == "/" || filepath.Dir(expanded) == "/" {
+		return fmt.Errorf("home_lanes.stale_work_roots: %q is too close to /", root)
+	}
+	if home != "" {
+		h := filepath.Clean(home)
+		if expanded == h || strings.HasPrefix(h, expanded+"/") {
+			return fmt.Errorf("home_lanes.stale_work_roots: %q holds the home directory", root)
+		}
 	}
 	return nil
 }
@@ -1388,6 +1451,7 @@ func DefaultConfig() *Config {
 			CacheRoot:           "~/.cache",
 			CacheIdleAfter:      "7d",
 			HermesIdleAfter:     "72h",
+			StaleWorkIdleAfter:  "14d",
 			MaxRemovalsPerCycle: 8,
 			// The temp lane's reviewed list, as shm_scratch keeps it.
 			UninspectableOKComms: []string{"tailscaled", "(sd-pam)", "sd-pam", "systemd"},

@@ -502,3 +502,347 @@ func TestHomeLanesRealInventorySeesAHolder(t *testing.T) {
 		})
 	}
 }
+
+// ---- stale work roots and the free target (TIN-8526) ----
+
+// staleFixture adds a stale work root, ~/build, to the home_lanes fixture.
+// Git runs with no global or system configuration, so a developer's signing
+// or hook settings cannot reach the test repositories.
+func staleFixture(t *testing.T) (*homeLanesFixture, string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	f := newHomeLanesFixture(t)
+	build := filepath.Join(f.home, "build")
+	if err := os.MkdirAll(build, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.HomeLanes.CacheLaneGlobs = nil
+	f.cfg.HomeLanes.HermesInstallsRoot = ""
+	f.cfg.HomeLanes.StaleWorkRoots = []string{build}
+	f.cfg.HomeLanes.StaleWorkIdleAfter = "14d"
+	return f, build
+}
+
+func gitRun(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	full := append([]string{"-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+		"-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main", "-C", dir}, args...)
+	out, err := exec.Command("git", full...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// checkout makes a clone at dir whose main branch is pushed to a bare remote
+// outside the build root. It is clean and has nothing on no remote.
+func checkout(t *testing.T, dir string) string {
+	t.Helper()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, filepath.Dir(remote), "init", "-q", "--bare", remote)
+	gitRun(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", "README")
+	gitRun(t, dir, "commit", "-q", "-m", "one")
+	gitRun(t, dir, "remote", "add", "origin", remote)
+	gitRun(t, dir, "push", "-q", "-u", "origin", "main")
+	return dir
+}
+
+func (f *homeLanesFixture) staleReason(name string) string {
+	f.t.Helper()
+	target, ok := targetFor(f.plan(LevelCritical), name)
+	if !ok {
+		f.t.Fatalf("%s is not a candidate", name)
+	}
+	if target.Protected {
+		return target.Reason
+	}
+	return ""
+}
+
+func TestHomeLanesStaleWorkRemovesIdleEntriesAndPushedCheckouts(t *testing.T) {
+	f, build := staleFixture(t)
+	plain := f.tree(filepath.Join(build, "plain"), homeLanesOld, "out/log")
+	file := filepath.Join(build, "gate.log")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.age(file, homeLanesOld, homeLanesOld)
+	clean := filepath.Join(build, "clean")
+	checkout(t, filepath.Join(clean, "deep", "repo"))
+	f.age(clean, homeLanesOld, homeLanesOld)
+	young := f.tree(filepath.Join(build, "young"), 13*24*time.Hour, "payload")
+
+	res := f.run(LevelModerate)
+	if res.Error != nil || res.ItemsCleaned != 3 {
+		t.Fatalf("result = %+v", res)
+	}
+	for _, p := range []string{plain, file, clean} {
+		if exists(p) {
+			t.Fatalf("%s survived", p)
+		}
+	}
+	if !exists(young) {
+		t.Fatal("an entry modified 13 days ago was removed under a 14d window")
+	}
+}
+
+// Each kind of unsaved Git work keeps its entry, at any depth inside it.
+func TestHomeLanesStaleWorkKeepsUnsavedGitWork(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(t *testing.T, repo string)
+		want   string
+	}{
+		"untracked file": {func(t *testing.T, repo string) {
+			if err := os.WriteFile(filepath.Join(repo, "new"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, "uncommitted changes"},
+		"modified file": {func(t *testing.T, repo string) {
+			if err := os.WriteFile(filepath.Join(repo, "README"), []byte("y"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, "uncommitted changes"},
+		"stash": {func(t *testing.T, repo string) {
+			if err := os.WriteFile(filepath.Join(repo, "README"), []byte("y"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitRun(t, repo, "stash", "-q")
+		}, "has a stash"},
+		"unpushed commit": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "two")
+		}, "on no remote"},
+		"local branch on no remote": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "branch", "side")
+			gitRun(t, repo, "checkout", "-q", "side")
+			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "side")
+			gitRun(t, repo, "checkout", "-q", "main")
+		}, "on no remote"},
+		"detached head on no remote": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "checkout", "-q", "--detach")
+			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "detached")
+		}, "on no remote"},
+		"local tag on no remote": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "tagged")
+			gitRun(t, repo, "tag", "v1")
+			gitRun(t, repo, "reset", "-q", "--hard", "origin/main")
+		}, "on no remote"},
+		"no remote": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "remote", "remove", "origin")
+		}, "on no remote"},
+		"linked work tree": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "worktree", "add", "-q", "--detach", filepath.Join(t.TempDir(), "wt"))
+		}, "other work trees"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f, build := staleFixture(t)
+			entry := filepath.Join(build, "entry")
+			repo := checkout(t, filepath.Join(entry, "a", "b"))
+			tc.mutate(t, repo)
+			f.age(entry, homeLanesOld, homeLanesOld)
+			if got := f.staleReason("entry"); !strings.Contains(got, tc.want) {
+				t.Fatalf("reason %q lacks %q", got, tc.want)
+			}
+			if res := f.run(LevelCritical); res.ItemsCleaned != 0 || !exists(repo) {
+				t.Fatalf("result = %+v", res)
+			}
+		})
+	}
+}
+
+// A git that is missing, fails, hangs or answers outside the closed question
+// keeps the entry.
+func TestHomeLanesStaleWorkUnknownGitAnswerKeeps(t *testing.T) {
+	scripts := map[string]string{
+		"fails":   "#!/bin/sh\nexit 1\n",
+		"hangs":   "#!/bin/sh\nexec sleep 30\n",
+		"garbage": "#!/bin/sh\ncase \"$*\" in *rev-parse*) exec git \"$@\";; *rev-list*) echo lots;; esac\nexit 0\n",
+		"missing": "",
+	}
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			f, build := staleFixture(t)
+			entry := filepath.Join(build, "entry")
+			checkout(t, filepath.Join(entry, "repo"))
+			f.age(entry, homeLanesOld, homeLanesOld)
+			fake := filepath.Join(t.TempDir(), "git")
+			if script != "" {
+				realGit, _ := exec.LookPath("git")
+				script = strings.ReplaceAll(script, "exec git ", "exec "+realGit+" ")
+				if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.plugin.gitPath = fake
+			f.plugin.gitTimeout = 300 * time.Millisecond
+			if got := f.staleReason("entry"); !strings.Contains(got, "could not be verified") {
+				t.Fatalf("reason = %q", got)
+			}
+			if res := f.run(LevelCritical); res.ItemsCleaned != 0 || !exists(entry) {
+				t.Fatalf("result = %+v", res)
+			}
+		})
+	}
+}
+
+// The probe must not rewrite the index, or every probe would refresh the
+// entry's age and no checkout would ever go idle. File access times do not
+// count for a stale work entry, because the probe reads files.
+func TestHomeLanesStaleWorkProbeDoesNotRefreshAge(t *testing.T) {
+	f, build := staleFixture(t)
+	f.cfg.HomeLanes.Mode = config.HomeLanesModeReport
+	entry := filepath.Join(build, "entry")
+	checkout(t, filepath.Join(entry, "repo"))
+	f.age(entry, homeLanesOld, homeLanesOld)
+	for i := 0; i < 2; i++ {
+		if got := f.staleReason("entry"); got != "" {
+			t.Fatalf("plan %d keeps the entry: %q", i+1, got)
+		}
+	}
+}
+
+func TestHomeLanesStaleWorkKeepsWhatItCannotInspect(t *testing.T) {
+	f, build := staleFixture(t)
+	bare := filepath.Join(build, "mirror")
+	gitRun(t, build, "init", "-q", "--bare", bare)
+	hg := f.tree(filepath.Join(build, "hg"), homeLanesOld, ".hg/store/data")
+	session := f.tree(filepath.Join(build, "session"), homeLanesOld, "repo/.claude/projects/x.jsonl")
+	held := f.tree(filepath.Join(build, "held"), homeLanesOld, "open")
+	f.held[filepath.Join(held, "open")] = "pid 7 holds it"
+	f.age(bare, homeLanesOld, homeLanesOld)
+	target := f.tree(filepath.Join(t.TempDir(), "elsewhere"), homeLanesOld, "payload")
+	link := filepath.Join(build, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"mirror": "bare Git repository", "hg": ".hg", "session": "agent-session", "held": "held"} {
+		if got := f.staleReason(name); !strings.Contains(got, want) {
+			t.Fatalf("%s: reason %q lacks %q", name, got, want)
+		}
+	}
+	if res := f.run(LevelCritical); res.ItemsCleaned != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	for _, p := range []string{bare, hg, session, held, link, filepath.Join(target, "payload")} {
+		if !exists(p) {
+			t.Fatalf("%s was removed", p)
+		}
+	}
+}
+
+// free_target_gb is a budget: apply mode reads free space before each
+// removal and stops on that mount once the target is reached.
+func TestHomeLanesFreeTargetStopsRemoval(t *testing.T) {
+	f, build := staleFixture(t)
+	f.cfg.HomeLanes.FreeTargetGB = 30
+	for _, n := range []string{"a", "b", "c"} {
+		f.tree(filepath.Join(build, n), homeLanesOld, "payload")
+	}
+	reads := 0
+	f.plugin.freeBytes = func(string) (uint64, error) {
+		reads++
+		if reads == 1 {
+			return 29 * homeLanesGiB, nil
+		}
+		return 31 * homeLanesGiB, nil
+	}
+	if res := f.run(LevelCritical); res.ItemsCleaned != 1 {
+		t.Fatalf("result = %+v, want exactly one removal before the target", res)
+	}
+
+	f.plugin.freeBytes = func(string) (uint64, error) { return 0, errors.New("statfs failed") }
+	if res := f.run(LevelCritical); res.ItemsCleaned != 0 {
+		t.Fatalf("unreadable free space removed a tree: %+v", res)
+	}
+
+	f.plugin.freeBytes = func(string) (uint64, error) { return 100 * homeLanesGiB, nil }
+	if res := f.run(LevelCritical); res.ItemsCleaned != 0 {
+		t.Fatalf("a mount over its target lost a tree: %+v", res)
+	}
+	plan := f.plan(LevelCritical)
+	if plan.EstimatedBytesFreed != 0 {
+		t.Fatalf("plan over target estimates %d bytes", plan.EstimatedBytesFreed)
+	}
+	for _, tg := range plan.Targets {
+		if !tg.Protected || !strings.Contains(tg.Reason, "free target") {
+			t.Fatalf("target = %+v", tg)
+		}
+	}
+}
+
+// The plan, which removes nothing in any mode, projects the target: largest first, the planned bytes of each
+// tree count toward the target, and the rest are reported as kept.
+func TestHomeLanesFreeTargetPlanProjection(t *testing.T) {
+	f, build := staleFixture(t)
+	f.cfg.HomeLanes.FreeTargetGB = 1
+	f.tree(filepath.Join(build, "big"), homeLanesOld, "a", "b", "c", "d")
+	f.tree(filepath.Join(build, "small"), homeLanesOld, "a")
+	f.plugin.freeBytes = func(string) (uint64, error) { return homeLanesGiB - 1, nil }
+	plan := f.plan(LevelCritical)
+	big, _ := targetFor(plan, "big")
+	small, _ := targetFor(plan, "small")
+	if big.Protected || !small.Protected || plan.EstimatedBytesFreed != big.Bytes {
+		t.Fatalf("big=%+v small=%+v estimate=%d", big, small, plan.EstimatedBytesFreed)
+	}
+}
+
+// An entry replaced after the recheck is put back, not removed.
+func TestHomeLanesReclaimRefusesAReplacedEntry(t *testing.T) {
+	f, build := staleFixture(t)
+	entry := f.tree(filepath.Join(build, "entry"), homeLanesOld, "payload")
+	inspected, err := os.Lstat(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(entry, entry+".old"); err != nil {
+		t.Fatal(err)
+	}
+	f.tree(entry, homeLanesOld, "replacement")
+	if err := f.plugin.reclaim(entry, inspected); err == nil {
+		t.Fatal("reclaim removed a replaced entry")
+	}
+	if !exists(filepath.Join(entry, "replacement")) || !exists(entry+".old") {
+		t.Fatal("the replacement or the original is gone")
+	}
+}
+
+func TestHomeLanesValidateStaleWork(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	base := func() config.HomeLanesConfig {
+		c := config.DefaultConfig().HomeLanes
+		c.StaleWorkRoots = []string{"~/build"}
+		return c
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("default policy with ~/build: %v", err)
+	}
+	for name, mutate := range map[string]func(*config.HomeLanesConfig){
+		"home":          func(c *config.HomeLanesConfig) { c.StaleWorkRoots = []string{"~"} },
+		"home slash":    func(c *config.HomeLanesConfig) { c.StaleWorkRoots = []string{"~/"} },
+		"home absolute": func(c *config.HomeLanesConfig) { c.StaleWorkRoots = []string{home} },
+		"home parent":   func(c *config.HomeLanesConfig) { c.StaleWorkRoots = []string{filepath.Dir(home)} },
+		"slash":         func(c *config.HomeLanesConfig) { c.StaleWorkRoots = []string{"/"} },
+		"top level":     func(c *config.HomeLanesConfig) { c.StaleWorkRoots = []string{"/srv"} },
+		"relative":      func(c *config.HomeLanesConfig) { c.StaleWorkRoots = []string{"build"} },
+		"idle floor":    func(c *config.HomeLanesConfig) { c.StaleWorkIdleAfter = "6d" },
+		"no idle":       func(c *config.HomeLanesConfig) { c.StaleWorkIdleAfter = "" },
+		"free target":   func(c *config.HomeLanesConfig) { c.FreeTargetGB = -1 },
+	} {
+		c := base()
+		mutate(&c)
+		if err := c.Validate(); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+}
