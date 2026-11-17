@@ -16,6 +16,11 @@ All notable changes to this project will be documented in this file.
   or 5 seconds also keeps it. A Git checkout with no remote therefore keeps
   its root until it is removed by other means. The rule deletes less than
   in 0.5.0.
+- **The final check before each Nix temp root removal takes a fresh process
+  inventory (TIN-8526).** On sting one inventory took about 1 second, so a
+  temp scan path's 5 second share removes about 5 roots a cycle where 0.5.0
+  removed hundreds. `dev_artifacts.nix_temp_root_holder_max_age` (below)
+  lifts that limit on hosts that set it.
 
 ### Added
 
@@ -33,6 +38,28 @@ All notable changes to this project will be documented in this file.
   rebuildable directory in idle temporary root` each give `path`, `bytes`
   and `rule`. The Nix root line was at Debug,
   and the rebuildable directory rule logged nothing.
+- **`bazel_bases.uninspectable_ok_units` (TIN-8526).** Default empty. On
+  sting `bazel_bases` removed nothing: "activity inventory incomplete: pid
+  36521 (python3) fd unreadable", the process of
+  `cade-annotation-page.service`. A listed systemd user unit, matched
+  exactly as the temp and `home_lanes` lists are, no longer makes the
+  inventory incomplete; it removes only its own processes from the reasons.
+  Each entry asserts the unit holds nothing in an output base. The temp and
+  `home_lanes` lists are not read here, and the repository contents dedupe
+  does not read this one.
+- **`dev_artifacts.nix_temp_root_make_writable` (TIN-8526).** Default off.
+  On sting all 34 roots the first 0.5.0 cycle tried failed with "unlinkat
+  ...: permission denied" inside directories without owner write
+  permission. With the key on, a root that passed its final check gets owner
+  read, write and search permission on each such directory before removal:
+  only directories this uid owns on the root's device, opened relative to
+  their parent without following a symlink, at most 100,000 a root. Linux
+  only.
+- **`dev_artifacts.nix_temp_root_holder_max_age` (TIN-8526).** Default
+  empty: the final holder check takes a fresh inventory for every root. A
+  duration lets an inventory that started at most that long ago stand in, so
+  a process that starts using a root within that window before its removal
+  is not seen.
 
 ### Changed
 
@@ -40,6 +67,12 @@ All notable changes to this project will be documented in this file.
   The holder inventory was taken once per cycle. Before each removal the lane
   now checks identity, protect paths, age, content, Git and a fresh process
   inventory, in that order.
+- **The removal pass reads a Nix temp root's content before sizing it
+  (TIN-8526).** A root kept for recent content or Git state is no longer
+  walked in full first, as the plan already did.
+- **The temp process inventory resolves each scan path once per inventory,
+  and each open file path once (TIN-8526).** It maps the same paths to the
+  same roots as before.
 
 ## [0.5.0] - 2026-11-17
 

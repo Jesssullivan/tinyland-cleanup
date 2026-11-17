@@ -191,6 +191,10 @@ func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []str
 	}
 	ok := procCommSet(okComms)
 	okUnit := procCommSet(okUnits)
+	scanRoots := canonicalTempScanRoots(paths, home)
+	// Many descriptors name the same file; each distinct path is mapped once
+	// per inventory.
+	mapped := map[string]string{}
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return roots, err
@@ -239,7 +243,13 @@ func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []str
 			return fmt.Errorf("owned process %s unavailable: pid %s (%s)", what, entry.Name(), comm)
 		}
 		record := func(path string) {
-			if root := tempArtifactRootForPath(strings.TrimSuffix(path, " (deleted)"), paths, home); root != "" {
+			path = strings.TrimSuffix(path, " (deleted)")
+			root, seen := mapped[path]
+			if !seen {
+				root = tempArtifactRootUnder(path, scanRoots)
+				mapped[path] = root
+			}
+			if root != "" {
 				roots[root] = "cwd/open file held by pid " + entry.Name()
 			}
 		}
@@ -285,6 +295,7 @@ func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []str
 
 func tempRootsFromOpenFiles(output string, paths []string, home string) map[string]string {
 	roots := map[string]string{}
+	scanRoots := canonicalTempScanRoots(paths, home)
 	pid := "unknown"
 	for _, field := range strings.Split(output, "\x00") {
 		field = strings.TrimLeft(field, "\n")
@@ -296,7 +307,7 @@ func tempRootsFromOpenFiles(output string, paths []string, home string) map[stri
 			pid = field[1:]
 		case 'n':
 			path := strings.TrimSuffix(field[1:], " (deleted)")
-			if root := tempArtifactRootForPath(path, paths, home); root != "" {
+			if root := tempArtifactRootUnder(path, scanRoots); root != "" {
 				roots[root] = "cwd/open file held by pid " + pid
 			}
 		}

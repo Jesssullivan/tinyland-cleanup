@@ -772,11 +772,11 @@ func TestNixTempRootRecheckIdentityProtectAndAge(t *testing.T) {
 			}
 			cfg := nixTempRootConfig(scan).DevArtifacts
 			p := newDevArtifactsPluginWithActive(nil)
-			if why := p.recheckNixTemporaryRoot(context.Background(), root, listed, 24*time.Hour, cfg); why != "" {
+			if why := p.recheckNixTemporaryRoot(context.Background(), root, listed, 24*time.Hour, cfg, nil); why != "" {
 				t.Fatalf("an unchanged stale root must pass the recheck, got %q", why)
 			}
 			tc.change(t, root, &cfg)
-			if why := p.recheckNixTemporaryRoot(context.Background(), root, listed, 24*time.Hour, cfg); !strings.Contains(why, tc.want) {
+			if why := p.recheckNixTemporaryRoot(context.Background(), root, listed, 24*time.Hour, cfg, nil); !strings.Contains(why, tc.want) {
 				t.Fatalf("want a keep for %q, got %q", tc.want, why)
 			}
 		})

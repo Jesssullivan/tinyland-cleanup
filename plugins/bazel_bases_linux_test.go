@@ -920,3 +920,62 @@ func TestBBScanProcUninspectableUnitEnviron(t *testing.T) {
 		t.Fatalf("a listed unit's unreadable environment must leave the inventory complete, got %q", why)
 	}
 }
+
+// bazel_bases reads its own unit list, bazel_bases.uninspectable_ok_units
+// (TIN-8526): a process of a listed unit whose fd table is unreadable leaves
+// the inventory complete, so an idle base goes. With the key empty, or with
+// the unit named only in the temp or home_lanes lists, the same process
+// refuses the cycle as before. The repository contents dedupe, which shares
+// bazel_bases.uninspectable_ok_comms, does not read the unit list.
+func TestBazelBasesUninspectableOKUnits(t *testing.T) {
+	uid := os.Geteuid()
+	const unit = "cade-annotation-page.service"
+	for _, tc := range []struct {
+		name   string
+		set    func(*config.Config)
+		reaped bool
+	}{
+		{"key empty", func(*config.Config) {}, false},
+		{"unit only in the temp and home_lanes lists", func(c *config.Config) {
+			c.DevArtifacts.TempUninspectableOKUnits = []string{unit}
+			c.HomeLanes.UninspectableOKUnits = []string{unit}
+		}, false},
+		{"another unit listed", func(c *config.Config) { c.BazelBases.UninspectableOKUnits = []string{"other.service"} }, false},
+		{"unit listed", func(c *config.Config) { c.BazelBases.UninspectableOKUnits = []string{unit} }, true},
+		{"unit listed, another process unreadable", func(c *config.Config) { c.BazelBases.UninspectableOKUnits = []string{unit} }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := newFakeProcTree(t)
+			service := tree.add(36521, uid, "python3", "S", "/")
+			writeProcCgroup(t, service, fmt.Sprintf("0::/user.slice/user-%d.slice/user@%d.service/app.slice/%s\n", uid, uid, unit))
+			denied := []string{service}
+			other := strings.HasSuffix(tc.name, "another process unreadable")
+			if other {
+				denied = append(denied, tree.add(4242, uid, "python3", "S", "/"))
+			}
+			denyProcReads(t, denied, denied)
+			f := newBBFixture(t)
+			tc.set(f.cfg)
+			useFixtureProc(f, tree, uid)
+			base := filepath.Join(f.root, "a", "out")
+			bbMakeBase(t, base, 4096, 30*time.Hour)
+
+			cycle := f.run()
+			if gone := !bbExists(base); gone != tc.reaped {
+				t.Fatalf("base removed=%v, want %v; refusal %q", gone, tc.reaped, cycle.Refusal)
+			}
+			switch {
+			case other && (!strings.Contains(cycle.Refusal, "pid 4242 (python3) fd unreadable") || strings.Contains(cycle.Refusal, "pid 36521")):
+				t.Fatalf("a listed unit must remove only its own process from the refusal, got %q", cycle.Refusal)
+			case !tc.reaped && !other && !strings.Contains(cycle.Refusal, "pid 36521 (python3) in unit "+unit+" fd unreadable"):
+				t.Fatalf("refusal must name the unit's process, got %q", cycle.Refusal)
+			}
+			if tc.reaped && cycle.Refusal != "" {
+				t.Fatalf("a listed unit must not refuse the cycle, got %q", cycle.Refusal)
+			}
+			if got := bazelRepoContentsActivityOptions(f.cfg, nil).OKUnits; len(got) != 0 {
+				t.Fatalf("the repository contents dedupe must not read bazel_bases.uninspectable_ok_units, got %v", got)
+			}
+		})
+	}
+}

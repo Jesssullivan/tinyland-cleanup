@@ -58,6 +58,9 @@ type DevArtifactsPlugin struct {
 	tempMounts      temporaryMountInventory
 	// removeAll is os.RemoveAll unless a test injects a fake.
 	removeAll func(string) error
+	// dirBytes sizes a stale Nix temp root before its removal; it is
+	// getDirAllocatedBytesContext unless a test injects a fake.
+	dirBytes func(context.Context, string) (int64, error)
 	// gitPath and gitTimeout override the git binary and the per-command
 	// timeout of the Nix temp root Git probe (gitCheckoutKeepReason).
 	gitPath    string
@@ -1487,6 +1490,7 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 		return 0
 	}
 	now := time.Now()
+	holders := p.newNixTempRootHolders(ctx, daCfg)
 	var totalFreed int64
 	for _, root := range roots {
 		if ctx.Err() != nil {
@@ -1504,13 +1508,26 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 		}
 		activeReason := temporaryRootActivityReason(activeRoots, path)
 		target := p.nixTemporaryRootTarget(path, 0, staleModTime(info), staleAfter, now, p.isProtected(path, protectPaths), activeReason, true)
+		// The content check runs before the size walk, as in
+		// planNixTemporaryRoots: a kept root costs its bounded content walk,
+		// not a full size walk (TIN-8526: 3.9 seconds for one 143,000-entry
+		// root with a recent file, every cycle).
+		if target.Action == "delete" {
+			if why := p.nixTempRootContentKeepReason(ctx, path, staleAfter); why != "" {
+				nixTemporaryRootKept(&target, why)
+			}
+		}
 		if target.Action != "delete" {
 			if err := budget.checkTempRoot(ctx, path); err != nil {
 				return totalFreed
 			}
 			continue
 		}
-		size, err := getDirAllocatedBytesContext(ctx, path)
+		sizeDir := p.dirBytes
+		if sizeDir == nil {
+			sizeDir = getDirAllocatedBytesContext
+		}
+		size, err := sizeDir(ctx, path)
 		if err != nil {
 			budget.markContextError(ctx, path)
 			return totalFreed
@@ -1521,9 +1538,26 @@ func (p *DevArtifactsPlugin) cleanNixTemporaryRoots(ctx context.Context, scanPat
 		if err := budget.checkTempRoot(ctx, path); err != nil {
 			return totalFreed
 		}
-		if why := p.recheckNixTemporaryRoot(ctx, path, info, staleAfter, daCfg); why != "" {
+		if why := p.recheckNixTemporaryRoot(ctx, path, info, staleAfter, daCfg, holders); why != "" {
 			logger.Debug("preserving stale Nix temporary root after final check", "path", path, "reason", why)
 			continue
+		}
+		if daCfg.NixTempRootMakeWritable {
+			if err := makeTempRootWritable(ctx, path, info); err != nil {
+				if errors.Is(err, errTempRootIdentityChanged) {
+					logger.Debug("preserving stale Nix temporary root after final check", "path", path, "reason", err.Error())
+					continue
+				}
+				if ctx.Err() != nil {
+					// Out of budget: the root waits for a later cycle
+					// instead of being marked not deletable.
+					budget.markContextError(ctx, path)
+					return totalFreed
+				}
+				// The removal below still runs; if it fails, it reports the
+				// root once with its own error.
+				logger.Debug("could not make every directory in stale Nix temporary root writable", "path", path, "error", err)
+			}
 		}
 		if err := p.removeDevArtifactPath(path, logger); err != nil {
 			if !errors.Is(err, errUndeletableDevArtifactPath) {
@@ -1735,12 +1769,51 @@ func nixTemporaryRootKept(target *CleanupTarget, why string) {
 	annotateCleanupTargetPolicy(target, CleanupTierWarm, hostReclaimForAction(target.Action))
 }
 
+// nixTempRootHolders hands the final check of each Nix temp root a holder
+// inventory. With maxAge 0 every call takes a fresh one. With maxAge > 0 an
+// inventory that started at most maxAge ago is reused
+// (dev_artifacts.nix_temp_root_holder_max_age, TIN-8526): one inventory took
+// about 1 second on sting, so a fresh one per root let a 5 second temp path
+// share remove about 5 roots.
+type nixTempRootHolders struct {
+	maxAge  time.Duration
+	now     func() time.Time
+	take    func() map[string]string
+	roots   map[string]string
+	started time.Time
+}
+
+func (h *nixTempRootHolders) current() map[string]string {
+	now := h.now()
+	if h.roots != nil && h.maxAge > 0 && now.Sub(h.started) <= h.maxAge {
+		return h.roots
+	}
+	h.roots, h.started = h.take(), now
+	return h.roots
+}
+
+// newNixTempRootHolders returns the holder source for one pass of the Nix
+// temp root lane.
+func (p *DevArtifactsPlugin) newNixTempRootHolders(ctx context.Context, daCfg config.DevArtifactsConfig) *nixTempRootHolders {
+	home, _ := os.UserHomeDir()
+	maxAge := parseNixPolicyDuration(daCfg.NixTempRootHolderMaxAge, 0)
+	if maxAge < 0 {
+		maxAge = 0
+	}
+	return &nixTempRootHolders{
+		maxAge: maxAge,
+		now:    time.Now,
+		take:   func() map[string]string { return p.activeTemporaryRoots(ctx, daCfg, home) },
+	}
+}
+
 // recheckNixTemporaryRoot repeats every keep check for one stale Nix temp
 // root immediately before removal: identity, protect paths, the root's own
-// age, its content and Git state, and a fresh holder inventory, taken last.
-// A write can still land after the inventory and before the removal; it
-// goes with the root.
-func (p *DevArtifactsPlugin) recheckNixTemporaryRoot(ctx context.Context, root string, previous os.FileInfo, staleAfter time.Duration, daCfg config.DevArtifactsConfig) string {
+// age, its content and Git state, and a holder inventory, consulted last.
+// The inventory is fresh unless nix_temp_root_holder_max_age lets one that
+// started at most that long ago stand in. A write or a new holder can still
+// arrive after the inventory and before the removal; it goes with the root.
+func (p *DevArtifactsPlugin) recheckNixTemporaryRoot(ctx context.Context, root string, previous os.FileInfo, staleAfter time.Duration, daCfg config.DevArtifactsConfig, holders *nixTempRootHolders) string {
 	current, err := os.Lstat(root)
 	if err != nil || !os.SameFile(previous, current) {
 		return "temporary root identity changed"
@@ -1754,8 +1827,10 @@ func (p *DevArtifactsPlugin) recheckNixTemporaryRoot(ctx context.Context, root s
 	if why := p.nixTempRootContentKeepReason(ctx, root, staleAfter); why != "" {
 		return why
 	}
-	home, _ := os.UserHomeDir()
-	if why := temporaryRootActivityReason(p.activeTemporaryRoots(ctx, daCfg, home), root); why != "" {
+	if holders == nil {
+		holders = p.newNixTempRootHolders(ctx, daCfg)
+	}
+	if why := temporaryRootActivityReason(holders.current(), root); why != "" {
 		return "active process references this temporary path: " + why
 	}
 	return ""
@@ -2938,6 +3013,7 @@ func activeTempArtifactRoots(ctx context.Context, scanPaths []string, home strin
 
 func tempArtifactRootsFromProcessOutput(output string, scanPaths []string, home string) map[string]string {
 	roots := map[string]string{}
+	scanRoots := canonicalTempScanRoots(scanPaths, home)
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -2948,7 +3024,7 @@ func tempArtifactRootsFromProcessOutput(output string, scanPaths []string, home 
 			command = filepath.Base(fields[1])
 		}
 		for _, rawPath := range absoluteDevArtifactPathPattern.FindAllString(line, -1) {
-			if root := tempArtifactRootForPath(expandHome(rawPath, home), scanPaths, home); root != "" {
+			if root := tempArtifactRootUnder(expandHome(rawPath, home), scanRoots); root != "" {
 				if _, ok := roots[root]; !ok {
 					roots[root] = command
 				}
@@ -2959,9 +3035,26 @@ func tempArtifactRootsFromProcessOutput(output string, scanPaths []string, home 
 }
 
 func tempArtifactRootForPath(path string, scanPaths []string, home string) string {
-	path = canonicalTempArtifactPath(path)
+	return tempArtifactRootUnder(path, canonicalTempScanRoots(scanPaths, home))
+}
+
+// canonicalTempScanRoots resolves the temp scan paths once, so a process
+// inventory that maps thousands of open files does not resolve every scan
+// path again for each file (TIN-8526: about 1.1 of the 1.3 seconds one
+// inventory took on sting).
+func canonicalTempScanRoots(scanPaths []string, home string) []string {
+	roots := make([]string, 0, len(scanPaths))
 	for _, scanPath := range scanPaths {
-		root := canonicalTempArtifactPath(expandHome(scanPath, home))
+		roots = append(roots, canonicalTempArtifactPath(expandHome(scanPath, home)))
+	}
+	return roots
+}
+
+// tempArtifactRootUnder maps path to the top-level entry of the first
+// already-canonical scan root that contains it, or "".
+func tempArtifactRootUnder(path string, roots []string) string {
+	path = canonicalTempArtifactPath(path)
+	for _, root := range roots {
 		rel, err := filepath.Rel(root, path)
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 			continue
