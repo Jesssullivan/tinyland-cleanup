@@ -241,6 +241,26 @@ func validateRetentionAge(key, value string, floor time.Duration) error {
 	return nil
 }
 
+// BazelRepoContentsMinMinAge is the floor for bazel.repo_contents_min_age.
+const BazelRepoContentsMinMinAge = time.Hour
+
+// ValidateRepoContents checks the Bazel repository contents dedupe keys.
+func (c BazelConfig) ValidateRepoContents() error {
+	if c.RepoContentsMinAge != "" {
+		d, err := ParseDuration(c.RepoContentsMinAge)
+		if err != nil {
+			return fmt.Errorf("bazel.repo_contents_min_age: %w", err)
+		}
+		if d < BazelRepoContentsMinMinAge {
+			return fmt.Errorf("bazel.repo_contents_min_age %s is below the floor %s", d, BazelRepoContentsMinMinAge)
+		}
+	}
+	if c.RepoContentsKeepRecent < 0 {
+		return fmt.Errorf("bazel.repo_contents_keep_recent %d must not be negative", c.RepoContentsKeepRecent)
+	}
+	return nil
+}
+
 // ValidateDiskCacheAge checks the Bazel disk-cache age keys.
 func (c BazelConfig) ValidateDiskCacheAge() error {
 	if c.DiskCacheMaxAge == "" {

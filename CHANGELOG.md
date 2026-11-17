@@ -14,6 +14,25 @@ All notable changes to this project will be documented in this file.
   agent-session data, a live holder or a kernel file lock on any file. An
   incomplete process inventory or an unreadable lock table keeps every tree.
 
+- **Bazel repository contents dedupe and a stall alert (TIN-5770).** On honey
+  on 2026-11-14 `/home` reached 99 percent. One repository contents cache key
+  held 287 UUID copies (98 GB) of one rules_python repository, and the plugin
+  measured the 101 GB tier as 96 KiB from its top level. It now measures
+  repository caches by entry within the existing 30 second bound. It removes
+  unreferenced copies of a key at moderate or higher levels, also while a
+  Bazel server runs. It keeps every copy an output base's `external/` symlink
+  resolves to, the newest `bazel.repo_contents_keep_recent` (3) unreferenced
+  copies, copies used within `bazel.repo_contents_min_age` (72h) and copies a
+  process holds. It takes Bazel's `contents/gc_lock` exclusively only to rename
+  a batch of at most 8 copies into `contents/_trash/`, removes them after
+  releasing it, and skips while a Bazel command holds the lock. A mount that stays critical for `policy.stalled_alert_cycles`
+  (6) cycles while every plugin reclaims nothing gets a warning and a
+  `stalled_mounts` report entry.
+  The over-budget whole-tier rule no longer deletes a repository cache that
+  holds a referenced copy or duplicate copies; the dedupe class reclaims it
+  instead. Discovery follows a top-level `_bazel_*` symlink in a root by one
+  hop, so sting's `~/.cache/bazel/_bazel_jess` cache is measured.
+
 - **Podman keep rule: `podman.protected_labels` and
   `podman.protected_images_file` (TIN-5770).** On sting on 2026-10-28 the
   plugin pruned the mail-lacein harness's pinned rspamd and postfix images and
@@ -66,6 +85,24 @@ All notable changes to this project will be documented in this file.
   read-only images. An empty list (the default) keeps the old command.
 
 ### Fixed
+
+- **An SSH session no longer stops the Bazel output-base reaper (TIN-5770,
+  R-C645).** OpenSSH's session process is non-dumpable, so the kernel refuses
+  its own user its `/proc` links for the whole session. The inventory read that
+  as incomplete and refused the cycle. On honey on November 7, 2026 every apply
+  cycle logged `removed=0` with 51 bases eligible, while `/home` was at 96
+  percent. The inventory now passes over such a process only when its parent
+  chain in `/proc/<pid>/status` proves it: a root `sshd` or `sshd-session`
+  parent, and root sshd ancestors up to pid 1. A process that renames itself
+  fails that check, and any other unreadable process still refuses the cycle.
+  The cycle line and `last-cycle.json` carry `inventory_skipped`, the distinct
+  pids across every inventory in the cycle, and the first five
+  `inventory_skipped_pids`. An eligible row and its `removals.jsonl` line name
+  the sessions its own inventories could not read. Only `bazel_bases` opts in.
+  The docs no longer claim `sshd-session` is unreadable only during session
+  setup. A base held only by a path now goes with a session open, and
+  `docs/configuration.md` lists those holders. A live build keeps its base
+  through the lock.
 
 - **A due Nix GC pass with `nix-collect-garbage` off PATH is no longer
   silent (issue #163, lab TIN-5770).** On petting-zoo-mini the launchd agent's

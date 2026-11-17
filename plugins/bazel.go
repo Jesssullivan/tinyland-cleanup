@@ -29,6 +29,20 @@ type BazelPlugin struct {
 	// activeProbe is a test seam for the disk_cache age rule's pre-removal
 	// client check; nil means activeBazelProcessInfo.
 	activeProbe func(ctx context.Context) (bazelProcessInfo, error)
+	// activityScan is a test seam for the repo contents dedupe's open-file
+	// inventory; nil means bbScanActivity.
+	activityScan func(ctx context.Context, opts bbActivityOptions) *bbActivity
+	// trashHook is a test seam called with "trashed" right after a copy is
+	// renamed into contents/_trash/ (gc_lock held) and with "remove" before
+	// a trash entry is removed (gc_lock released). A non-nil error from the
+	// "remove" call stops the removal, as a crash would.
+	trashHook func(phase, path string) error
+}
+
+// bazelPlanState is what one plan found that applying it needs again.
+type bazelPlanState struct {
+	repoCaches  []bazelRepoCacheMeasure
+	outputBases []string
 }
 
 type bazelCandidate struct {
@@ -99,11 +113,11 @@ func (p *BazelPlugin) Enabled(cfg *config.Config) bool {
 
 // PlanCleanup returns a dry-run plan without mutating Bazel state.
 func (p *BazelPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupPlan {
-	plan, _ := p.buildCleanupPlan(ctx, level, cfg, logger)
+	plan, _, _ := p.buildCleanupPlan(ctx, level, cfg, logger)
 	return plan
 }
 
-func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) (CleanupPlan, error) {
+func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) (CleanupPlan, bazelPlanState, error) {
 	plan := CleanupPlan{
 		Plugin:   p.Name(),
 		Level:    level.String(),
@@ -113,6 +127,9 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 			"Discover Bazel output bases, repository caches, disk caches, and Bazelisk downloads",
 			"Discover Bazel server logs that may contain captured client environments",
 			"Measure logical and physical bytes without following repo-local bazel-* symlinks",
+			"Measure repository caches by entry, including every contents/<key>/<uuid> copy, within a time bound",
+			"Read every output base's external/ symlinks and keep each repository contents copy they resolve to",
+			"Delete unreferenced repository contents copies outside the newest-copies and minimum-age retention at moderate or higher levels, also while a Bazel server runs",
 			"Resolve each output base's DO_NOT_BUILD_HERE workspace claim and classify it as present, removed, or unreachable",
 			"Protect active output bases, protected workspace output bases, and newest output bases",
 			"Delete only stale inactive output bases, stale inactive server logs, and budget-excess cache tiers in real cleanup mode at moderate or higher levels",
@@ -162,7 +179,18 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		plan.Metadata["output_base_size_estimate_partial"] = "true"
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("Bazel output-base byte refinement was partial: %v", refineErr))
 	}
-	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, time.Now(), globalActive)
+	now := time.Now()
+	var state bazelPlanState
+	state.repoCaches = measureBazelRepoCacheCandidates(ctx, candidates, now)
+	targets, totalPhysical := bazelPlanTargets(candidates, cfg.Bazel, level, now, globalActive)
+	state.outputBases = bazelRepoContentsOutputBases(candidates, bazelRepoContentsRoots(cfg, home))
+	refs := collectBazelRepoContentsRefs(state.outputBases)
+	targets = guardBazelRepositoryCacheTiers(targets, state.repoCaches, refs, activeErr)
+	repoTargets, repoMeta := p.planBazelRepoContents(ctx, cfg, level, state.repoCaches, refs, now)
+	targets = append(targets, repoTargets...)
+	for k, v := range repoMeta {
+		plan.Metadata[k] = v
+	}
 	targets = bazelHandOffTargets(targets, cfg)
 
 	orphanCount, unreachableCount := bazelWorkspaceClaimCounts(candidates)
@@ -188,9 +216,10 @@ func (p *BazelPlugin) buildCleanupPlan(ctx context.Context, level CleanupLevel, 
 		plan.Warnings = append(plan.Warnings, "detected Bazel cache footprint exceeds configured review budget")
 	}
 	plan.Warnings = append(plan.Warnings, "Bazel cleanup deletes rebuildable cache tiers only when the total footprint exceeds the configured budget; output-base deletion remains limited to stale inactive candidates using process inspection when available and candidate-local activity evidence otherwise")
-	plan.Warnings = append(plan.Warnings, "Bazel output-base byte counts use a bounded recursive allocation estimate; cache tier counts use bounded top-level allocation estimates")
+	plan.Warnings = append(plan.Warnings, "repository contents copies referenced only by output bases outside the scanned set (discovered output bases plus a shallow scan of bazel.roots and bazel_bases.roots) are guarded only by repo_contents_keep_recent and repo_contents_min_age (default 72h)")
+	plan.Warnings = append(plan.Warnings, "Bazel output-base and repository-cache byte counts use a bounded recursive allocation estimate; other cache tier counts use bounded top-level allocation estimates")
 
-	return plan, activeErr
+	return plan, state, activeErr
 }
 
 // Cleanup deletes stale inactive Bazel output bases after active-use inspection.
@@ -201,13 +230,13 @@ func (p *BazelPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 		// The disk_cache age rule is its own opt-in (disk_cache_age_delete)
 		// and runs at every level the plugin runs (TIN-3082).
 		if bazelDiskCacheAge(cfg.Bazel) > 0 && cfg.Bazel.DiskCacheAgeDelete {
-			plan, _ := p.buildCleanupPlan(ctx, level, cfg, logger)
+			plan, _, _ := p.buildCleanupPlan(ctx, level, cfg, logger)
 			p.applyBazelDiskCacheAge(ctx, cfg.Bazel, plan.Targets, logger, &result)
 		}
 		return result
 	}
 
-	plan, activeErr := p.buildCleanupPlan(ctx, level, cfg, logger)
+	plan, state, activeErr := p.buildCleanupPlan(ctx, level, cfg, logger)
 	if activeErr != nil {
 		logger.Warn("Bazel active process inspection failed; continuing with candidate-local activity evidence only", "error", activeErr)
 	}
@@ -218,6 +247,7 @@ func (p *BazelPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *conf
 		logger.Info("Bazel cleanup found no eligible stale inactive output bases", "level", level.String())
 	}
 	p.applyBazelDiskCacheAge(ctx, cfg.Bazel, plan.Targets, logger, &result)
+	p.applyBazelRepoContents(ctx, cfg, plan.Targets, state.repoCaches, state.outputBases, logger, &result)
 	return result
 }
 
@@ -257,6 +287,20 @@ func (p *BazelPlugin) discoverCandidates(home string, cfg config.BazelConfig, ac
 	for _, root := range cfg.Roots {
 		expanded := expandHome(root, home)
 		for _, candidate := range discoverBazelRootCandidates(expanded) {
+			add(candidate)
+		}
+	}
+
+	// Repository caches behind a top-level _bazel_* link in a root, and in
+	// Bazel's default output root whatever bazel.roots lists (TIN-5770:
+	// sting's roots miss it), are measured and deduplicated. Only the cache
+	// is added, never an output base.
+	cacheRoots := []string{bazelDefaultOutputRoot(home)}
+	for _, root := range cfg.Roots {
+		cacheRoots = append(cacheRoots, expandHome(root, home))
+	}
+	for _, root := range cacheRoots {
+		for _, candidate := range discoverBazelRepositoryCachesUnder(root) {
 			add(candidate)
 		}
 	}
@@ -383,6 +427,9 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
+			// A _bazel_* link is followed only for its repository cache, by
+			// discoverBazelRepositoryCachesUnder: output bases behind a link
+			// never become deletion candidates.
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
@@ -413,6 +460,72 @@ func discoverBazelRootCandidates(root string) []bazelCandidate {
 		}
 	}
 
+	return candidates
+}
+
+// bazelOutputUserRootLinkTarget resolves a top-level _bazel_* symlink in a
+// root by one hop (sting links ~/.cache/bazel/_bazel_jess to its fast-local
+// output user root). The target must be a real directory, not another
+// symlink, so discovery never follows a chain.
+func bazelOutputUserRootLinkTarget(root string, entry os.DirEntry) (string, bool) {
+	if entry.Type()&os.ModeSymlink == 0 || !strings.HasPrefix(entry.Name(), "_bazel_") {
+		return "", false
+	}
+	link := filepath.Join(root, entry.Name())
+	target, err := os.Readlink(link)
+	if err != nil || target == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(root, target)
+	}
+	target = filepath.Clean(target)
+	info, err := os.Lstat(target)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return target, true
+}
+
+// bazelDefaultOutputRoot is Bazel's default output root on Linux and the
+// place a user-level _bazel_* link lives.
+func bazelDefaultOutputRoot(home string) string {
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "bazel")
+}
+
+// discoverBazelRepositoryCachesUnder returns the repository cache of each
+// _bazel_* output user root directly in root, a directory or a one-hop link.
+// Only the repository cache is returned: output bases there stay outside
+// output-base deletion unless the root's own discovery finds them.
+func discoverBazelRepositoryCachesUnder(root string) []bazelCandidate {
+	if root == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var candidates []bazelCandidate
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), "_bazel_") {
+			continue
+		}
+		userRoot := filepath.Join(root, entry.Name())
+		if !entry.IsDir() {
+			target, ok := bazelOutputUserRootLinkTarget(root, entry)
+			if !ok {
+				continue
+			}
+			userRoot = target
+		}
+		repoCache := filepath.Join(userRoot, "cache", "repos", "v1")
+		if info, err := os.Lstat(repoCache); err == nil && info.IsDir() {
+			candidates = append(candidates, newBazelCandidate("repository_cache", filepath.Join("cache", "repos", "v1"), repoCache, staleModTime(info)))
+		}
+	}
 	return candidates
 }
 
@@ -1037,13 +1150,33 @@ func bazelCandidateIsOutputBaseLike(candidateType string) bool {
 }
 
 func bazelEstimatedCandidateBytes(targets []CleanupTarget) int64 {
-	var total int64
+	var tiers []string
 	for _, target := range targets {
-		if bazelTargetReclaimsHost(target) {
-			total += target.Bytes
+		if target.Type == "repository_cache" && bazelTargetReclaimsHost(target) {
+			tiers = append(tiers, target.Path)
 		}
 	}
+	var total int64
+	for _, target := range targets {
+		if !bazelTargetReclaimsHost(target) {
+			continue
+		}
+		if target.Type == bazelRepoContentsType && bazelPathInsideAny(target.Path, tiers) {
+			// The repository cache tier deletion already counts these bytes.
+			continue
+		}
+		total += target.Bytes
+	}
 	return total
+}
+
+func bazelPathInsideAny(path string, roots []string) bool {
+	for _, root := range roots {
+		if pathInsideRoot(path, root) {
+			return true
+		}
+	}
+	return false
 }
 
 func bazelTargetReclaimsHost(target CleanupTarget) bool {

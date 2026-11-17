@@ -353,6 +353,12 @@ type PolicyConfig struct {
 	// An unchanged cycle report is written as one line. Empty or invalid uses
 	// the built-in default (1h); "0s" disables throttling.
 	LogRepeatWindow string `yaml:"log_repeat_window"`
+	// StalledAlertCycles warns when a monitored mount stays at the critical
+	// level for this many consecutive cleanup cycles while every plugin
+	// together reclaims less than ByteProgressMinMB (TIN-5770). The warning
+	// repeats every StalledAlertCycles cycles while the stall lasts. Zero
+	// uses the built-in default (6); a negative value disables the alert.
+	StalledAlertCycles int `yaml:"stalled_alert_cycles"`
 	// PluginTimeout is the watchdog deadline for one plugin run. At the
 	// deadline the plugin's context is cancelled, which terminates any
 	// command it started; a plugin that still does not return is left behind
@@ -496,6 +502,19 @@ type BazelConfig struct {
 	DiskCachePaths []string `yaml:"disk_cache_paths"`
 	// DiskCacheMaxEntries bounds one disk_cache walk (default 2000000).
 	DiskCacheMaxEntries int `yaml:"disk_cache_max_entries"`
+	// RepoContentsDedupe removes unreferenced duplicate copies from the
+	// repository contents cache (<repository_cache>/contents/<key>/<uuid>,
+	// TIN-5770). A copy that any output base's external/ symlink resolves to
+	// is always kept, so this class runs while a Bazel server is up.
+	RepoContentsDedupe bool `yaml:"repo_contents_dedupe"`
+	// RepoContentsMinAge keeps every copy used more recently than this (the
+	// later of the copy's mtime and its .recorded_inputs mtime). Default 72h,
+	// floor 1h. It is the main guard for a copy linked only from an output
+	// base outside the scanned roots.
+	RepoContentsMinAge string `yaml:"repo_contents_min_age"`
+	// RepoContentsKeepRecent keeps this many newest unreferenced copies of
+	// each key in addition to every referenced copy. Default 3, at least 1.
+	RepoContentsKeepRecent int `yaml:"repo_contents_keep_recent"`
 }
 
 // Bazel output-base reaper modes.
@@ -588,7 +607,9 @@ type BazelBasesConfig struct {
 	// MaxDiscoverySeconds bounds one walk; a partial walk only finds fewer bases.
 	MaxDiscoverySeconds int `yaml:"max_discovery_seconds"`
 	// UninspectableOKComms are process names of this user whose fd tables may
-	// be unreadable without making the activity inventory incomplete.
+	// be unreadable without making the activity inventory incomplete. A name
+	// is only a claim: a process can set its own. SSH session processes are
+	// proved by their parent chain instead, so they are not listed here.
 	UninspectableOKComms []string `yaml:"uninspectable_ok_comms"`
 	// Git is the git binary used for the tracked-files guard (empty: PATH).
 	Git string `yaml:"git"`
@@ -1357,6 +1378,9 @@ func DefaultConfig() *Config {
 			DiskCacheMaxAge:              "14d",
 			DiskCacheAgeDelete:           false,
 			DiskCacheMaxEntries:          2000000,
+			RepoContentsDedupe:           true,
+			RepoContentsMinAge:           "72h",
+			RepoContentsKeepRecent:       3,
 		},
 		Retention: DefaultRetentionConfig(home),
 		HomeLanes: HomeLanesConfig{
@@ -1648,6 +1672,9 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Enable.Bazel {
 		if err := config.Bazel.ValidateDiskCacheAge(); err != nil {
+			return nil, err
+		}
+		if err := config.Bazel.ValidateRepoContents(); err != nil {
 			return nil, err
 		}
 	}
