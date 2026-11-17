@@ -4,23 +4,112 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-17
+
+### Upgrade notes
+
+- **A host with an image pin no longer prunes dangling images (#178).**
+  While `podman.protected_images` names an image or
+  `podman.protected_images_file` is set, the warning and moderate passes skip
+  `podman image prune -f`. The aggressive pass runs the moderate one and skips
+  it too. That prune takes no reference exclusion, and a tag moved to a newer
+  pull leaves the pinned image dangling. Hosts with no image pin prune as
+  before.
+- **`podman.prune_by_use: apply` replaces two prunes (#178).** On Linux
+  rootless podman it skips the moderate age prune and the aggressive volume
+  prune. The by-use pass removes old dangling volumes instead, and aggressive
+  still prunes networks no container uses. `report` logs what the pass would
+  remove and leaves both prunes in place. The default is `off`.
+- **A missing keep file skips the by-use pass (#178).** A configured
+  `podman.protected_images_file` that does not exist skips the pass with
+  `protected_images_file_missing`, logged at WARN. In `apply` mode the age
+  prune it replaces does not run either, so no image is removed by age. The
+  older keep rule still reads a missing file as no pins.
+- **Two keys change behaviour by default.** `bazel.repo_contents_dedupe`
+  defaults to `true`, so an upgraded host removes unreferenced repository
+  contents copies at moderate or higher (#176). Mount pressure now lifts
+  zero-yield backoff once `policy.zero_yield_pressure_min_interval` has passed
+  since the plugin's last run. It defaults to `1h` and is never under `5m`.
+- Five more keys that are new since 0.4.3 act by default:
+  `nix.max_busy_deferrals` (72) and `nix.max_busy_deferral_duration` (6h)
+  release a Nix collection that 0.4.3 deferred without bound,
+  `nix.min_gc_interval` (30m) blocks a collection within 30 minutes of the
+  last one, `nix.max_freed_per_pass` (50G) caps each pass, and
+  `policy.stalled_alert_cycles` (6) adds the stalled-mount warning.
+- Four more changes apply when their keys are left unset.
+  `dev_artifacts.temp_uninspectable_ok_comms` defaults to tailscaled,
+  `(sd-pam)`, sd-pam and systemd, so the temp inventory no longer stops at
+  those processes it cannot read. With `nix_temp_roots` on, a Linux host that
+  0.4.3 left alone can now remove stale Nix temp roots at aggressive or
+  critical. Under `monitored_mounts`, a mount with its own warning or
+  critical threshold that leaves `threshold_moderate` and
+  `threshold_aggressive` unset now takes its critical threshold for a global
+  moderate or aggressive step that falls outside the mount's warning to
+  critical band, where 0.4.3 applied the global step as it was.
+  `bazel.disk_cache_max_age` (14d) makes the
+  bazel plugin walk each disk cache and plan report targets, and it removes
+  nothing. Where `bazel_bases` is enabled,
+  `bazel_bases.early_walk_min_yield_mb` (256) and
+  `bazel_bases.early_walk_max_duty_percent` (20) space early pressure walks
+  further apart.
+
 ### Added
 
-- **Stale home tree reaper, `home_lanes` (lab A-082, TIN-5770).** Off by default
-  and report-only until `home_lanes.mode` is `apply`. On sting on 2026-11-05
-  `/home` sat at 93 percent and the daemon would have collected nothing there.
-  The plugin covers lanes left in `~/.cache`, named by an allowlist of globs, and
-  Hermes installs whose recorded checkout is gone. It keeps a tree with `.git`,
-  agent-session data, a live holder or a kernel file lock on any file. An
-  incomplete process inventory or an unreadable lock table keeps every tree.
+- **Podman prune by use, `podman.prune_by_use` (#178, TIN-8526).** On sting
+  the podman plugin freed 0 bytes on every run and reached `zero_yield_count`
+  414: at critical with `critical_system_prune: false` no image prune ran.
+  The key takes `off` (default), `report` or `apply`. Any other value refuses
+  to load the config. On Linux rootless podman the pass removes each image no
+  container uses and each dangling volume once older than
+  `podman.prune_images_age` (default 24h). An age under 1h skips the pass.
+  Images go by ID and volumes by name, without `--force`. Image age is the
+  later of build time and the time the image entered the local store. The
+  pass runs at moderate and aggressive, and at critical whenever the broad
+  system prune does not. Pins, protected labels and an unknown answer keep an
+  item. Each removal is checked again with `podman inspect`, and a keep file
+  that changed during the pass keeps everything left. A digest pin, bare
+  64-hex or after `@`, keeps its image under any name or none: the pass asks
+  `podman images --all --no-trunc --quiet --filter digest=<digest>` and
+  compares the listed digests. A digest it cannot compare, or a listing with
+  an error or an unexpected line, skips the pass and the older age prune.
+  Darwin, a podman machine and the critical system prune are unchanged.
 
-- **Bazel repository contents dedupe and a stall alert (TIN-5770).** On honey
+- **Stale home tree reaper, `home_lanes` (#174, lab A-082, TIN-5770,
+  TIN-8526).** Off by default (`enable.home_lanes: false`) and report-only
+  until `home_lanes.mode` is `apply`. Linux only. On sting on 2026-11-05
+  `/home` sat at 93 percent and the daemon would have collected nothing
+  there. Apply removes at moderate level or higher, at most
+  `max_removals_per_cycle` (8) trees a cycle, largest first. It renames a
+  tree aside first, and the next cycle finishes an interrupted removal.
+  - Cache lanes: direct children of `cache_root` (`~/.cache`) that match
+    `cache_lane_globs` (empty) and are idle for `cache_idle_after` (7d,
+    floor 72h). Access times count.
+  - Hermes installs: direct children of `hermes_installs_root` (empty) whose
+    recorded checkout is gone from under a `hermes_checkout_roots` directory
+    that exists, idle for `hermes_idle_after` (72h, floor 24h).
+  - Stale work: direct entries of `stale_work_roots` (empty, for example
+    `~/build`) with nothing modified within `stale_work_idle_after` (14d,
+    floor 7d). Every Git checkout inside is asked about status, stash, linked
+    work trees and commits missing from every remote-tracking ref. Any yes,
+    a failed or timed-out `git`, a bare repository, `.hg` or `.jj` keeps the
+    entry. A deleted remote still reads as pushed.
+  - `free_target_gb` (0, no target): apply reads the root's free space
+    before each removal and stops on that mount at the target, or when free
+    space cannot be read.
+
+  Cache lanes and Hermes installs keep a tree with `.git`. Every class keeps
+  a tree with agent-session data, a live holder or a kernel file lock on any
+  file. An incomplete process inventory (`uninspectable_ok_comms`: tailscaled,
+  `(sd-pam)`, sd-pam, systemd) or an unreadable lock table keeps every tree.
+
+- **Bazel repository contents dedupe and a stall alert (#176, TIN-5770).** On honey
   on 2026-11-14 `/home` reached 99 percent. One repository contents cache key
   held 287 UUID copies (98 GB) of one rules_python repository, and the plugin
   measured the 101 GB tier as 96 KiB from its top level. It now measures
   repository caches by entry within the existing 30 second bound. It removes
   unreferenced copies of a key at moderate or higher levels, also while a
-  Bazel server runs. It keeps every copy an output base's `external/` symlink
+  Bazel server runs. `bazel.repo_contents_dedupe` (default `true`) turns this
+  off. It keeps every copy an output base's `external/` symlink
   resolves to, the newest `bazel.repo_contents_keep_recent` (3) unreferenced
   copies, copies used within `bazel.repo_contents_min_age` (72h) and copies a
   process holds. It takes Bazel's `contents/gc_lock` exclusively only to rename
@@ -86,6 +175,28 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A non-dumpable user service no longer stops the temp lane (#177,
+  TIN-8526).** On sting the temp inventory stopped at a python3 process of
+  `cade-annotation-page.service`, whose server makes itself non-dumpable. The
+  kernel refused its own user that process's cwd and open files, so it kept
+  every temp root of every temp scan path. The new
+  `dev_artifacts.temp_uninspectable_ok_units` (default empty) lists systemd
+  user units whose unreadable processes leave the inventory complete. The
+  unit comes from `/proc/<pid>/cgroup` and counts only for a single cgroup v2
+  line under this user's manager, with slices and then a `.service` or
+  `.scope` as the last segment. An entry is the operator's assertion that the
+  unit holds nothing in a temp root: the daemon cannot check it. An unlisted
+  unit is named in the reason so the operator can review it. Linux only.
+- **The temp lane's inventory deadline is a key (#177, TIN-8526).**
+  `dev_artifacts.temp_activity_probe_timeout` (default 10s, the value that
+  was fixed in code) bounds one process inventory. On sting a full inventory
+  took 7 to 12 seconds, and a cut inventory keeps every temp root that cycle.
+- **A critical Nix GC pass can have a lower busy bound (#177, TIN-8526).**
+  `nix.critical_max_busy_deferrals` (default 0, off) releases a pass at
+  critical level after that many consecutive busy deferrals, sooner than
+  `max_busy_deferrals` and `max_busy_deferral_duration`. The released pass
+  runs behind the same hook-path pins and serialization lock. Plans carry the
+  value in `critical_max_busy_deferrals` metadata.
 - **An SSH session no longer stops the Bazel output-base reaper (TIN-5770,
   R-C645).** OpenSSH's session process is non-dumpable, so the kernel refuses
   its own user its `/proc` links for the whole session. The inventory read that
@@ -216,7 +327,6 @@ All notable changes to this project will be documented in this file.
   after that many consecutive deferrals or that long, still behind the
   hook-path pins and the serialization lock, logged at ERROR. The run is
   the `deferred_passes` gauge in `nix.gc_state_file` and the plan metadata.
-  A failed process inspection still defers and is never released.
 
 ### Added
 
