@@ -25,6 +25,11 @@ All notable changes to this project will be documented in this file.
   `protected_images_file_missing`, logged at WARN. In `apply` mode the age
   prune it replaces does not run either, so no image is removed by age. The
   older keep rule still reads a missing file as no pins.
+- **Two keys change behaviour by default.** `bazel.repo_contents_dedupe`
+  defaults to `true`, so an upgraded host removes unreferenced repository
+  contents copies at moderate or higher (#176). Mount pressure now lifts
+  zero-yield backoff once `policy.zero_yield_pressure_min_interval` has passed
+  since the plugin's last run. It defaults to `1h` and is never under `5m`.
 - Every other key this release adds is off or keeps the earlier behaviour by
   default.
 
@@ -83,7 +88,8 @@ All notable changes to this project will be documented in this file.
   measured the 101 GB tier as 96 KiB from its top level. It now measures
   repository caches by entry within the existing 30 second bound. It removes
   unreferenced copies of a key at moderate or higher levels, also while a
-  Bazel server runs. It keeps every copy an output base's `external/` symlink
+  Bazel server runs. `bazel.repo_contents_dedupe` (default `true`) turns this
+  off. It keeps every copy an output base's `external/` symlink
   resolves to, the newest `bazel.repo_contents_keep_recent` (3) unreferenced
   copies, copies used within `bazel.repo_contents_min_age` (72h) and copies a
   process holds. It takes Bazel's `contents/gc_lock` exclusively only to rename
