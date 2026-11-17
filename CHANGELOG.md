@@ -36,6 +36,19 @@ All notable changes to this project will be documented in this file.
   `nix.min_gc_interval` (30m) blocks a collection within 30 minutes of the
   last one, `nix.max_freed_per_pass` (50G) caps each pass, and
   `policy.stalled_alert_cycles` (6) adds the stalled-mount warning.
+- Four more changes apply when their keys are left unset.
+  `dev_artifacts.temp_uninspectable_ok_comms` defaults to tailscaled,
+  `(sd-pam)`, sd-pam and systemd, so the temp inventory no longer stops at
+  those processes it cannot read. With `nix_temp_roots` on, a Linux host that
+  0.4.3 left alone can now remove stale Nix temp roots at aggressive or
+  critical. A mount that sets `threshold_moderate` or `threshold_aggressive`
+  under `monitored_mounts` gets its own level bands, and a mount that sets
+  neither keeps the global steps. `bazel.disk_cache_max_age` (14d) makes the
+  bazel plugin walk each disk cache and plan report targets, and it removes
+  nothing. Where `bazel_bases` is enabled,
+  `bazel_bases.early_walk_min_yield_mb` (256) and
+  `bazel_bases.early_walk_max_duty_percent` (20) space early pressure walks
+  further apart.
 
 ### Added
 
@@ -311,7 +324,6 @@ All notable changes to this project will be documented in this file.
   after that many consecutive deferrals or that long, still behind the
   hook-path pins and the serialization lock, logged at ERROR. The run is
   the `deferred_passes` gauge in `nix.gc_state_file` and the plan metadata.
-  A failed process inspection still defers and is never released.
 
 ### Added
 
