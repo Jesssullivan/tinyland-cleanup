@@ -368,6 +368,10 @@ home_lanes:
   free_target_gb: 0        # stop removing once a root's mount has this much free; 0 sets no target
   max_removals_per_cycle: 8
   uninspectable_ok_comms: [tailscaled, "(sd-pam)", sd-pam, systemd]
+  # Systemd user units whose processes may be unreadable without keeping every
+  # tree. An entry asserts the unit holds nothing under these roots; the daemon
+  # cannot check it. Not read from dev_artifacts.temp_uninspectable_ok_units.
+  uninspectable_ok_units: []
 
 agent_session:
   extra_paths: []           # added to the compiled TIN-5268 deny set
@@ -532,6 +536,8 @@ dev_artifacts:
   # Stale top-level Nix shell/develop/build scratch roots are rebuildable but
   # can accumulate quickly under /private/tmp. These are only deleted under
   # aggressive/critical pressure, never while referenced by active processes.
+  # A root with an entry modified within nix_temp_root_stale_after, or with
+  # unsaved Git work inside, is kept (TIN-8526).
   nix_temp_roots: true
   # 0 sets no size floor (empty stale roots are reaped too).
   nix_temp_root_min_mb: 1

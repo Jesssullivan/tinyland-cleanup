@@ -346,12 +346,30 @@ dev_artifacts:
   inventory. An inventory that runs out of time is incomplete, so every
   temp root is kept that cycle ("context deadline exceeded"). The lane runs
   one inventory per cycle and another before each removal of a released
-  root or of generated output inside a temp root, so a longer timeout
+  root, a stale Nix root or generated output inside a temp root, so a longer timeout
   lengthens cycles. On sting at a load average
   near 130, a full inventory of about 3,600 processes took 7 to 12 seconds.
 - `nix_temp_root_min_mb` is the size floor for reaping a stale Nix root. `0`
   sets no floor, so empty stale roots are reaped too; they cost an inode each.
   A negative value means the 1 MB default.
+- A Nix root whose own mtime is past `nix_temp_root_stale_after` is also read
+  inside (TIN-8526). A write deeper in a root leaves the root's own mtime
+  unchanged. The root is kept when any entry was modified within the stale
+  age, or when a Git checkout inside has uncommitted or untracked changes, a
+  stash, linked work trees or commits missing from every remote-tracking ref,
+  the questions `home_lanes` asks of a stale work entry. A bare repository, a
+  `.hg` or `.jj`, a git probe that fails or runs past its timeout, an
+  unreadable entry, or a walk over 100,000 entries or 5 seconds also keeps
+  it. The plan gives the reason as `Nix temporary root kept: ...`. Immediately
+  before each removal the lane checks the root again: identity, protect
+  paths, age, content, Git and a fresh process inventory. A write after that
+  inventory goes with the root. Ignored files in a clean, pushed checkout do
+  not keep it.
+- Each removal by the stale Nix root rule and the rebuildable directory
+  rule logs one Info line with the path, its `bytes` and its `rule`:
+  `removed stale Nix temporary root` (rule `nix_temp_roots`) and `removed
+  rebuildable directory in idle temporary root` (rule `node_modules`,
+  `python-venv`, `rust-target` or `zig-artifact`).
 
 ## Bazel output bases: walk scope and early walks
 

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -870,5 +871,160 @@ func TestHomeLanesValidateStaleWork(t *testing.T) {
 		if err := c.Validate(); err == nil {
 			t.Fatalf("%s: accepted", name)
 		}
+	}
+}
+
+// ---- uninspectable_ok_units (TIN-8526) ----
+
+// An unreadable process of this user in a systemd user unit keeps every
+// stale work entry unless home_lanes.uninspectable_ok_units lists that exact
+// unit. The temp lane's list does not count, and a sub-cgroup of a listed
+// unit does not match. The inventory is the real /proc reader over a fake
+// tree, so the key must reach it in the plan and in the recheck.
+func TestHomeLanesUninspectableUnitsReachInventory(t *testing.T) {
+	cases := []struct {
+		name           string
+		units, temp    []string
+		cgroupSuffix   string
+		removed        bool
+		reasonContains string
+	}{
+		{"unlisted", nil, nil, "hardened.service", false, "in unit hardened.service fd unreadable"},
+		{"listed only for temp paths", nil, []string{"hardened.service"}, "hardened.service", false, "in unit hardened.service"},
+		{"another unit listed", []string{"other.service"}, nil, "hardened.service", false, "in unit hardened.service"},
+		{"sub-cgroup of the listed unit", []string{"hardened.service"}, nil, "hardened.service/payload", false, "pid 200 (python3) fd unreadable"},
+		{"listed", []string{"hardened.service"}, nil, "hardened.service", true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, build := staleFixture(t)
+			entry := f.tree(filepath.Join(build, "entry"), homeLanesOld, "out/log")
+			uid := os.Geteuid()
+			proc := newFakeProcTree(t)
+			service := proc.add(200, uid, "python3", "S", "/")
+			writeProcCgroup(t, service, fmt.Sprintf("0::/user.slice/user-%d.slice/user@%d.service/app.slice/%s\n", uid, uid, tc.cgroupSuffix))
+			denyProcReads(t, []string{service}, []string{service})
+			f.plugin.activity = func(ctx context.Context, opts bbActivityOptions) *bbActivity {
+				return bbScanProc(ctx, proc.dir, -1, uid, opts)
+			}
+			f.cfg.HomeLanes.UninspectableOKUnits = tc.units
+			f.cfg.DevArtifacts.TempUninspectableOKUnits = tc.temp
+			if got := f.staleReason("entry"); !strings.Contains(got, tc.reasonContains) || (tc.removed != (got == "")) {
+				t.Fatalf("plan reason %q, want removable=%v containing %q", got, tc.removed, tc.reasonContains)
+			}
+			f.run(LevelCritical)
+			if exists(entry) == tc.removed {
+				t.Fatalf("entry exists=%v, want removed=%v", exists(entry), tc.removed)
+			}
+		})
+	}
+}
+
+func TestHomeLanesUninspectableUnitsDefaultEmpty(t *testing.T) {
+	if got := config.DefaultConfig().HomeLanes.UninspectableOKUnits; len(got) != 0 {
+		t.Fatalf("home_lanes.uninspectable_ok_units must default to empty, got %v", got)
+	}
+}
+
+// ---- Nix temp roots ask the stale work Git questions (TIN-8526) ----
+
+// nixGitRoot makes a stale Nix temp root holding a pushed checkout at depth
+// two and returns the root and the checkout.
+func nixGitRoot(t *testing.T, scan, name string) (string, string) {
+	t.Helper()
+	root := filepath.Join(scan, name)
+	repo := checkout(t, filepath.Join(root, "src", "repo"))
+	return root, repo
+}
+
+func TestNixTempRootKeepsUnsavedGitWork(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	cases := map[string]struct {
+		mutate func(t *testing.T, repo string)
+		want   string
+	}{
+		"untracked file": {func(t *testing.T, repo string) {
+			if err := os.WriteFile(filepath.Join(repo, "new"), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, "uncommitted changes"},
+		"stash": {func(t *testing.T, repo string) {
+			if err := os.WriteFile(filepath.Join(repo, "README"), []byte("y"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitRun(t, repo, "stash", "-q")
+		}, "has a stash"},
+		"unpushed commit": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "two")
+		}, "missing from every remote-tracking ref"},
+		"detached head on no remote": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "checkout", "-q", "--detach")
+			gitRun(t, repo, "commit", "-q", "--allow-empty", "-m", "detached")
+		}, "missing from every remote-tracking ref"},
+		"no remote": {func(t *testing.T, repo string) {
+			gitRun(t, repo, "remote", "remove", "origin")
+		}, "missing from every remote-tracking ref"},
+		"nothing unsaved": {func(*testing.T, string) {}, ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			scan := t.TempDir()
+			root, repo := nixGitRoot(t, scan, "nix-shell.git001")
+			tc.mutate(t, repo)
+			ageTempRoot(t, root, 72*time.Hour)
+			cfg := nixTempRootConfig(scan)
+			cfg.DevArtifacts.NixTempRootMinMB = 0
+			p := newDevArtifactsPluginWithActive(nil)
+			plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+			target := findDevArtifactTarget(t, plan.Targets, "nix-temp-root", root)
+			if tc.want == "" {
+				if target.Action != "delete" {
+					t.Fatalf("a clean, pushed checkout must not keep the root: %#v", target)
+				}
+			} else if target.Action != "protect" || !strings.Contains(target.Reason, tc.want) {
+				t.Fatalf("reason %q lacks %q (%#v)", target.Reason, tc.want, target)
+			}
+			p.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+			if exists(root) != (tc.want != "") {
+				t.Fatalf("root exists=%v after Cleanup, want kept=%v", exists(root), tc.want != "")
+			}
+		})
+	}
+}
+
+// A git that fails or hangs keeps the root, in the plan and at removal.
+func TestNixTempRootUnknownGitAnswerKeeps(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for name, script := range map[string]string{"fails": "#!/bin/sh\nexit 1\n", "hangs": "#!/bin/sh\nexec sleep 30\n"} {
+		t.Run(name, func(t *testing.T) {
+			scan := t.TempDir()
+			root, _ := nixGitRoot(t, scan, "nix-shell.git002")
+			ageTempRoot(t, root, 72*time.Hour)
+			fake := filepath.Join(t.TempDir(), "git")
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg := nixTempRootConfig(scan)
+			cfg.DevArtifacts.NixTempRootMinMB = 0
+			p := newDevArtifactsPluginWithActive(nil)
+			p.gitPath = fake
+			p.gitTimeout = 300 * time.Millisecond
+			plan := p.PlanCleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+			if target := findDevArtifactTarget(t, plan.Targets, "nix-temp-root", root); !strings.Contains(target.Reason, "could not be verified") {
+				t.Fatalf("reason = %q", target.Reason)
+			}
+			p.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
+			if !exists(root) {
+				t.Fatal("a root whose Git probe failed was removed")
+			}
+		})
 	}
 }

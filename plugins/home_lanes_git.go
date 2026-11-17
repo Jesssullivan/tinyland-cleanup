@@ -12,6 +12,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,7 +50,14 @@ const (
 // does not refresh the age it was asked about. core.fsmonitor is off so a
 // repository's configuration starts no hook.
 func (p *HomeLanesPlugin) homeLanesGitKeepReason(ctx context.Context, dir string) string {
-	gitPath := p.gitPath
+	return gitCheckoutKeepReason(ctx, p.gitPath, p.gitTimeout, dir)
+}
+
+// gitCheckoutKeepReason asks the questions of homeLanesGitKeepReason about
+// the checkout at dir. gitPath "" finds git on PATH, and a timeout of 0 or
+// less means homeLanesGitTimeout per command. The dev_artifacts Nix temp
+// root rule asks the same questions (TIN-8526).
+func gitCheckoutKeepReason(ctx context.Context, gitPath string, timeout time.Duration, dir string) string {
 	if gitPath == "" {
 		found, err := exec.LookPath("git")
 		if err != nil {
@@ -56,7 +65,6 @@ func (p *HomeLanesPlugin) homeLanesGitKeepReason(ctx context.Context, dir string
 		}
 		gitPath = found
 	}
-	timeout := p.gitTimeout
 	if timeout <= 0 {
 		timeout = homeLanesGitTimeout
 	}
@@ -134,6 +142,30 @@ func (p *HomeLanesPlugin) homeLanesGitKeepReason(ctx context.Context, dir string
 		return "git checkout " + dir + " has " + strconv.Itoa(n) + " commit(s) missing from every remote-tracking ref"
 	}
 	return ""
+}
+
+// homeLanesRepoCheck classifies one entry of a walk of top for the stale
+// work rule, and the Nix temp root rule reuses it. A .git records its parent
+// in checkouts for the Git probe. An error keeps the tree: top itself is a
+// .git, more than homeLanesMaxCheckouts checkouts, a .hg or .jj, or a bare
+// repository. Entries inside a .git directory are not classified.
+func homeLanesRepoCheck(top, walked string, d fs.DirEntry, checkouts *[]string) error {
+	rel, _ := filepath.Rel(top, walked)
+	switch {
+	case rel != "." && homeLanesInGitDir(filepath.Dir(rel)):
+	case d.Name() == ".git" && walked == top:
+		return errors.New("the entry itself is a .git")
+	case d.Name() == ".git":
+		if len(*checkouts) >= homeLanesMaxCheckouts {
+			return fmt.Errorf("more than %d Git checkouts inside", homeLanesMaxCheckouts)
+		}
+		*checkouts = append(*checkouts, filepath.Dir(walked))
+	case d.Name() == ".hg" || d.Name() == ".jj":
+		return errors.New("contains " + d.Name() + ": a repository this plugin cannot inspect")
+	case d.IsDir() && homeLanesBareRepo(walked):
+		return errors.New("contains a bare Git repository at " + walked)
+	}
+	return nil
 }
 
 func isRealDir(path string) bool {

@@ -784,6 +784,15 @@ type HomeLanesConfig struct {
 	// UninspectableOKComms are process names of this user whose fd tables may
 	// be unreadable without making the activity inventory incomplete.
 	UninspectableOKComms []string `yaml:"uninspectable_ok_comms"`
+	// UninspectableOKUnits are systemd user units (the last segment of
+	// /proc/<pid>/cgroup under this user's manager, matched exactly, as
+	// dev_artifacts.temp_uninspectable_ok_units) whose processes may be
+	// unreadable without making the activity inventory incomplete. Each entry
+	// asserts that the unit holds nothing under these roots: the daemon
+	// cannot check it. It is separate from the temp list because a unit that
+	// holds nothing in a temp root may still work in ~/build. Empty by
+	// default. Linux only (TIN-8526).
+	UninspectableOKUnits []string `yaml:"uninspectable_ok_units"`
 }
 
 // Validate checks the home_lanes section. It is called by LoadConfig when the

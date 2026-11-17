@@ -895,3 +895,28 @@ func TestBazelBasesReportRowNamesUnreadSessions(t *testing.T) {
 		t.Fatalf("row %s %v: %s", r.Decision, r.InventorySkippedPIDs, r.Reason)
 	}
 }
+
+// A lane that reads environments (EnvVars) meets the same unit rule there:
+// an unreadable environment of a process in a listed unit leaves the
+// inventory complete, and in an unlisted unit makes it incomplete and names
+// the unit's process (TIN-8526).
+func TestBBScanProcUninspectableUnitEnviron(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 000 file")
+	}
+	uid := os.Geteuid()
+	proc := newFakeProcTree(t)
+	service := proc.add(200, uid, "python3", "S", "/")
+	writeProcCgroup(t, service, fmt.Sprintf("0::/user.slice/user-%d.slice/user@%d.service/app.slice/hardened.service\n", uid, uid))
+	if err := os.WriteFile(filepath.Join(service, "environ"), []byte("TMPDIR=/x\x00"), 0); err != nil {
+		t.Fatal(err)
+	}
+	opts := bbActivityOptions{EnvVars: []string{"TMPDIR"}}
+	if why := bbScanProc(context.Background(), proc.dir, -1, uid, opts).complete(); !strings.Contains(why, "pid 200 (python3) environment unreadable") {
+		t.Fatalf("an unlisted unit's unreadable environment must make the inventory incomplete, got %q", why)
+	}
+	opts.OKUnits = []string{"hardened.service"}
+	if why := bbScanProc(context.Background(), proc.dir, -1, uid, opts).complete(); why != "" {
+		t.Fatalf("a listed unit's unreadable environment must leave the inventory complete, got %q", why)
+	}
+}
