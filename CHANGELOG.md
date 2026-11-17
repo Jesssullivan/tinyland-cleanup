@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Stale home tree reaper, `home_lanes` (lab A-082, TIN-5770).** Off by default
+  and report-only until `home_lanes.mode` is `apply`. On sting on 2026-11-05
+  `/home` sat at 93 percent and the daemon would have collected nothing there.
+  The plugin covers lanes left in `~/.cache`, named by an allowlist of globs, and
+  Hermes installs whose recorded checkout is gone. It keeps a tree with `.git`,
+  agent-session data, a live holder or a kernel file lock on any file. An
+  incomplete process inventory or an unreadable lock table keeps every tree.
+
 - **Bazel repository contents dedupe and a stall alert (TIN-5770).** On honey
   on 2026-11-14 `/home` reached 99 percent. One repository contents cache key
   held 287 UUID copies (98 GB) of one rules_python repository, and the plugin

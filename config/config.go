@@ -66,6 +66,10 @@ type Config struct {
 	// unheld top-level directories of tmpfs roots such as /dev/shm.
 	ShmScratch ShmScratchConfig `yaml:"shm_scratch"`
 
+	// HomeLanes configures the stale home tree reaper (lab A-082): idle
+	// ~/.cache lanes and Hermes installs whose checkout is gone.
+	HomeLanes HomeLanesConfig `yaml:"home_lanes"`
+
 	// AgentSession extends the compiled-in TIN-5268 agent-session deny set.
 	// Configuration can only add to it; nothing can remove a compiled entry.
 	AgentSession AgentSessionConfig `yaml:"agent_session"`
@@ -225,6 +229,8 @@ type EnableFlags struct {
 	BazelBases bool `yaml:"bazel_bases"`
 	// ShmScratch for the RAM-backed scratch reaper (lab R-C856, Linux).
 	ShmScratch bool `yaml:"shm_scratch"`
+	// HomeLanes for the stale home tree reaper (lab A-082, Linux).
+	HomeLanes bool `yaml:"home_lanes"`
 	// APFSSnapshots for APFS snapshot thinning (Darwin)
 	APFSSnapshots bool `yaml:"apfs_snapshots"`
 	// ArchiveLifecycle for retiring verified archive staging pre-images
@@ -705,6 +711,160 @@ func (c ShmScratchConfig) Validate() error {
 	}
 	if c.MaxRootsPerCycle < 0 {
 		return fmt.Errorf("shm_scratch.max_roots_per_cycle must not be negative")
+	}
+	return nil
+}
+
+// Stale home tree reaper modes.
+const (
+	// HomeLanesModeReport plans only and removes nothing.
+	HomeLanesModeReport = "report"
+	// HomeLanesModeApply removes eligible trees at moderate level or higher.
+	HomeLanesModeApply = "apply"
+)
+
+// The A-082 idle floors. A shorter window refuses to load.
+const (
+	HomeLanesMinCacheIdleAfter  = 72 * time.Hour
+	HomeLanesMinHermesIdleAfter = 24 * time.Hour
+	// HomeLanesMinStaleWorkIdleAfter is the floor for stale_work_idle_after
+	// (TIN-8526). The operator ruled 14 days for ~/build.
+	HomeLanesMinStaleWorkIdleAfter = 7 * 24 * time.Hour
+)
+
+// HomeLanesConfig configures the stale home tree reaper (lab A-082, TIN-5770).
+// Direct children of cache_root that match cache_lane_globs, and of
+// hermes_installs_root whose recorded checkout is gone, are removed in apply
+// mode once idle, unheld and free of file locks. A root left empty is not
+// inspected.
+type HomeLanesConfig struct {
+	// Mode is "report" (plan only) or "apply" (remove eligible trees).
+	Mode string `yaml:"mode"`
+	// CacheRoot is the directory whose direct children are lane candidates.
+	CacheRoot string `yaml:"cache_root"`
+	// CacheLaneGlobs is the allowlist of lane names. A name no glob matches is
+	// a tool's cache and is never a candidate. Empty inspects no lanes.
+	CacheLaneGlobs []string `yaml:"cache_lane_globs"`
+	// CacheIdleAfter is how long the newest use in a lane must be past (at
+	// least 72h).
+	CacheIdleAfter string `yaml:"cache_idle_after"`
+	// HermesInstallsRoot is the directory of per-checkout Hermes dependency
+	// state.
+	HermesInstallsRoot string `yaml:"hermes_installs_root"`
+	// HermesCheckoutRoots are the directories a recorded checkout must sit
+	// under for its absence to prove deletion. Each must exist.
+	HermesCheckoutRoots []string `yaml:"hermes_checkout_roots"`
+	// HermesIdleAfter is how long the newest use in an orphaned install must
+	// be past (at least 24h).
+	HermesIdleAfter string `yaml:"hermes_idle_after"`
+	// StaleWorkRoots are directories of work trees, such as ~/build, whose
+	// direct entries are removed once stale (TIN-8526). An entry is stale when
+	// no file under it was modified within StaleWorkIdleAfter. A Git checkout
+	// anywhere inside with uncommitted changes, a stash, linked work trees or
+	// commits missing from every remote-tracking ref keeps the entry. Empty
+	// inspects none.
+	StaleWorkRoots []string `yaml:"stale_work_roots"`
+	// StaleWorkIdleAfter is how long the newest modification in a stale work
+	// entry must be past (at least 7d).
+	StaleWorkIdleAfter string `yaml:"stale_work_idle_after"`
+	// FreeTargetGB is the free space, in GiB, at which the plugin stops
+	// removing on a root's mount for the cycle. 0 sets no target, and every
+	// eligible tree up to max_removals_per_cycle goes.
+	FreeTargetGB int `yaml:"free_target_gb"`
+	// MaxRemovalsPerCycle bounds the trees one cycle removes.
+	MaxRemovalsPerCycle int `yaml:"max_removals_per_cycle"`
+	// UninspectableOKComms are process names of this user whose fd tables may
+	// be unreadable without making the activity inventory incomplete.
+	UninspectableOKComms []string `yaml:"uninspectable_ok_comms"`
+}
+
+// Validate checks the home_lanes section. It is called by LoadConfig when the
+// plugin is enabled, so a malformed policy refuses to load.
+func (c HomeLanesConfig) Validate() error {
+	switch c.Mode {
+	case HomeLanesModeReport, HomeLanesModeApply:
+	default:
+		return fmt.Errorf("home_lanes.mode must be %q or %q, got %q", HomeLanesModeReport, HomeLanesModeApply, c.Mode)
+	}
+	for _, glob := range c.CacheLaneGlobs {
+		if _, err := filepath.Match(glob, "x"); err != nil {
+			return fmt.Errorf("home_lanes.cache_lane_globs: bad glob %q: %w", glob, err)
+		}
+		if strings.Trim(glob, "*?") == "" {
+			return fmt.Errorf("home_lanes.cache_lane_globs: %q would match every cache", glob)
+		}
+	}
+	cacheIdle, err := ParseDuration(c.CacheIdleAfter)
+	if err != nil {
+		return fmt.Errorf("home_lanes.cache_idle_after: %w", err)
+	}
+	if cacheIdle < HomeLanesMinCacheIdleAfter {
+		return fmt.Errorf("home_lanes.cache_idle_after %s is below the A-082 floor %s", cacheIdle, HomeLanesMinCacheIdleAfter)
+	}
+	hermesIdle, err := ParseDuration(c.HermesIdleAfter)
+	if err != nil {
+		return fmt.Errorf("home_lanes.hermes_idle_after: %w", err)
+	}
+	if hermesIdle < HomeLanesMinHermesIdleAfter {
+		return fmt.Errorf("home_lanes.hermes_idle_after %s is below the A-082 floor %s", hermesIdle, HomeLanesMinHermesIdleAfter)
+	}
+	if c.HermesInstallsRoot != "" && len(c.HermesCheckoutRoots) == 0 {
+		return fmt.Errorf("home_lanes.hermes_checkout_roots must name a root when hermes_installs_root is set")
+	}
+	for _, root := range c.HermesCheckoutRoots {
+		if !strings.HasPrefix(root, "~") && !filepath.IsAbs(root) {
+			return fmt.Errorf("home_lanes.hermes_checkout_roots: %q must be absolute or start with ~", root)
+		}
+	}
+	if len(c.StaleWorkRoots) > 0 || c.StaleWorkIdleAfter != "" {
+		staleIdle, err := ParseDuration(c.StaleWorkIdleAfter)
+		if err != nil {
+			return fmt.Errorf("home_lanes.stale_work_idle_after: %w", err)
+		}
+		if staleIdle < HomeLanesMinStaleWorkIdleAfter {
+			return fmt.Errorf("home_lanes.stale_work_idle_after %s is below the floor %s", staleIdle, HomeLanesMinStaleWorkIdleAfter)
+		}
+	}
+	home, _ := os.UserHomeDir()
+	for _, root := range c.StaleWorkRoots {
+		if err := validateStaleWorkRoot(root, home); err != nil {
+			return err
+		}
+	}
+	if c.FreeTargetGB < 0 {
+		return fmt.Errorf("home_lanes.free_target_gb must not be negative")
+	}
+	if c.MaxRemovalsPerCycle < 1 {
+		return fmt.Errorf("home_lanes.max_removals_per_cycle must be at least 1")
+	}
+	return nil
+}
+
+// validateStaleWorkRoot refuses a root whose entries would include the home
+// directory or the filesystem root, since every entry of a stale work root
+// without a Git checkout is removable.
+func validateStaleWorkRoot(root, home string) error {
+	expanded := root
+	switch {
+	case root == "~":
+		expanded = home
+	case strings.HasPrefix(root, "~/"):
+		if home == "" {
+			return fmt.Errorf("home_lanes.stale_work_roots: %q needs a home directory", root)
+		}
+		expanded = filepath.Join(home, root[2:])
+	case !filepath.IsAbs(root):
+		return fmt.Errorf("home_lanes.stale_work_roots: %q must be absolute or start with ~/", root)
+	}
+	expanded = filepath.Clean(expanded)
+	if expanded == "/" || filepath.Dir(expanded) == "/" {
+		return fmt.Errorf("home_lanes.stale_work_roots: %q is too close to /", root)
+	}
+	if home != "" {
+		h := filepath.Clean(home)
+		if expanded == h || strings.HasPrefix(h, expanded+"/") {
+			return fmt.Errorf("home_lanes.stale_work_roots: %q holds the home directory", root)
+		}
 	}
 	return nil
 }
@@ -1304,6 +1464,16 @@ func DefaultConfig() *Config {
 			RepoContentsKeepRecent:       3,
 		},
 		Retention: DefaultRetentionConfig(home),
+		HomeLanes: HomeLanesConfig{
+			Mode:                HomeLanesModeReport,
+			CacheRoot:           "~/.cache",
+			CacheIdleAfter:      "7d",
+			HermesIdleAfter:     "72h",
+			StaleWorkIdleAfter:  "14d",
+			MaxRemovalsPerCycle: 8,
+			// The temp lane's reviewed list, as shm_scratch keeps it.
+			UninspectableOKComms: []string{"tailscaled", "(sd-pam)", "sd-pam", "systemd"},
+		},
 		ShmScratch: ShmScratchConfig{
 			Mode:             ShmScratchModeReport,
 			Roots:            []string{"/dev/shm"},
@@ -1570,6 +1740,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Enable.ShmScratch {
 		if err := config.ShmScratch.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if config.Enable.HomeLanes {
+		if err := config.HomeLanes.Validate(); err != nil {
 			return nil, err
 		}
 	}
