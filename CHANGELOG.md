@@ -4,17 +4,80 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-17
+
+### Upgrade notes
+
+- **A host with an image pin no longer prunes dangling images (#178).**
+  While `podman.protected_images` names an image or
+  `podman.protected_images_file` is set, the warning and moderate passes skip
+  `podman image prune -f`. The aggressive pass runs the moderate one and skips
+  it too. That prune takes no reference exclusion, and a tag moved to a newer
+  pull leaves the pinned image dangling. Hosts with no image pin prune as
+  before.
+- **`podman.prune_by_use: apply` replaces two prunes (#178).** On Linux
+  rootless podman it skips the moderate age prune and the aggressive volume
+  prune. The by-use pass removes old dangling volumes instead, and aggressive
+  still prunes networks no container uses. `report` logs what the pass would
+  remove and leaves both prunes in place. The default is `off`.
+- **A missing keep file skips the by-use pass (#178).** A configured
+  `podman.protected_images_file` that does not exist skips the pass with
+  `protected_images_file_missing`, logged at WARN. In `apply` mode the age
+  prune it replaces does not run either, so no image is removed by age. The
+  older keep rule still reads a missing file as no pins.
+- Every other key this release adds is off or keeps the earlier behaviour by
+  default.
+
 ### Added
 
-- **Stale home tree reaper, `home_lanes` (lab A-082, TIN-5770).** Off by default
-  and report-only until `home_lanes.mode` is `apply`. On sting on 2026-11-05
-  `/home` sat at 93 percent and the daemon would have collected nothing there.
-  The plugin covers lanes left in `~/.cache`, named by an allowlist of globs, and
-  Hermes installs whose recorded checkout is gone. It keeps a tree with `.git`,
-  agent-session data, a live holder or a kernel file lock on any file. An
-  incomplete process inventory or an unreadable lock table keeps every tree.
+- **Podman prune by use, `podman.prune_by_use` (#178, TIN-8526).** On sting
+  the podman plugin freed 0 bytes on every run and reached `zero_yield_count`
+  414: at critical with `critical_system_prune: false` no image prune ran.
+  The key takes `off` (default), `report` or `apply`. Any other value refuses
+  to load the config. On Linux rootless podman the pass removes each image no
+  container uses and each dangling volume once older than
+  `podman.prune_images_age` (default 24h). An age under 1h skips the pass.
+  Images go by ID and volumes by name, without `--force`. Image age is the
+  later of build time and the time the image entered the local store. The
+  pass runs at moderate and aggressive, and at critical whenever the broad
+  system prune does not. Pins, protected labels and an unknown answer keep an
+  item. Each removal is checked again with `podman inspect`, and a keep file
+  that changed during the pass keeps everything left. A digest pin, bare
+  64-hex or after `@`, keeps its image under any name or none: the pass asks
+  `podman images --all --no-trunc --quiet --filter digest=<digest>` and
+  compares the listed digests. A digest it cannot compare, or a listing with
+  an error or an unexpected line, skips the pass and the older age prune.
+  Darwin, a podman machine and the critical system prune are unchanged.
 
-- **Bazel repository contents dedupe and a stall alert (TIN-5770).** On honey
+- **Stale home tree reaper, `home_lanes` (#174, lab A-082, TIN-5770,
+  TIN-8526).** Off by default (`enable.home_lanes: false`) and report-only
+  until `home_lanes.mode` is `apply`. Linux only. On sting on 2026-11-05
+  `/home` sat at 93 percent and the daemon would have collected nothing
+  there. Apply removes at moderate level or higher, at most
+  `max_removals_per_cycle` (8) trees a cycle, largest first. It renames a
+  tree aside first, and the next cycle finishes an interrupted removal.
+  - Cache lanes: direct children of `cache_root` (`~/.cache`) that match
+    `cache_lane_globs` (empty) and are idle for `cache_idle_after` (7d,
+    floor 72h). Access times count.
+  - Hermes installs: direct children of `hermes_installs_root` (empty) whose
+    recorded checkout is gone from under a `hermes_checkout_roots` directory
+    that exists, idle for `hermes_idle_after` (72h, floor 24h).
+  - Stale work: direct entries of `stale_work_roots` (empty, for example
+    `~/build`) with nothing modified within `stale_work_idle_after` (14d,
+    floor 7d). Every Git checkout inside is asked about status, stash, linked
+    work trees and commits missing from every remote-tracking ref. Any yes,
+    a failed or timed-out `git`, a bare repository, `.hg` or `.jj` keeps the
+    entry. A deleted remote still reads as pushed.
+  - `free_target_gb` (0, no target): apply reads the root's free space
+    before each removal and stops on that mount at the target, or when free
+    space cannot be read.
+
+  Cache lanes and Hermes installs keep a tree with `.git`. Every class keeps
+  a tree with agent-session data, a live holder or a kernel file lock on any
+  file. An incomplete process inventory (`uninspectable_ok_comms`: tailscaled,
+  `(sd-pam)`, sd-pam, systemd) or an unreadable lock table keeps every tree.
+
+- **Bazel repository contents dedupe and a stall alert (#176, TIN-5770).** On honey
   on 2026-11-14 `/home` reached 99 percent. One repository contents cache key
   held 287 UUID copies (98 GB) of one rules_python repository, and the plugin
   measured the 101 GB tier as 96 KiB from its top level. It now measures
@@ -86,6 +149,28 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **A non-dumpable user service no longer stops the temp lane (#177,
+  TIN-8526).** On sting the temp inventory stopped at a python3 process of
+  `cade-annotation-page.service`, whose server makes itself non-dumpable. The
+  kernel refused its own user that process's cwd and open files, so it kept
+  every temp root of every temp scan path. The new
+  `dev_artifacts.temp_uninspectable_ok_units` (default empty) lists systemd
+  user units whose unreadable processes leave the inventory complete. The
+  unit comes from `/proc/<pid>/cgroup` and counts only for a single cgroup v2
+  line under this user's manager, with slices and then a `.service` or
+  `.scope` as the last segment. An entry is the operator's assertion that the
+  unit holds nothing in a temp root: the daemon cannot check it. An unlisted
+  unit is named in the reason so the operator can review it. Linux only.
+- **The temp lane's inventory deadline is a key (#177, TIN-8526).**
+  `dev_artifacts.temp_activity_probe_timeout` (default 10s, the value that
+  was fixed in code) bounds one process inventory. On sting a full inventory
+  took 7 to 12 seconds, and a cut inventory keeps every temp root that cycle.
+- **A critical Nix GC pass can have a lower busy bound (#177, TIN-8526).**
+  `nix.critical_max_busy_deferrals` (default 0, off) releases a pass at
+  critical level after that many consecutive busy deferrals, sooner than
+  `max_busy_deferrals` and `max_busy_deferral_duration`. The released pass
+  runs behind the same hook-path pins and serialization lock. Plans carry the
+  value in `critical_max_busy_deferrals` metadata.
 - **An SSH session no longer stops the Bazel output-base reaper (TIN-5770,
   R-C645).** OpenSSH's session process is non-dumpable, so the kernel refuses
   its own user its `/proc` links for the whole session. The inventory read that

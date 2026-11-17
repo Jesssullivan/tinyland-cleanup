@@ -1,6 +1,26 @@
 # Validation status
 
-Updated: 2026-10-13
+Updated: 2026-11-17
+
+## v0.5.0 (TIN-8526)
+
+- **Scope:** every change on main since v0.4.3. That includes the Bazel
+  repository contents dedupe and stalled-mount alert (#176), the temp lane
+  units and probe timeout with the critical Nix busy bound (#177),
+  `home_lanes` with stale work roots and `free_target_gb` (#174) and
+  `podman.prune_by_use` (#178).
+- **Validated** on sting (Linux x86_64, Go 1.27.3) at d9f5536a, the main
+  commit this release bumps: `go vet ./...`, `go build ./...`,
+  a Darwin arm64 cross build (`CGO_ENABLED=0`) and `go test -count=1 -p 2
+  ./...`, all passing. Each of #174, #177 and #178 also had read-only runs
+  on sting before merge: `--dry-run` cycles and report-only plans against
+  the live host, built from the pull request branches, not from d9f5536a.
+  The release commit itself was checked with `go vet ./...`, `go test .`
+  and `--version`.
+- **Not validated:** CI, the Bazel build and test graph and the Nix package
+  build. No runner has served this repository since 2026-10-23, so none of
+  them ran for this release. No apply-mode run of `home_lanes` or
+  `podman.prune_by_use` and no run on a Darwin host.
 
 ## v0.4.3 (TIN-5770)
 
