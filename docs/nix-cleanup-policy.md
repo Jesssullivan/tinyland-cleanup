@@ -38,7 +38,14 @@ The Nix plan includes:
   consecutive deferrals, or `max_busy_deferral_duration` (default 6h) from
   the first, the next pass runs anyway, at any level, still behind the
   hook-path pins and the serialization lock, and the daemon logs it at
-  ERROR. Required hook-path pins, a serialization marker and the GC lock are
+  ERROR. `critical_max_busy_deferrals` (default 0, off) is a third bound
+  that applies to a pass at critical level only: once that many consecutive
+  due passes have been deferred, the next critical pass runs, behind the
+  same pins and lock. `nix-collect-garbage` then takes Nix's own GC lock,
+  and Nix keeps the temp roots of the builds that are running. The commits
+  that added and bounded the busy skip (eac1e24, 97d005b, 0721918) cite no
+  rule against collecting while a build runs (TIN-8526). Required hook-path
+  pins, a serialization marker and the GC lock are
   never bypassed; their deferrals are counted, and once the run passes the
   bound each one is logged at ERROR so a stale marker or a stuck lock holder
   shows up. A due pass with no `nix-collect-garbage` on the daemon's PATH is
@@ -94,6 +101,7 @@ nix:
   daemon_busy_backoff: 30m
   max_busy_deferrals: 72
   max_busy_deferral_duration: 6h
+  critical_max_busy_deferrals: 0
   max_gc_duration: 20m
   root_attribution_limit: 20
   reap_stale_gc_roots: false

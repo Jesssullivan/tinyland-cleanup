@@ -2875,8 +2875,8 @@ func parseDevArtifactProcessCWDs(output string) map[string]string {
 	return cwds
 }
 
-func activeTempArtifactRoots(ctx context.Context, scanPaths []string, home string, okComms []string) map[string]string {
-	roots, err := inspectTemporaryRootActivity(ctx, scanPaths, home, okComms)
+func activeTempArtifactRoots(ctx context.Context, scanPaths []string, home string, okComms, okUnits []string, timeout time.Duration) map[string]string {
+	roots, err := inspectTemporaryRootActivity(ctx, scanPaths, home, okComms, okUnits, timeout)
 	if err != nil {
 		roots["*"] = "temporary process activity could not be verified: " + err.Error()
 	}

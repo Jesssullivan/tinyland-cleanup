@@ -294,6 +294,8 @@ always protected, whatever the configuration.
 dev_artifacts:
   temp_scan_max_roots: 128
   temp_uninspectable_ok_comms: [tailscaled, "(sd-pam)", sd-pam, systemd]
+  temp_uninspectable_ok_units: []
+  temp_activity_probe_timeout: 10s
   nix_temp_root_min_mb: 1
   nix_temp_root_stale_after: 24h
 ```
@@ -323,6 +325,30 @@ dev_artifacts:
   on this lane. Darwin reads the inventory with `lsof`
   and does not use this list. `bazel_bases.uninspectable_ok_comms` is the same
   rule for the Bazel output-base lane.
+- `temp_uninspectable_ok_units` (default empty) lists systemd user units
+  whose processes may be unreadable without making the inventory
+  incomplete. A service that calls `prctl(PR_SET_DUMPABLE, 0)` to protect
+  secrets in its memory hides its `cwd` and `fd` from its own user for as
+  long as it runs. On sting on November 17, 2026 the log named pid 3362224,
+  a python3 process of `cade-annotation-page.service` that does this, as the
+  reason the lane kept every temp root. The unit is read from
+  `/proc/<pid>/cgroup`, which stays readable. It counts only when the file is one cgroup v2 line and the path
+  is `/user.slice/user-<uid>.slice/user@<uid>.service/`, then slices, then
+  the unit as the last segment. A process in a sub-cgroup of the unit does
+  not count. An entry is the operator's assertion that the unit holds
+  nothing in a temp root. The daemon cannot check what such a process
+  holds, and a process of the same user can move itself into the unit's
+  cgroup, as it can rename itself. List a unit only after reading its
+  `WorkingDirectory`, its temp use and its config. When an unlisted unit
+  blocks the inventory, the log reason names it: `pid <n> (<comm>) in unit
+  <unit>`.
+- `temp_activity_probe_timeout` (default `10s`) bounds one process
+  inventory. An inventory that runs out of time is incomplete, so every
+  temp root is kept that cycle ("context deadline exceeded"). The lane runs
+  one inventory per cycle and another before each removal of a released
+  root or of generated output inside a temp root, so a longer timeout
+  lengthens cycles. On sting at a load average
+  near 130, a full inventory of about 3,600 processes took 7 to 12 seconds.
 - `nix_temp_root_min_mb` is the size floor for reaping a stale Nix root. `0`
   sets no floor, so empty stale roots are reaped too; they cost an inode each.
   A negative value means the 1 MB default.
