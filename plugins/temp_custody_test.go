@@ -179,16 +179,16 @@ func TestTemporaryProcActivityCustody(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "has spaces"), filepath.Join(process, "fd", "7")); err != nil {
 		t.Fatal(err)
 	}
-	roots, err := temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, "", nil)
+	roots, err := temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, "", nil, nil)
 	if err != nil || temporaryRootActivityReason(roots, root) == "" {
 		t.Fatalf("own cwd/fd reference missed: %#v %v", roots, err)
 	}
 	os.WriteFile(filepath.Join(process, "status"), []byte("ownership unreadable"), 0600)
-	if _, err := temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, "", nil); err == nil {
+	if _, err := temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, "", nil, nil); err == nil {
 		t.Fatal("unknown process ownership accepted")
 	}
 	os.WriteFile(filepath.Join(process, "status"), []byte(fmt.Sprintf("Uid: %d %d %d %d\n", os.Geteuid()+1, os.Geteuid()+1, os.Geteuid()+1, os.Geteuid()+1)), 0600)
-	roots, err = temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, "", nil)
+	roots, err = temporaryRootActivityFromProc(context.Background(), proc, []string{scan}, "", nil, nil)
 	if err != nil || len(roots) != 0 {
 		t.Fatalf("foreign process treated as own: %#v %v", roots, err)
 	}
@@ -294,7 +294,7 @@ func TestTemporaryProcActivityUninspectableComms(t *testing.T) {
 	denyProcReads(t, unreadable, append(append([]string{}, unreadable...), allowedPartly))
 	okComms := config.DefaultConfig().DevArtifacts.TempUninspectableOKComms
 
-	roots, err := temporaryRootActivityFromProc(context.Background(), proc.dir, []string{scan}, "", okComms)
+	roots, err := temporaryRootActivityFromProc(context.Background(), proc.dir, []string{scan}, "", okComms, nil)
 	if err != nil {
 		t.Fatalf("allowed comms and a zombie must leave the inventory complete: %v", err)
 	}
@@ -305,13 +305,13 @@ func TestTemporaryProcActivityUninspectableComms(t *testing.T) {
 		t.Fatalf("an allowed comm's readable cwd must still be recorded: %#v", roots)
 	}
 
-	if _, err := temporaryRootActivityFromProc(context.Background(), proc.dir, []string{scan}, "", nil); err == nil || !strings.Contains(err.Error(), "owned process cwd unavailable") {
+	if _, err := temporaryRootActivityFromProc(context.Background(), proc.dir, []string{scan}, "", nil, nil); err == nil || !strings.Contains(err.Error(), "owned process cwd unavailable") {
 		t.Fatalf("with no allowed comms an unreadable owned process must make the inventory incomplete, got %v", err)
 	}
 
 	other := proc.add(300, uid, "atuin", "S", "/")
 	denyProcReads(t, []string{other}, nil)
-	_, err = temporaryRootActivityFromProc(context.Background(), proc.dir, []string{scan}, "", okComms)
+	_, err = temporaryRootActivityFromProc(context.Background(), proc.dir, []string{scan}, "", okComms, nil)
 	if err == nil || !strings.Contains(err.Error(), "pid 300 (atuin)") {
 		t.Fatalf("an unreadable owned process outside the list must fail closed and name itself, got %v", err)
 	}
@@ -322,7 +322,7 @@ func TestTemporaryProcActivityUnreadableFDsOutsideListFailClosed(t *testing.T) {
 	proc := newFakeProcTree(t)
 	process := proc.add(100, os.Geteuid(), "python3", "S", "/")
 	denyProcReads(t, nil, []string{process})
-	_, err := temporaryRootActivityFromProc(context.Background(), proc.dir, []string{scan}, "", config.DefaultConfig().DevArtifacts.TempUninspectableOKComms)
+	_, err := temporaryRootActivityFromProc(context.Background(), proc.dir, []string{scan}, "", config.DefaultConfig().DevArtifacts.TempUninspectableOKComms, nil)
 	if err == nil || !strings.Contains(err.Error(), "open files unavailable") {
 		t.Fatalf("unreadable open files of an owned process must fail closed, got %v", err)
 	}
@@ -498,7 +498,7 @@ func TestTempLaneReapsPastUninspectableHelpersAndKeepsHeldAndSessionRoots(t *tes
 		okComms := cfg.DevArtifacts.TempUninspectableOKComms
 		p := newDevArtifactsPluginWithActive(nil)
 		p.tempActivity = func(ctx context.Context, paths []string, home string) (map[string]string, error) {
-			return temporaryRootActivityFromProc(ctx, proc.dir, paths, home, okComms)
+			return temporaryRootActivityFromProc(ctx, proc.dir, paths, home, okComms, nil)
 		}
 		p.Cleanup(context.Background(), LevelCritical, cfg, devArtifactTestLogger())
 		return tmp, sessions, control

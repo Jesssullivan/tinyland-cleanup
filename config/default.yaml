@@ -246,6 +246,10 @@ nix:
   # deferrals are logged at ERROR.
   max_busy_deferrals: 72
   max_busy_deferral_duration: 6h
+  # At critical level, the next due pass runs after this many consecutive
+  # deferrals, behind the same pins and lock. 0 is off: critical passes then
+  # wait for the two bounds above.
+  critical_max_busy_deferrals: 0
   max_gc_duration: 20m
   # When dry-run GC reports no reclaimable space, show up to this many visible
   # GC roots so operators can identify what is pinning the store. Set 0 to
@@ -471,6 +475,14 @@ dev_artifacts:
     - "(sd-pam)"
     - sd-pam
     - systemd
+  # Systemd user units (for example cade-annotation-page.service) whose
+  # processes may be unreadable without preserving every temp root. An entry
+  # asserts the unit holds nothing in a temp root; the daemon cannot check
+  # it. Empty: every such process preserves every temp root.
+  temp_uninspectable_ok_units: []
+  # One process inventory of the temp lane stops after this long; a cut
+  # inventory preserves every temp root that cycle.
+  temp_activity_probe_timeout: 10s
   temp_artifact_min_mb: 256
   temp_artifact_stale_after: 6h
   # Agent-harness scratch containers (e.g. /private/tmp/claude-<uid>) hold

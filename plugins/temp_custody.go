@@ -88,7 +88,7 @@ func temporaryRootActivityReason(roots map[string]string, path string) string {
 func (p *DevArtifactsPlugin) activeTemporaryRoots(ctx context.Context, cfg config.DevArtifactsConfig, home string) map[string]string {
 	paths := cfg.TempScanPaths
 	if p.tempActivity == nil {
-		return activeTempArtifactRoots(ctx, paths, home, cfg.TempUninspectableOKComms)
+		return activeTempArtifactRoots(ctx, paths, home, cfg.TempUninspectableOKComms, cfg.TempUninspectableOKUnits, tempActivityProbeTimeout(cfg))
 	}
 	roots, err := p.tempActivity(ctx, paths, home)
 	if roots == nil {
@@ -100,17 +100,31 @@ func (p *DevArtifactsPlugin) activeTemporaryRoots(ctx context.Context, cfg confi
 	return roots
 }
 
+// defaultTempActivityProbeTimeout bounds one temp-lane process inventory
+// when dev_artifacts.temp_activity_probe_timeout is unset or not positive.
+const defaultTempActivityProbeTimeout = 10 * time.Second
+
+// tempActivityProbeTimeout is the deadline of one temp-lane process
+// inventory. An inventory that runs out of time is incomplete and preserves
+// every temp root, as before.
+func tempActivityProbeTimeout(cfg config.DevArtifactsConfig) time.Duration {
+	if d := parseNixPolicyDuration(cfg.TempActivityProbeTimeout, defaultTempActivityProbeTimeout); d > 0 {
+		return d
+	}
+	return defaultTempActivityProbeTimeout
+}
+
 // Inspect every same-user process, including shell cwd and non-tool open files.
 // Any incomplete inventory is unknown activity and protects every root. On
-// Linux, okComms names same-user processes whose cwd or open files may be
-// unreadable without making the inventory incomplete (see
+// Linux, okComms and okUnits name same-user processes whose cwd or open files
+// may be unreadable without making the inventory incomplete (see
 // temporaryRootActivityFromProc).
-func inspectTemporaryRootActivity(ctx context.Context, paths []string, home string, okComms []string) (map[string]string, error) {
+func inspectTemporaryRootActivity(ctx context.Context, paths []string, home string, okComms, okUnits []string, timeout time.Duration) (map[string]string, error) {
 	roots := map[string]string{}
 	if len(paths) == 0 {
 		return roots, nil
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	output, err := commandContext(probeCtx, "ps", "-axo", "comm=,args=").Output()
 	if err != nil {
@@ -120,7 +134,7 @@ func inspectTemporaryRootActivity(ctx context.Context, paths []string, home stri
 	// NUL-delimited fields preserve spaces and newlines in paths; cwd records
 	// are included by default alongside regular file descriptors.
 	if runtime.GOOS == "linux" {
-		files, err := linuxTemporaryRootActivity(probeCtx, paths, home, okComms)
+		files, err := linuxTemporaryRootActivity(probeCtx, paths, home, okComms, okUnits)
 		for path, reason := range files {
 			roots[path] = reason
 		}
@@ -141,9 +155,10 @@ func inspectTemporaryRootActivity(ctx context.Context, paths []string, home stri
 
 // Linux /proc keeps unrelated inaccessible cluster mounts outside this
 // same-user observation. Permission failures for an owned process remain
-// unknown unless the process is a zombie or its comm is in okComms.
-func linuxTemporaryRootActivity(ctx context.Context, paths []string, home string, okComms []string) (map[string]string, error) {
-	return temporaryRootActivityFromProc(ctx, "/proc", paths, home, okComms)
+// unknown unless the process is a zombie, its comm is in okComms or its
+// systemd user unit is in okUnits.
+func linuxTemporaryRootActivity(ctx context.Context, paths []string, home string, okComms, okUnits []string) (map[string]string, error) {
+	return temporaryRootActivityFromProc(ctx, tempProcRoot, paths, home, okComms, okUnits)
 }
 
 // tempProcReadlink and tempProcReadDir read a process's cwd and fd links.
@@ -151,24 +166,31 @@ func linuxTemporaryRootActivity(ctx context.Context, paths []string, home string
 var (
 	tempProcReadlink = os.Readlink
 	tempProcReadDir  = os.ReadDir
+	// tempProcRoot is the /proc the Linux inventory reads.
+	tempProcRoot = "/proc"
 )
 
 // temporaryRootActivityFromProc maps temp roots to the same-user process that
 // holds them through its cwd or an open file. A same-user process whose cwd or
 // open files cannot be read makes the inventory incomplete (the error), which
-// protects every temp root, with two exceptions that leave it complete: a
-// zombie (state Z), which holds no cwd or files, and a process whose comm is
-// in okComms, a reviewed list of non-dumpable helpers that never work inside
-// a temp root (dev_artifacts.temp_uninspectable_ok_comms; the bazel_bases
-// lane has the same rule as uninspectable_ok_comms). What such a process
-// does expose is still recorded.
-func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []string, home string, okComms []string) (map[string]string, error) {
+// protects every temp root, with three exceptions that leave it complete: a
+// zombie (state Z), which holds no cwd or files; a process whose comm is in
+// okComms, a reviewed list of non-dumpable helpers that never work inside a
+// temp root (dev_artifacts.temp_uninspectable_ok_comms; the bazel_bases lane
+// has the same rule as uninspectable_ok_comms); and a process whose cgroup is
+// a systemd user unit in okUnits (dev_artifacts.temp_uninspectable_ok_units,
+// see procUserUnit), a reviewed list of services that make themselves
+// non-dumpable and hold nothing in a temp root. The daemon cannot see what
+// such a process holds: each exception is the operator's assertion, not an
+// observation. What such a process does expose is still recorded.
+func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []string, home string, okComms, okUnits []string) (map[string]string, error) {
 	roots := map[string]string{}
 	entries, err := os.ReadDir(proc)
 	if err != nil {
 		return roots, err
 	}
 	ok := procCommSet(okComms)
+	okUnit := procCommSet(okUnits)
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return roots, err
@@ -204,6 +226,15 @@ func temporaryRootActivityFromProc(ctx context.Context, proc string, paths []str
 			comm, state := procCommState(process)
 			if state == "Z" || ok[comm] {
 				return nil
+			}
+			unit, known := procUserUnit(process, uid)
+			if known && okUnit[unit] {
+				return nil
+			}
+			if known {
+				// Named so the operator can review the unit for
+				// temp_uninspectable_ok_units.
+				return fmt.Errorf("owned process %s unavailable: pid %s (%s) in unit %s", what, entry.Name(), comm, unit)
 			}
 			return fmt.Errorf("owned process %s unavailable: pid %s (%s)", what, entry.Name(), comm)
 		}

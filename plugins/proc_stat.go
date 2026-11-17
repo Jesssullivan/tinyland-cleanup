@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -153,4 +154,47 @@ func procIsSSHDSessionChild(procRoot string, pid, uid int) bool {
 		ancestor = st.ppid
 	}
 	return false
+}
+
+// procUserUnit names the systemd user unit whose cgroup holds the process in
+// dir (/proc/<pid> or a fixture), for the user manager of uid. It answers a
+// closed question and returns false for anything else:
+//
+//   - <dir>/cgroup is a single cgroup v2 line, "0::<path>";
+//   - path is /user.slice/user-<uid>.slice/user@<uid>.service/ followed by
+//     zero or more slices and one last segment that is a .service or .scope.
+//
+// A process in a sub-cgroup of a unit (Delegate=yes), on a hybrid or v1
+// hierarchy, or under another user's manager gets false. Any process of this
+// user can write its own pid into a cgroup of its own user manager, so the
+// answer is a label like the comm, not a proof.
+func procUserUnit(dir string, uid int) (string, bool) {
+	raw, err := os.ReadFile(filepath.Join(dir, "cgroup"))
+	if err != nil {
+		return "", false
+	}
+	line := strings.TrimSuffix(string(raw), "\n")
+	if strings.Contains(line, "\n") {
+		return "", false
+	}
+	path, ok := strings.CutPrefix(line, "0::")
+	if !ok {
+		return "", false
+	}
+	prefix := fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/", uid, uid)
+	rest, ok := strings.CutPrefix(path, prefix)
+	if !ok {
+		return "", false
+	}
+	segments := strings.Split(rest, "/")
+	for _, s := range segments[:len(segments)-1] {
+		if !strings.HasSuffix(s, ".slice") || s == ".slice" {
+			return "", false
+		}
+	}
+	unit := segments[len(segments)-1]
+	if unit == ".service" || unit == ".scope" || !(strings.HasSuffix(unit, ".service") || strings.HasSuffix(unit, ".scope")) {
+		return "", false
+	}
+	return unit, true
 }

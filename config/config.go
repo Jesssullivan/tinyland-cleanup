@@ -917,6 +917,12 @@ type NixConfig struct {
 	// passes, from the first deferral, before a pass runs anyway (empty or
 	// "0" disables this bound). Either bound releases the pass.
 	MaxBusyDeferralDuration string `yaml:"max_busy_deferral_duration"`
+	// CriticalMaxBusyDeferrals is a lower max_busy_deferrals for a pass at
+	// critical level: once that many consecutive due passes have been
+	// deferred, a critical pass runs anyway behind the same pins and lock.
+	// 0 (the default) leaves critical passes under max_busy_deferrals and
+	// max_busy_deferral_duration only.
+	CriticalMaxBusyDeferrals int `yaml:"critical_max_busy_deferrals"`
 	// MaxGCDuration bounds nix-collect-garbage and related Nix commands.
 	MaxGCDuration string `yaml:"max_gc_duration"`
 	// RootAttributionLimit limits visible GC root targets in low-reclaim dry-runs.
@@ -1032,6 +1038,17 @@ type DevArtifactsConfig struct {
 	// process that cannot be read still protects every temp root. Zombies are
 	// always ignored. Linux only: Darwin uses lsof, which has no such gap.
 	TempUninspectableOKComms []string `yaml:"temp_uninspectable_ok_comms"`
+	// TempUninspectableOKUnits are systemd user units (the last segment of
+	// /proc/<pid>/cgroup under this user's manager, such as
+	// "app.slice/foo.service" -> "foo.service") whose processes may be
+	// unreadable without making the temp lane's activity inventory
+	// incomplete. Each entry asserts that the unit holds nothing in a temp
+	// root: the daemon cannot check it. Empty by default. Linux only.
+	TempUninspectableOKUnits []string `yaml:"temp_uninspectable_ok_units"`
+	// TempActivityProbeTimeout bounds one temp-lane process inventory (Go
+	// duration, default 10s). An inventory that runs out of time preserves
+	// every temp root that cycle.
+	TempActivityProbeTimeout string `yaml:"temp_activity_probe_timeout"`
 	// TempArtifactMinMB is the minimum physical size for review-only temporary artifact targets
 	TempArtifactMinMB int `yaml:"temp_artifact_min_mb"`
 	// TempArtifactStaleAfter is the age after which temp artifacts become review candidates
@@ -1401,6 +1418,7 @@ func DefaultConfig() *Config {
 			TempUninspectableOKComms: []string{
 				"tailscaled", "(sd-pam)", "sd-pam", "systemd",
 			},
+			TempActivityProbeTimeout: "10s",
 		},
 		DarwinDevCaches: DarwinDevCachesConfig{
 			Enabled:    runtime.GOOS == "darwin",

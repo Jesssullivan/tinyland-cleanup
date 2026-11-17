@@ -66,6 +66,19 @@ func nixBusyDeferralBound(cfg config.NixConfig, st nixGCState, now time.Time) (b
 	return false, ""
 }
 
+// nixBusyDeferralBoundAt is nixBusyDeferralBound for a pass at level. At
+// critical level, critical_max_busy_deferrals (when above 0) releases the
+// pass after that many consecutive deferrals, sooner than the general bounds.
+// The released pass runs behind the same hook-path pins and serialization
+// lock; nix-collect-garbage takes Nix's own GC lock and keeps the temp roots
+// of running builds.
+func nixBusyDeferralBoundAt(cfg config.NixConfig, st nixGCState, now time.Time, level CleanupLevel) (bool, string) {
+	if level >= LevelCritical && cfg.CriticalMaxBusyDeferrals > 0 && st.DeferredPasses >= cfg.CriticalMaxBusyDeferrals {
+		return true, fmt.Sprintf("critical_max_busy_deferrals=%d", cfg.CriticalMaxBusyDeferrals)
+	}
+	return nixBusyDeferralBound(cfg, st, now)
+}
+
 // LevelIndependent makes the daemon call the nix plugin on every poll so the
 // periodic trigger and the candidate list (rewritten every poll) work with no
 // host pressure. The plugin applies its own cadence.

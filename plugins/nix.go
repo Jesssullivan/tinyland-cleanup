@@ -136,13 +136,14 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 	}
 	plan.Metadata["max_busy_deferrals"] = strconv.Itoa(cfg.Nix.MaxBusyDeferrals)
 	plan.Metadata["max_busy_deferral_duration"] = cfg.Nix.MaxBusyDeferralDuration
+	plan.Metadata["critical_max_busy_deferrals"] = strconv.Itoa(cfg.Nix.CriticalMaxBusyDeferrals)
 	busy, inspection, err := inspect(ctx)
 	if inspection.MalformedRows > 0 {
 		plan.Metadata["process_inspection_malformed_rows"] = strconv.Itoa(inspection.MalformedRows)
 		plan.Warnings = append(plan.Warnings, inspection.warning())
 	}
 	if err != nil {
-		if released, bound := nixBusyDeferralBound(cfg.Nix, gcState, p.clock()); released && cfg.Nix.SkipWhenDaemonBusy {
+		if released, bound := nixBusyDeferralBoundAt(cfg.Nix, gcState, p.clock(), level); released && cfg.Nix.SkipWhenDaemonBusy {
 			plan.Metadata["busy_deferral_released_by"] = bound
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("process inspection is failing and due passes have been deferred %d times; %s releases the next pass, which runs behind the hook-path pins and the serialization lock", gcState.DeferredPasses, bound))
 		} else if cfg.Nix.SkipWhenDaemonBusy {
@@ -158,7 +159,7 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf("could not inspect active Nix processes: %v", err))
 	} else if len(busy) > 0 {
 		plan.Metadata["active_nix_processes"] = strings.Join(busy, ", ")
-		if released, bound := nixBusyDeferralBound(cfg.Nix, gcState, p.clock()); released && cfg.Nix.SkipWhenDaemonBusy {
+		if released, bound := nixBusyDeferralBoundAt(cfg.Nix, gcState, p.clock(), level); released && cfg.Nix.SkipWhenDaemonBusy {
 			plan.Metadata["busy_deferral_released_by"] = bound
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("active Nix work (%s) has deferred %d due passes; %s releases the next pass, which runs behind the hook-path pins and the serialization lock", strings.Join(busy, ", "), gcState.DeferredPasses, bound))
 		} else if cfg.Nix.SkipWhenDaemonBusy {
@@ -326,7 +327,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 	}
 	defer release()
 	if cfg.Nix.SkipWhenDaemonBusy && p.isNixAvailable() {
-		if proceed := p.busyGate(ctx, cfg.Nix, &st, logger); !proceed {
+		if proceed := p.busyGate(ctx, gcLevel, cfg.Nix, &st, logger); !proceed {
 			saveState()
 			return result
 		}
@@ -341,13 +342,13 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 	return gcResult
 }
 
-// busyGate defers a due pass while active Nix work is detected or process
-// inspection fails, but never past nixBusyDeferralBound: no single process,
-// readable or not, can hold the store's GC off indefinitely (issue #160). A
-// pass the bound releases still runs behind the hook-path pins and the
-// serialization lock. It returns whether the pass may run, updating st's
+// busyGate defers a due pass at level while active Nix work is detected or
+// process inspection fails, but never past nixBusyDeferralBoundAt: no single
+// process, readable or not, can hold the store's GC off indefinitely (issue
+// #160). A pass the bound releases still runs behind the hook-path pins and
+// the serialization lock. It returns whether the pass may run, updating st's
 // deferral run.
-func (p *NixPlugin) busyGate(ctx context.Context, cfg config.NixConfig, st *nixGCState, logger *slog.Logger) bool {
+func (p *NixPlugin) busyGate(ctx context.Context, level CleanupLevel, cfg config.NixConfig, st *nixGCState, logger *slog.Logger) bool {
 	inspect := p.activeWork
 	if inspect == nil {
 		inspect = p.activeNixProcesses
@@ -364,7 +365,7 @@ func (p *NixPlugin) busyGate(ctx context.Context, cfg config.NixConfig, st *nixG
 			"processes", strings.Join(inspection.UnreadableArgvSkipped, ", "))
 	}
 	if err != nil {
-		if released, bound := nixBusyDeferralBound(cfg, *st, now); released {
+		if released, bound := nixBusyDeferralBoundAt(cfg, *st, now, level); released {
 			logger.Error("running Nix GC despite failing process inspection: the deferral bound is reached",
 				"error", err,
 				"bound", bound,
@@ -380,7 +381,7 @@ func (p *NixPlugin) busyGate(ctx context.Context, cfg config.NixConfig, st *nixG
 	if len(busy) == 0 {
 		return true
 	}
-	if released, bound := nixBusyDeferralBound(cfg, *st, now); released {
+	if released, bound := nixBusyDeferralBoundAt(cfg, *st, now, level); released {
 		logger.Error("running Nix GC despite active Nix work: the deferral bound is reached",
 			"bound", bound,
 			"deferred_passes", st.DeferredPasses,

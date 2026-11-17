@@ -385,6 +385,7 @@ go_test(
         "plugins/exec_deadline_test.go",
         "plugins/fs_test.go",
         "plugins/nix_cadence_test.go",
+        "plugins/nix_critical_deferral_test.go",
         "plugins/nix_gcroots_test.go",
         "plugins/nix_hookpins_test.go",
         "plugins/nix_sessions_test.go",
@@ -402,6 +403,7 @@ go_test(
         "plugins/sudo_test.go",
         "plugins/temp_custody_test.go",
         "plugins/temp_mounts_test.go",
+        "plugins/temp_units_test.go",
     ] + select({
         "@platforms//os:macos": [
             "plugins/apfs_darwin_test.go",
