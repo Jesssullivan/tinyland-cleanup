@@ -195,8 +195,8 @@ throttled by `retention.interval` (default 1h); `--dry-run` always plans.
 |---|---|---|
 | `tmp_agents` | Top-level directories of `roots` matching `name_globs` (default `nix-shell.*`) whose newest mtime or ctime inside is older than `max_age` (24h) | report only (`delete: false`) |
 | `cargo_targets` | Cargo target or build-dir trees (`CACHEDIR.TAG` or `.rustc_info.json`) under `roots` (default `/srv/cache/{user}/cargo/build`, `max_depth` 3) whose newest change is older than `max_age` (7d); the whole rule waits while any `cargo` or `rustc` process runs | report only (`delete: false`) |
-| `tmp_agents.pressure` | Off by default. While the volume holding a `tmp_agents` root is at or over `used_percent`, unheld top-level entries whose newest change is older than its own `max_age` (6h, floor 1h), oldest first, until the volume is under `stop_percent`. See [Pressure pass](#pressure-pass) | report only (`delete: false`) |
-| `free_space_floor` | Nothing: an `ALERT free-space floor` line for every volume under `floor_gib` (10). Checks `paths` (`/`, and `/System/Volumes/Data` on Darwin), every `monitored_mounts` path and every retention root | alert |
+| `tmp_agents.pressure` | Off by default. While the volume holding a `tmp_agents` root is at or over `used_percent`, or under the free-space floor, unheld top-level entries whose newest change is older than its own `max_age` (6h, floor 1h), oldest first, until the volume is under `stop_percent` and over the floor. See [Pressure pass](#pressure-pass) | report only (`delete: false`) |
+| `free_space_floor` | Nothing by itself. A volume under `floor_gib` (10) is logged once when the breach starts and once when it ends, and its state goes to the cycle report (`free_space_floors`) and the state file (`floors`). Checks `paths` (`/`, and `/System/Volumes/Data` on Darwin), every `monitored_mounts` path and every retention root. With `tmp_agents.pressure` on, a breach on a root's volume runs the pressure pass at once | alert |
 | `darwin_leftovers` | Nothing: sizes of Fusion webdeploy builds under `fusion_webdeploy_root` that are not the target of its `Autodesk Fusion.app` symlink, and of each `report_paths` entry (the Claude desktop `vm_bundles`) | report only, no delete rule |
 
 A tree is kept when any of these hold, and every check runs again
@@ -238,8 +238,8 @@ all younger than the 24 hour `tmp_agents` age.
 | --- | --- | --- |
 | `enabled` | false | Turns the pass on. |
 | `used_percent` | 90 | The pass removes only while statfs on the root reads at least this used share. |
-| `stop_percent` | 0 (`used_percent`) | statfs is read again after each removal; the pass stops once the volume is under this. |
-| `interval` | 15m (floor 1m) | Least time between passes on one root. statfs is read every cycle. |
+| `stop_percent` | 0 (`used_percent`) | statfs is read again after each removal; the pass stops once the volume is under this and over the floor. |
+| `interval` | 15m (floor 1m) | Least time between passes on one root. statfs is read every cycle, and a floor breach runs a pass at once. |
 | `max_age` | 6h (floor 1h) | An entry is eligible when nothing inside changed (mtime or ctime) within this. |
 | `all_names` | false | Every top-level entry is a candidate, not only `name_globs`. Refused on `/` and the home directory; a root under `dev_artifacts.protect_paths` is skipped. |
 | `include_files` | false | Top-level regular files are candidates too. Links, sockets, FIFOs and devices never are. |

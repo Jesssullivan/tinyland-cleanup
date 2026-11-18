@@ -31,6 +31,9 @@ type cleanupState struct {
 	// cycles that left the mount at the critical level while every plugin
 	// together reclaimed nothing (TIN-5770).
 	Stalls map[string]int `json:"stalls,omitempty"`
+	// Floors is the last free-space floor state per volume path, written
+	// when a breach starts, ends or is read again (TIN-5770).
+	Floors map[string]plugins.FloorStatus `json:"floors,omitempty"`
 }
 
 type pluginStateRecord struct {

@@ -28,6 +28,7 @@ are omitted when empty. The source of truth is the `cycleReport`,
 - `byte_backoff_seconds` (int64, optional) — per-plugin interval applied while engaged; it doubles with each further ladder attempt that makes no progress, up to `byte_backoff_max`
 - `emergency_free_bytes` (uint64, optional) — free-space floor below which byte backoff never engages
 - `stalled_mounts` (array, optional): mounts at the critical level for at least `policy.stalled_alert_cycles` consecutive cycles while every plugin together reclaimed less than `policy.byte_progress_min_mb`. Each entry has `path`, `used_percent` and `cycles` (TIN-5770).
+- `free_space_floors` (array, optional): every volume `retention.free_space_floor` reads, with `path`, `free_bytes`, `floor_bytes`, `below_floor`, `breached_since` (RFC3339, while below), `checks_below` (reads under the floor in this breach) and `checked_at`. The state file keeps the same records under `floors`, written when a breach starts, ends or is read again (TIN-5770).
 
 ### Inode state
 - `host_inodes_total`, `host_inodes_free_before`, `host_inodes_free_after` (uint64, optional)

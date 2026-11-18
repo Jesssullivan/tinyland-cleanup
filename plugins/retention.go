@@ -94,8 +94,9 @@ type RetentionPlugin struct {
 	mu      sync.Mutex
 	lastRun time.Time
 
-	// fmu guards the pressure pass times.
+	// fmu guards the floor tracking and the pressure pass times.
 	fmu          sync.Mutex
+	floors       map[string]*retentionFloorTrack
 	pressureLast map[string]time.Time
 }
 
@@ -190,6 +191,13 @@ type retentionPass struct {
 	warnings   []string
 	alerts     []string
 	metadata   map[string]string
+	// floors are the free-space floor readings: path, free bytes, floor.
+	floors []retentionFloorReading
+}
+
+type retentionFloorReading struct {
+	path        string
+	free, floor uint64
 }
 
 func (p *RetentionPlugin) activityOptions(cfg *config.Config, roots []string) bbActivityOptions {
@@ -671,6 +679,7 @@ func (p *RetentionPlugin) evaluateFloors(cfg *config.Config, roots []string, pas
 		}
 		free := u.BytesTotal - u.BytesUsed
 		below := free < floor
+		pass.floors = append(pass.floors, retentionFloorReading{path: path, free: free, floor: floor})
 		pass.metadata["free_space_floor."+path] = fmt.Sprintf("free_bytes=%d total_bytes=%d below_floor=%t", free, u.BytesTotal, below)
 		if below {
 			pass.alerts = append(pass.alerts, fmt.Sprintf("ALERT free-space floor: %s has %.1f GiB free, below the %.0f GiB floor", path, float64(free)/(1<<30), fc.FloorGiB))
@@ -853,8 +862,10 @@ func (p *RetentionPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *
 		return result
 	}
 	pass := p.evaluate(ctx, cfg)
-	for _, a := range pass.alerts {
-		logger.Warn("retention free-space floor", "alert", a)
+	// A floor breach is logged when it starts and when it ends, not every
+	// pass; FloorStatuses carries the state to the report and state file.
+	for _, f := range pass.floors {
+		p.noteFloor(f.path, f.free, f.floor, logger)
 	}
 	for _, w := range pass.warnings {
 		logger.Warn("retention", "warning", w)

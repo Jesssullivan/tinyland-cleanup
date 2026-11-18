@@ -96,7 +96,7 @@ func usedPercent(u bbUsage) float64 {
 }
 
 // pressureCycle runs the pressure pass on every tmp_agents root whose volume
-// is over used_percent. With apply false it plans only:
+// is over used_percent or under the floor. With apply false it plans only:
 // it ignores the interval and projects the volume's use from the planned
 // removals.
 func (p *RetentionPlugin) pressureCycle(ctx context.Context, cfg *config.Config, apply bool, logger *slog.Logger) retentionPressureResult {
@@ -116,6 +116,9 @@ func (p *RetentionPlugin) pressureCycle(ctx context.Context, cfg *config.Config,
 	if stop <= 0 {
 		stop = pc.UsedPercent
 	}
+	fc := cfg.Retention.FreeSpaceFloor
+	floorOn := fc.Enabled && fc.FloorGiB > 0
+	floor := uint64(fc.FloorGiB * float64(1<<30))
 	roots, _ := p.expandRoots(tc.Roots)
 	for _, root := range roots {
 		u, err := p.usage(root)
@@ -124,12 +127,20 @@ func (p *RetentionPlugin) pressureCycle(ctx context.Context, cfg *config.Config,
 			continue
 		}
 		free := u.BytesTotal - u.BytesUsed
+		breach := false
+		if floorOn {
+			if apply {
+				breach = p.noteFloor(root, free, floor, logger)
+			} else {
+				breach = free < floor
+			}
+		}
 		key := "tmp_agents.pressure." + root
-		res.metadata[key] = fmt.Sprintf("used_percent=%.1f free_bytes=%d used_trigger=%.1f stop_percent=%.1f", usedPercent(u), free, pc.UsedPercent, stop)
-		if usedPercent(u) < pc.UsedPercent {
+		res.metadata[key] = fmt.Sprintf("used_percent=%.1f free_bytes=%d used_trigger=%.1f stop_percent=%.1f below_floor=%t", usedPercent(u), free, pc.UsedPercent, stop, breach)
+		if usedPercent(u) < pc.UsedPercent && !breach {
 			continue
 		}
-		if apply && !p.pressureDue(root, interval) {
+		if apply && !breach && !p.pressureDue(root, interval) {
 			res.metadata[key+".skipped"] = "interval"
 			continue
 		}
@@ -137,7 +148,10 @@ func (p *RetentionPlugin) pressureCycle(ctx context.Context, cfg *config.Config,
 			res.warnings = append(res.warnings, "tmp_agents.pressure: "+root+": "+why)
 			continue
 		}
-		done := func(cur bbUsage) bool { return usedPercent(cur) < stop }
+		done := func(cur bbUsage) bool {
+			f := cur.BytesTotal - cur.BytesUsed
+			return usedPercent(cur) < stop && (!floorOn || f >= floor)
+		}
 		p.pressureRoot(ctx, cfg, root, u, maxAge, done, apply, logger, &res)
 	}
 	return res
