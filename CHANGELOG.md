@@ -4,6 +4,58 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-18
+
+### Upgrade notes
+
+- **The Nix package build passes its own tests on Darwin again (#183,
+  TIN-5770).** The 0.5.1 package failed its test phase on Darwin, so every
+  Home Manager switch that built it there failed. On petting-zoo-mini that
+  was every switch from 2026-11-17T10:03Z. Tests changed, product code did
+  not. The 13 podman prune-by-use tests skip off Linux, because the pass
+  runs only on Linux. A new test pins the Darwin result: the pass reports
+  `prune_by_use_linux_only` and asks podman nothing. Five Bazel repository
+  contents tests skip their `gc_lock` part off Linux.
+- **Every new key in this release is inert by default.** With none set, no
+  rule removes anything it did not remove in 0.5.1. The one default change
+  is how `retention.free_space_floor` logs and records a breach (below).
+- **`retention.free_space_floor` logs once per breach (#184).** It logged an
+  alert line every pass. It now logs once when a volume goes under
+  `floor_gib` and once when it recovers. The state goes to the cycle report
+  as `free_space_floors` and to the state file as `floors`. The floor
+  removes nothing by itself. With `retention.tmp_agents.pressure` on, a
+  breach on a `tmp_agents` root's volume runs the pressure pass at once.
+
+### Added
+
+- **`darwin_dev_caches.<family>.paths` (#184, TIN-5770).** Default empty.
+  Darwin only, for the `pip`, `npm`, `uv`, `bun` and `opencode` families.
+  It names a cache root moved off the compiled paths, for example by
+  `UV_CACHE_DIR`. A listed root is trimmed entry by entry, oldest first, at
+  moderate pressure or above: stale entries first, then down to `max_gb`.
+  What it can remove: entries inside a listed cache root, never the root
+  itself and never a top-level file. It removes only with
+  `darwin_dev_caches.enforce: true`. An entry a live process holds stays, a
+  held top-level file such as the cache's `.lock` keeps the whole root, an
+  entry changed within the last hour stays, and an incomplete activity
+  inventory keeps everything. A removed entry costs a re-download.
+- **`retention.tmp_agents.pressure` (#184, TIN-5770).** Off by default
+  (`enabled: false`, `delete: false`). While the volume holding a
+  `tmp_agents` root is at or over `used_percent` (90), or under the
+  free-space floor, it removes unheld top-level entries of that root,
+  oldest first, until the volume is under `stop_percent` and over the
+  floor. `stop_percent` 0 means `used_percent`. An entry is eligible when
+  nothing inside changed within the pass's own `max_age` (6h, floor 1h).
+  What it can remove: temp trees under a `tmp_agents` root that match
+  `name_globs`, or every top-level entry with `all_names`, and top-level
+  files with `include_files`. Every `tmp_agents` guard still applies. These
+  also keep an entry: a Nix GC root in `/nix/var/nix/gcroots/auto` that
+  points inside it, a `.tinyland-keep` marker or a `keep_if_contains` name,
+  a mount point (an entry on another device than the root), a live
+  `NIX_BUILD_TOP` inside it, and a `nix-shell.*` tree that may belong to a
+  live interactive `nix develop` shell. A person's tree with no keep marker
+  that has sat unchanged for `max_age` is not protected.
+
 ## [0.5.1] - 2026-11-17
 
 ### Upgrade notes
