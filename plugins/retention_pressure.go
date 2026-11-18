@@ -18,6 +18,7 @@ package plugins
 //
 // It keeps an entry when:
 //
+//   - it is a mount point: its device is not the root's;
 //   - the base tmp_agents guards keep it: the agent-session deny, another
 //     user, dev_artifacts.protect_paths, a mount crossing, a non-fixture
 //     .git, Git custody, the walk bound, an agent-session directory inside;
@@ -179,6 +180,9 @@ type pressureView struct {
 	activity *bbActivity
 	gcroots  []string
 	shells   retentionShells
+	// rootDev is the device of the root directory (followed through a
+	// link). A top-level entry on another device is a mount point.
+	rootDev uint64
 }
 
 func (p *RetentionPlugin) pressureScan(ctx context.Context, cfg *config.Config, root string) *bbActivity {
@@ -207,7 +211,15 @@ func (p *RetentionPlugin) pressureView(ctx context.Context, cfg *config.Config, 
 	if err != nil {
 		return pressureView{}, "Nix GC roots unreadable: " + err.Error()
 	}
-	return pressureView{activity: a, gcroots: gc, shells: pressureShells(a, root)}, ""
+	device := p.device
+	if device == nil {
+		device = retentionDevice
+	}
+	dev, err := device(root)
+	if err != nil {
+		return pressureView{}, "root unreadable: " + err.Error()
+	}
+	return pressureView{activity: a, gcroots: gc, shells: pressureShells(a, root), rootDev: dev}, ""
 }
 
 func (p *RetentionPlugin) gcrootsAutoDir() string {
@@ -358,13 +370,23 @@ func (p *RetentionPlugin) decidePressure(ctx context.Context, cfg *config.Config
 		target.Reason = "belongs to another or unknown user"
 		return target, false
 	}
+	if uint64(st.Dev) != view.rootDev {
+		// A disk image or test volume mounted here: its lstat device is the
+		// mounted volume's, so the walk below would see no crossing.
+		target.Reason = "a mount point: on another device than the root"
+		return target, false
+	}
 	if live := view.activity.blockers(path); len(live) > 0 {
 		target.Active = true
 		target.Reason = "live reference: " + live[0]
 		return target, false
 	}
+	real := resolvedOrSelf(path)
 	for _, g := range view.gcroots {
-		if g == path || bbUnder(g, path) {
+		// Nix records the target as given or from getcwd(), so a root
+		// reached through a link (Darwin /tmp, /var/folders) is matched
+		// both ways.
+		if g == path || bbUnder(g, path) || g == real || bbUnder(g, real) {
 			target.Active = true
 			target.Reason = "holds a Nix GC root link " + g
 			return target, false
@@ -454,6 +476,19 @@ func (p *RetentionPlugin) decidePressure(ctx context.Context, cfg *config.Config
 }
 
 var errRetentionRecent = errors.New("recent change")
+
+// retentionDevice is the device of path, following a link.
+func retentionDevice(path string) (uint64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, errors.New("no device identity")
+	}
+	return uint64(st.Dev), nil
+}
 
 // readAutoGCRoots lists the targets of the indirect Nix GC roots. A missing
 // directory (no Nix) lists nothing; any other error is returned, and the

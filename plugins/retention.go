@@ -90,6 +90,8 @@ type RetentionPlugin struct {
 	// replaces /proc/net/unix in tests.
 	gcrootsDir  string
 	socketTable string
+	// device replaces retentionDevice (a root's device id) in tests.
+	device func(path string) (uint64, error)
 
 	mu      sync.Mutex
 	lastRun time.Time

@@ -150,6 +150,59 @@ func TestRetentionPressureKeepsHolderGCRootKeepMarkerAndRecentTrees(t *testing.T
 	}
 }
 
+// TestRetentionPressureKeepsAMountPointEntry: a volume mounted under the
+// root has its own device at the entry itself, so the walk's device check
+// never sees a crossing. The entry's device against the root's catches it
+// (review M2 on tinyland-cleanup#184). The fake root device stands in for
+// every entry being a mount point.
+func TestRetentionPressureKeepsAMountPointEntry(t *testing.T) {
+	f := newPressureFixture(t)
+	f.entry("mounted-image", 6)
+	real, err := retentionDevice(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.plugin.device = func(string) (uint64, error) { return real + 1, nil }
+	res := f.run()
+	f.want()
+	if len(res.targets) != 1 || !strings.Contains(res.targets[0].Reason, "mount point") {
+		t.Fatalf("targets = %+v, want mounted-image kept as a mount point", res.targets)
+	}
+	// Control: the root's real device lets the same entry go.
+	f.plugin.device = nil
+	f.run()
+	f.want("mounted-image")
+}
+
+// TestRetentionPressureGCRootMatchesThroughALinkedRoot: the root is
+// configured through a link, as Darwin's /tmp is, and Nix recorded the GC
+// root's target by its physical path.
+func TestRetentionPressureGCRootMatchesThroughALinkedRoot(t *testing.T) {
+	f := newPressureFixture(t)
+	f.used = 99 * pfGiB
+	f.cfg.Retention.TmpAgents.Pressure.StopPercent = 50
+	physical, err := filepath.EvalSymlinks(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "tmp-link")
+	if err := os.Symlink(physical, link); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.Retention.TmpAgents.Roots = []string{link}
+	f.cfg.Retention.FreeSpaceFloor.Paths = []string{link}
+	f.entry("rooted", 8)
+	f.entry("old", 5)
+	if err := os.MkdirAll(f.plugin.gcrootsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(physical, "rooted", "result"), filepath.Join(f.plugin.gcrootsDir, "abc")); err != nil {
+		t.Fatal(err)
+	}
+	f.run()
+	f.want("old")
+}
+
 func TestRetentionPressureIncompleteInventoryKeepsEverything(t *testing.T) {
 	f := newPressureFixture(t)
 	f.incomplete = "lsof listing timed out"
