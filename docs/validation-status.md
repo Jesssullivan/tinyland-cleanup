@@ -25,8 +25,9 @@ Updated: 2026-11-18
   6e23bafb. The second was at b8044b65, the #184 head, whose tree is the
   tree of main at d7aaf4d0. Nothing was activated.
 - **The release commit** changes only the version strings, this file and
-  the changelog. It was checked by grepping the version strings and a
-  `go build` of the module on sting.
+  the changelog. On sting a grep found 0.5.2 in VERSION, main.go,
+  MODULE.bazel and the BUILD.bazel x_defs, and no other 0.5.1 version
+  string. The flake reads VERSION. No `go build` of the release commit ran.
 - **Not validated:** CI, the Bazel build and test graph and the release
   workflow. No runner serves this repository. No full `go test ./...` on
   Linux at d7aaf4d0 is on record. No host has run `paths`, the pressure
