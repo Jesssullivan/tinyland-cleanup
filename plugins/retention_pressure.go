@@ -87,6 +87,9 @@ type retentionPressureResult struct {
 	items    int
 	warnings []string
 	metadata map[string]string
+	// floorNoted lists the roots whose floor reading this cycle already
+	// recorded, so the base pass does not count the same read twice.
+	floorNoted map[string]bool
 }
 
 func usedPercent(u bbUsage) float64 {
@@ -132,6 +135,10 @@ func (p *RetentionPlugin) pressureCycle(ctx context.Context, cfg *config.Config,
 		if floorOn {
 			if apply {
 				breach = p.noteFloor(root, free, floor, logger)
+				if res.floorNoted == nil {
+					res.floorNoted = map[string]bool{}
+				}
+				res.floorNoted[root] = true
 			} else {
 				breach = free < floor
 			}

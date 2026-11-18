@@ -848,10 +848,12 @@ func (p *RetentionPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, c
 // without the flag log what they would remove and remove nothing.
 func (p *RetentionPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: p.Name(), Level: level}
+	var floorNoted map[string]bool
 	// The pressure pass reads statfs on its roots every cycle and acts on
 	// its own interval, or at once on a free-space floor breach (TIN-5770).
 	if rc := cfg.Retention.TmpAgents; rc.Enabled && rc.Pressure.Enabled {
 		pr := p.pressureCycle(ctx, cfg, true, logger)
+		floorNoted = pr.floorNoted
 		for _, w := range pr.warnings {
 			logger.Warn("retention", "warning", w)
 		}
@@ -867,6 +869,9 @@ func (p *RetentionPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *
 	// A floor breach is logged when it starts and when it ends, not every
 	// pass; FloorStatuses carries the state to the report and state file.
 	for _, f := range pass.floors {
+		if floorNoted[f.path] {
+			continue // the pressure pass recorded this read this cycle
+		}
 		p.noteFloor(f.path, f.free, f.floor, logger)
 	}
 	for _, w := range pass.warnings {

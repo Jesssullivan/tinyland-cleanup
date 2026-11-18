@@ -43,3 +43,21 @@ func TestRetentionPressureFloorBreachRunsAtOnceAndLogsEdgesOnly(t *testing.T) {
 	}
 }
 
+// TestRetentionFloorReadCountsOncePerCycle: on a cycle when the base pass is
+// due, the pressure pass and the base pass both read the tmp_agents root.
+// The floor tracking counts that root once.
+func TestRetentionFloorReadCountsOncePerCycle(t *testing.T) {
+	f := newPressureFixture(t)
+	f.used = 70 * pfGiB
+	f.cfg.Retention.FreeSpaceFloor.FloorGiB = 40
+	f.plugin.Cleanup(context.Background(), LevelModerate, f.cfg, retDiscard())
+	for _, st := range f.plugin.FloorStatuses() {
+		if st.Path == f.root {
+			if !st.Below || st.ChecksBelow != 1 {
+				t.Fatalf("floor status = %+v, want one read under the floor", st)
+			}
+			return
+		}
+	}
+	t.Fatalf("no floor status for %s: %+v", f.root, f.plugin.FloorStatuses())
+}

@@ -99,4 +99,3 @@ func sortFloorStatuses(s []FloorStatus) {
 		}
 	}
 }
-
