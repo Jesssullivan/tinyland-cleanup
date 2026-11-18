@@ -462,6 +462,21 @@ retention:
     # no linked work trees is a test fixture and goes with its stale tree
     # (TIN-7495 ruling 2026-10-29). Empty keeps every .git.
     fixture_repo_parents: ["pytest-of-*"]
+    # Fill-gated pass (A-084, A-095, TIN-5770). Off by default. statfs on
+    # each root is read every cycle; at or over used_percent, unheld entries
+    # go oldest first until the volume is under stop_percent.
+    pressure:
+      enabled: false
+      used_percent: 90
+      stop_percent: 0     # 0 means used_percent
+      interval: 15m       # least time between passes on a root (floor 1m)
+      max_age: 6h         # floor 1h
+      all_names: false    # every top-level entry, not only name_globs
+      include_files: false
+      exclude_globs: []
+      keep_if_contains: []  # .tinyland-keep always keeps
+      socket_listener_holds: false
+      delete: false
   cargo_targets:
     enabled: true
     roots: ["/srv/cache/{user}/cargo/build"]

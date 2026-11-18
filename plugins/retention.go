@@ -86,9 +86,17 @@ type RetentionPlugin struct {
 	user      string
 	tmpdir    string
 	goos      string
+	// gcrootsDir replaces /nix/var/nix/gcroots/auto and socketTable
+	// replaces /proc/net/unix in tests.
+	gcrootsDir  string
+	socketTable string
 
 	mu      sync.Mutex
 	lastRun time.Time
+
+	// fmu guards the pressure pass times.
+	fmu          sync.Mutex
+	pressureLast map[string]time.Time
 }
 
 // NewRetentionPlugin creates the retention plugin with the host environment.
@@ -788,6 +796,21 @@ func (p *RetentionPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, c
 	plan.Targets = append(plan.Targets, pass.reports...)
 	plan.Warnings = append(append([]string{}, pass.alerts...), pass.warnings...)
 	plan.WouldRun = rc.TmpAgents.Delete || rc.CargoTargets.Delete
+	if rc.TmpAgents.Enabled && rc.TmpAgents.Pressure.Enabled {
+		pr := p.pressureCycle(ctx, cfg, false, logger)
+		for _, t := range pr.targets {
+			plan.Targets = append(plan.Targets, t)
+			if t.Action == "delete" {
+				plan.EstimatedBytesFreed += t.Bytes
+			}
+		}
+		plan.Warnings = append(plan.Warnings, pr.warnings...)
+		for k, v := range pr.metadata {
+			pass.metadata[k] = v
+		}
+		plan.WouldRun = plan.WouldRun || rc.TmpAgents.Pressure.Delete
+		pass.metadata["tmp_agents.pressure.delete"] = strconv.FormatBool(rc.TmpAgents.Pressure.Delete)
+	}
 	if !plan.WouldRun {
 		plan.SkipReason = "retention deleting rules are report-only (no delete flag set)"
 	}
@@ -814,6 +837,17 @@ func (p *RetentionPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, c
 // without the flag log what they would remove and remove nothing.
 func (p *RetentionPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: p.Name(), Level: level}
+	// The pressure pass reads statfs on its roots every cycle and acts on
+	// its own interval, or at once on a free-space floor breach (TIN-5770).
+	if rc := cfg.Retention.TmpAgents; rc.Enabled && rc.Pressure.Enabled {
+		pr := p.pressureCycle(ctx, cfg, true, logger)
+		for _, w := range pr.warnings {
+			logger.Warn("retention", "warning", w)
+		}
+		result.BytesFreed += pr.freed
+		result.EstimatedBytesFreed += pr.freed
+		result.ItemsCleaned += pr.items
+	}
 	if !p.due(cfg) {
 		logger.Debug("retention pass not due", "interval", cfg.Retention.Interval)
 		return result

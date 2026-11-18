@@ -70,6 +70,59 @@ type RetentionTmpAgentsConfig struct {
 	// work trees is a test fixture that may go with its stale tree
 	// (operator ruling TIN-7495 2026-10-29). Empty keeps every .git.
 	FixtureRepoParents []string `yaml:"fixture_repo_parents"`
+	// Pressure is the fill-gated pass (A-084, A-095, TIN-5770). Off by
+	// default.
+	Pressure RetentionTmpAgentsPressureConfig `yaml:"pressure"`
+}
+
+// RetentionTmpAgentsPressureMinInterval is the floor for pressure.interval.
+const RetentionTmpAgentsPressureMinInterval = time.Minute
+
+// RetentionKeepMarker is the file name that keeps a tree from the pressure
+// pass whatever keep_if_contains says (TIN-5770 skeptic S10).
+const RetentionKeepMarker = ".tinyland-keep"
+
+// RetentionTmpAgentsPressureConfig removes unheld temp entries, oldest first,
+// while the volume holding a root is full (A-084 for sting, A-095 for
+// petting-zoo-mini). It reads statfs on each root every daemon cycle. When
+// the root's volume is at or over used_percent, or under the free-space
+// floor, it removes entries whose newest change is older than max_age until
+// the volume is under stop_percent and over the floor, re-reading statfs
+// after each removal. Every tmp_agents guard applies, plus: a Nix GC root
+// link inside keeps the tree, a keep marker inside keeps it, and a nix-shell.*
+// tree that may be the TMPDIR of a live interactive nix develop shell is kept.
+type RetentionTmpAgentsPressureConfig struct {
+	// Enabled turns the pressure pass on (default false).
+	Enabled bool `yaml:"enabled"`
+	// UsedPercent is the used share of the root's volume (statfs) at or above
+	// which the pass removes (default 90).
+	UsedPercent float64 `yaml:"used_percent"`
+	// StopPercent ends the pass once the volume is under it (default 0, which
+	// means used_percent). It must not be above used_percent.
+	StopPercent float64 `yaml:"stop_percent"`
+	// Interval is the least time between two passes on one root (default
+	// 15m, at least 1m). A free-space floor breach runs a pass at once.
+	Interval string `yaml:"interval"`
+	// MaxAge is how long the newest change in an entry must be past (default
+	// 6h, at least 1h).
+	MaxAge string `yaml:"max_age"`
+	// AllNames makes every top-level entry a candidate, not only name_globs.
+	// Agent-session names stay denied. It is refused on "/" or the home
+	// directory, and a root under dev_artifacts.protect_paths is skipped.
+	AllNames bool `yaml:"all_names"`
+	// IncludeFiles makes top-level regular files candidates, judged by their
+	// own mtime, ctime and holders. Links, sockets and devices never are.
+	IncludeFiles bool `yaml:"include_files"`
+	// ExcludeGlobs are top-level names that are never candidates.
+	ExcludeGlobs []string `yaml:"exclude_globs"`
+	// KeepIfContains keeps an entry that holds a file whose name matches a
+	// glob, anywhere inside the walk bound. .tinyland-keep always keeps.
+	KeepIfContains []string `yaml:"keep_if_contains"`
+	// SocketListenerHolds counts a listening unix socket bound inside an
+	// entry as a holder (Linux: /proc/net/unix; Darwin: what lsof lists).
+	SocketListenerHolds bool `yaml:"socket_listener_holds"`
+	// Delete removes eligible entries. False (the default) reports only.
+	Delete bool `yaml:"delete"`
 }
 
 // RetentionCargoTargetsConfig removes Cargo target or build directories
@@ -143,6 +196,12 @@ func DefaultRetentionConfig(home string) RetentionConfig {
 			MaxDirsPerCycle:    4096,
 			MaxEntriesPerDir:   200000,
 			FixtureRepoParents: []string{"pytest-of-*"},
+			Pressure: RetentionTmpAgentsPressureConfig{
+				Enabled:     false,
+				UsedPercent: 90,
+				Interval:    "15m",
+				MaxAge:      "6h",
+			},
 		},
 		CargoTargets: RetentionCargoTargetsConfig{
 			Enabled:             true,
@@ -197,6 +256,9 @@ func (c RetentionConfig) Validate() error {
 		if c.TmpAgents.MaxDirsPerCycle < 0 || c.TmpAgents.MaxEntriesPerDir < 0 {
 			return fmt.Errorf("retention.tmp_agents bounds must not be negative")
 		}
+		if err := c.TmpAgents.Pressure.validate(c.TmpAgents.Roots); err != nil {
+			return err
+		}
 	}
 	if c.CargoTargets.Enabled {
 		if err := validateRetentionRoots("retention.cargo_targets.roots", c.CargoTargets.Roots); err != nil {
@@ -211,6 +273,42 @@ func (c RetentionConfig) Validate() error {
 	}
 	if c.FreeSpaceFloor.FloorGiB < 0 {
 		return fmt.Errorf("retention.free_space_floor.floor_gib must not be negative")
+	}
+	return nil
+}
+
+func (p RetentionTmpAgentsPressureConfig) validate(roots []string) error {
+	if !p.Enabled {
+		return nil
+	}
+	const key = "retention.tmp_agents.pressure"
+	if p.UsedPercent <= 0 || p.UsedPercent > 100 {
+		return fmt.Errorf("%s.used_percent %v must be above 0 and at most 100", key, p.UsedPercent)
+	}
+	if p.StopPercent < 0 || p.StopPercent > p.UsedPercent {
+		return fmt.Errorf("%s.stop_percent %v must be from 0 to used_percent %v", key, p.StopPercent, p.UsedPercent)
+	}
+	interval, err := ParseDuration(p.Interval)
+	if err != nil {
+		return fmt.Errorf("%s.interval: %w", key, err)
+	}
+	if interval < RetentionTmpAgentsPressureMinInterval {
+		return fmt.Errorf("%s.interval %s is below the floor %s", key, interval, RetentionTmpAgentsPressureMinInterval)
+	}
+	if err := validateRetentionAge(key+".max_age", p.MaxAge, RetentionTmpAgentsMinMaxAge); err != nil {
+		return err
+	}
+	for _, g := range append(append([]string{}, p.ExcludeGlobs...), p.KeepIfContains...) {
+		if _, err := filepath.Match(g, "x"); err != nil || g == "" || strings.Contains(g, "/") {
+			return fmt.Errorf("%s: %q is not a usable name glob", key, g)
+		}
+	}
+	if p.AllNames {
+		for _, r := range roots {
+			if r == "~" || r == "~/" || filepath.Clean(r) == "/" {
+				return fmt.Errorf("%s.all_names is refused on root %q", key, r)
+			}
+		}
 	}
 	return nil
 }

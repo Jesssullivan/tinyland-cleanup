@@ -96,6 +96,9 @@ func bbScanProc(ctx context.Context, procRoot string, self, uid int, opts bbActi
 		d := filepath.Join(procRoot, e.Name())
 		raw, _ := os.ReadFile(filepath.Join(d, "cmdline"))
 		a.procs = append(a.procs, bbProc{pid: pid, cmdline: strings.TrimSpace(strings.ReplaceAll(string(raw), "\x00", " "))})
+		if opts.StartTimes {
+			a.procs[len(a.procs)-1].start = procStartTime(procRoot, d)
+		}
 		for _, link := range []string{"cwd", "root"} {
 			if t, err := os.Readlink(filepath.Join(d, link)); err == nil && t != "/" {
 				a.index(t, fmt.Sprintf("pid %d %s is %s", pid, link, t), opts.Within)
