@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -289,11 +290,23 @@ func (f *byUseFake) stage(t *testing.T) *config.Config {
 
 func byUseLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// byUseNeedsLinux skips a test that drives the prune-by-use pass itself. The
+// pass runs only on Linux without a podman VM (byUsePlatform); on any other
+// system planByUse stops at prune_by_use_linux_only before it asks podman
+// anything. TestPodmanByUseSkipsWithLinuxOnlyReasonOffLinux pins that.
+func byUseNeedsLinux(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("prune-by-use is Linux only: on %s the pass skips with prune_by_use_linux_only", runtime.GOOS)
+	}
+}
+
 func byUsePlugin() *PodmanPlugin {
 	return &PodmanPlugin{environment: &PodmanEnvironment{Runtime: "podman"}}
 }
 
 func TestPodmanByUseApplyRemovesOnlyRecheckedCandidatesWithoutForce(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 
@@ -328,6 +341,7 @@ func TestPodmanByUseApplyRemovesOnlyRecheckedCandidatesWithoutForce(t *testing.T
 }
 
 func TestPodmanByUseRefusedRemovalIsNotCounted(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 	f.write(t, "refuse", byUseID('a')+"\n")
@@ -338,6 +352,7 @@ func TestPodmanByUseRefusedRemovalIsNotCounted(t *testing.T) {
 }
 
 func TestPodmanByUseRecheckKeepsAnImageThatGainedAProtectedLabel(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 	old := time.Now().Add(-72 * time.Hour).UTC().Format(time.RFC3339Nano)
@@ -349,6 +364,7 @@ func TestPodmanByUseRecheckKeepsAnImageThatGainedAProtectedLabel(t *testing.T) {
 }
 
 func TestPodmanByUseRecheckStopsWhenTheKeepFileChanges(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 	// Inspecting image a appends a pin, as a harness writing its pins would.
@@ -360,6 +376,7 @@ func TestPodmanByUseRecheckStopsWhenTheKeepFileChanges(t *testing.T) {
 }
 
 func TestPodmanByUseReportModeAndDryRunRemoveNothing(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 
@@ -393,6 +410,7 @@ func TestPodmanByUseReportModeAndDryRunRemoveNothing(t *testing.T) {
 }
 
 func TestPodmanByUseCriticalRunsWithoutTheSystemPrune(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 	cfg.Podman.BuildKitPrune = false
@@ -439,7 +457,46 @@ func TestPodmanByUseUntouchedWhenOffOrOffLinux(t *testing.T) {
 	}
 }
 
+// Off Linux the pass reports prune_by_use_linux_only, in report and apply
+// mode, and asks podman nothing. On Darwin and other systems this reads the
+// real runtime.GOOS; on Linux it sets the GOOS seam to darwin, so the skip is
+// checked on every system.
+func TestPodmanByUseSkipsWithLinuxOnlyReasonOffLinux(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		orig := podmanByUseGOOS
+		podmanByUseGOOS = "darwin"
+		t.Cleanup(func() { podmanByUseGOOS = orig })
+	}
+	for _, mode := range []string{"report", "apply"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newByUseFake(t)
+			cfg := f.stage(t)
+			cfg.Podman.PruneByUse = mode
+			p := byUsePlugin()
+			if p.byUseOn(cfg) || p.byUseApplies(cfg) {
+				t.Fatalf("prune-by-use is on off Linux (GOOS seam %q)", podmanByUseGOOS)
+			}
+			plan := p.planByUse(context.Background(), cfg, time.Now(), byUseLogger())
+			if plan.SkipReason != "prune_by_use_linux_only" || len(plan.Items) != 0 {
+				t.Fatalf("skip reason = %q, items = %#v, want prune_by_use_linux_only and none", plan.SkipReason, plan.Items)
+			}
+			var buf strings.Builder
+			logger := slog.New(slog.NewTextHandler(&buf, nil))
+			if freed, removed := p.pruneByUse(context.Background(), cfg, logger); freed != 0 || removed != 0 {
+				t.Fatalf("pruneByUse freed=%d removed=%d off Linux", freed, removed)
+			}
+			if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "reason=prune_by_use_linux_only") {
+				t.Fatalf("no skip warning naming prune_by_use_linux_only:\n%s", buf.String())
+			}
+			if got := f.log(t); got != "" {
+				t.Fatalf("podman was asked off Linux:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestPodmanByUsePlanSkipsOnUnknowns(t *testing.T) {
+	byUseNeedsLinux(t)
 	cases := []struct {
 		name  string
 		setup func(*testing.T, *byUseFake, *config.Config)
@@ -523,6 +580,7 @@ func TestPodmanByUseConfig(t *testing.T) {
 // The fixture's image c is pinned only in the keep file. A missing keep file
 // must not read as "no pins" (review B2).
 func TestPodmanByUseMissingKeepFileRemovesNothing(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 	if err := os.Remove(f.keepFile); err != nil {
@@ -540,6 +598,7 @@ func TestPodmanByUseMissingKeepFileRemovesNothing(t *testing.T) {
 }
 
 func TestPodmanByUseEmptyKeepFileWarns(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 	f.write(t, "keep-images", "# no pins yet\n")
@@ -563,6 +622,7 @@ func TestPodmanByUseEmptyKeepFileWarns(t *testing.T) {
 }
 
 func TestPodmanByUseRecheckKeepsWhenTheKeepFileDisappears(t *testing.T) {
+	byUseNeedsLinux(t)
 	f := newByUseFake(t)
 	cfg := f.stage(t)
 	f.write(t, "keep-images", "")
@@ -577,6 +637,7 @@ func TestPodmanByUseRecheckKeepsWhenTheKeepFileDisappears(t *testing.T) {
 // digest, although podman inspect answers "image not known" for both
 // (review B1). The check runs at plan time and at the re-check.
 func TestPodmanByUseDigestPinKeepsImageUnderAnyName(t *testing.T) {
+	byUseNeedsLinux(t)
 	const digest = "sha256:b544b2f4d2b1a5c3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9"
 	for _, pin := range []string{
 		"ghcr.io/xoxd-ai/blahaj/rspamd@" + digest,
@@ -607,11 +668,19 @@ func TestPodmanByUseDigestPinKeepsImageUnderAnyName(t *testing.T) {
 			}
 		})
 	}
-	// Control: an unrelated digest pins nothing.
+}
+
+// An unrelated digest pins nothing. podmanDigestPinned reads no host state,
+// so this runs on every system.
+func TestPodmanDigestPinnedIgnoresAnUnrelatedDigest(t *testing.T) {
+	const digest = "sha256:b544b2f4d2b1a5c3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9"
 	img := podmanByUseImage{ID: byUseID('a'), RepoDigests: []string{"localhost/rspamd@" + digest}}
 	other := map[string]struct{}{"ghcr.io/x/y@sha256:" + byUseID('f'): {}, "sha256:" + byUseID('f'): {}}
 	if podmanDigestPinned(other, img) {
 		t.Fatal("an unrelated digest pinned the image")
+	}
+	if !podmanDigestPinned(map[string]struct{}{digest: {}}, img) {
+		t.Fatal("the image's own repo digest did not pin it")
 	}
 }
 
@@ -621,6 +690,7 @@ func TestPodmanByUseDigestPinKeepsImageUnderAnyName(t *testing.T) {
 // and the same "Digest". Inspect of repo@digest answers "image not known". A
 // pin must still keep the image however podman lists it (review B3).
 func TestPodmanByUsePinKeepsTheImageHoweverPodmanListsIt(t *testing.T) {
+	byUseNeedsLinux(t)
 	const instance = "sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657"
 	const list = "sha256:43f9275df91e012c3da3d86bea5d7bb5e67a473296cc906c5f9e80b8176b1a37"
 	id := byUseID('a')
@@ -711,6 +781,7 @@ func TestPodmanByUsePinKeepsTheImageHoweverPodmanListsIt(t *testing.T) {
 // The digest question is closed: an error, an unexpected line or a digest
 // the pass cannot compare skips the pass.
 func TestPodmanByUseDigestQuestionSkipsOnAnyUnexpectedAnswer(t *testing.T) {
+	byUseNeedsLinux(t)
 	cases := []struct {
 		name  string
 		setup func(*testing.T, *byUseFake)
