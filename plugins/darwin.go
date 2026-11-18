@@ -1306,8 +1306,9 @@ func (p *CachePlugin) darwinDirectoryCacheTargets(home string, cfg config.Darwin
 // darwinPathIsConfigured reports whether a compiled cache path is also named
 // in the family's paths key.
 func darwinPathIsConfigured(home string, configured []string, path string) bool {
+	user := devCacheUserName(os.Getenv("USER"))
 	for _, raw := range configured {
-		if filepath.Clean(config.ExpandUserPath(raw, home, os.Getenv("USER"))) == filepath.Clean(path) {
+		if filepath.Clean(config.ExpandUserPath(raw, home, user)) == filepath.Clean(path) {
 			return true
 		}
 	}

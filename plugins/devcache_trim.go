@@ -6,13 +6,16 @@ package plugins
 // compiled ~/.cache/uv and ~/Library/Caches/uv paths never reach; it held
 // 44.5 GiB of the /nix volume on November 18, 2026.
 //
-// A listed root is never removed in one piece. Its top-level directories are
-// the units; a top-level directory a live process holds is not a unit, and
-// its own entries are the units instead (one level down, so uv's archive-v0
-// bucket gives its unpacked archives). A unit is held when the activity
-// inventory finds an open file, cwd, executable, mapping or command line
-// under it. An incomplete inventory keeps everything, and so does a held
-// top-level file, which is the cache's lock file while the tool runs.
+// A listed root is never removed in one piece, and neither is a top-level
+// directory. The units are the second-level entries: the entries of every
+// top-level directory, held or not. For uv the top level holds the buckets
+// (archive-v0, wheels-v5, environments-v2 and so on), and archive-v0 holds
+// most of the bytes, so its unpacked archives must be the units: one fresh
+// archive then keeps only itself, and a quiet bucket goes one archive at a
+// time down to max_gb, not whole. A unit is held when the activity inventory
+// finds an open file, cwd, executable, mapping or command line under it. An
+// incomplete inventory keeps everything, and so does a held top-level file,
+// which is the cache's lock file while the tool runs. Links are never units.
 //
 // At moderate pressure or above, unheld units go oldest first by the newest
 // change inside them: first those past stale_after_days, then more until the
@@ -96,6 +99,14 @@ func devCacheTrimTargets(ctx context.Context, root, targetType, displayName stri
 		summary.Reason = fmt.Sprintf("%s kept: root unreadable: %v", displayName, err)
 		return finish(nil)
 	}
+	if why := devCacheLockHolder(root, activity); why != "" {
+		// The cache's own lock file is open: the tool is running in this
+		// cache, so nothing is trimmed this pass.
+		summary.Bytes = getDirAllocatedBytes(root)
+		summary.Active = true
+		summary.Reason = displayName + " kept: " + why
+		return finish(nil)
+	}
 	var units []devCacheUnit
 	var total int64
 	var heldNotes []string
@@ -109,27 +120,13 @@ func devCacheTrimTargets(ctx context.Context, root, targetType, displayName stri
 		if err != nil {
 			continue
 		}
-		held := activity.blockers(path)
+		total += devCacheAllocated(info)
 		if !info.IsDir() {
-			total += devCacheAllocated(info)
-			if len(held) > 0 && info.Mode().IsRegular() {
-				// The cache's own lock file is open: the tool is running in
-				// this cache, so nothing is trimmed this pass.
-				summary.Bytes = getDirAllocatedBytes(root)
-				summary.Active = true
-				summary.Reason = fmt.Sprintf("%s kept: %s is open (%s)", displayName, e.Name(), held[0])
-				return finish(nil)
-			}
 			continue // files and links at the top are never units
 		}
-		if len(held) == 0 {
-			u := devCacheMeasure(ctx, path, pol.now)
-			units = append(units, u)
-			total += u.bytes
-			continue
+		if held := activity.blockers(path); len(held) > 0 {
+			heldNotes = append(heldNotes, e.Name()+": "+held[0])
 		}
-		heldNotes = append(heldNotes, e.Name()+": "+held[0])
-		total += devCacheAllocated(info)
 		children, err := os.ReadDir(path)
 		if err != nil {
 			total += getDirAllocatedBytes(path)
@@ -224,6 +221,26 @@ func devCacheTrimTargets(ctx context.Context, root, targetType, displayName stri
 	return finish(targets)
 }
 
+// devCacheLockHolder names a regular file at the top of root that a live
+// process holds, such as uv's .lock while uv runs; "" when there is none.
+func devCacheLockHolder(root string, activity *bbActivity) string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		path := filepath.Join(root, e.Name())
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if held := activity.blockers(path); len(held) > 0 {
+			return fmt.Sprintf("%s is open (%s)", e.Name(), held[0])
+		}
+	}
+	return ""
+}
+
 // devCacheMeasure walks one unit: allocated bytes and its newest mtime or
 // ctime. A walk error keeps the time at now, so the unit is never chosen.
 func devCacheMeasure(ctx context.Context, path string, now time.Time) devCacheUnit {
@@ -280,10 +297,13 @@ func devCacheGiB(b int64) string {
 
 // devCacheTrimApply removes the delete targets that devCacheTrimTargets
 // chose, each after a fresh check: the same file, no holder in an inventory
-// at most retentionActivityMaxAge old, and a complete inventory.
+// at most retentionActivityMaxAge old, a complete inventory, and no held
+// lock file at the top of the unit's root. A unit is a second-level entry,
+// so its root is two directories up.
 func devCacheTrimApply(ctx context.Context, targets []CleanupTarget, scan func() *bbActivity, remove func(string) error, clock func() time.Time, logger *slog.Logger) (freed int64, items int, err error) {
 	var fresh *bbActivity
 	var freshAt time.Time
+	var locks map[string]string
 	for _, t := range targets {
 		if !strings.HasSuffix(t.Type, devCacheEntrySuffix) || t.Action != "delete" || t.Path == "" {
 			continue
@@ -294,9 +314,20 @@ func devCacheTrimApply(ctx context.Context, targets []CleanupTarget, scan func()
 		if fresh == nil || clock().Sub(freshAt) > retentionActivityMaxAge {
 			fresh = scan()
 			freshAt = clock()
+			locks = map[string]string{}
 		}
 		if why := fresh.complete(); why != "" {
 			logger.Info("developer cache entry kept at removal time", "path", t.Path, "reason", why)
+			continue
+		}
+		root := filepath.Dir(filepath.Dir(t.Path))
+		lock, seen := locks[root]
+		if !seen {
+			lock = devCacheLockHolder(root, fresh)
+			locks[root] = lock
+		}
+		if lock != "" {
+			logger.Info("developer cache entry kept at removal time", "path", t.Path, "reason", lock)
 			continue
 		}
 		if held := fresh.blockers(t.Path); len(held) > 0 {
@@ -347,12 +378,7 @@ var devCacheFamilies = []devCacheFamily{
 func devCacheConfiguredRoots(cfg config.DarwinDevCachesConfig, home, user string) ([]string, map[string]devCacheFamily) {
 	var roots []string
 	fam := map[string]devCacheFamily{}
-	if user == "" {
-		// The Darwin agent runs under env -i, so USER can be empty.
-		if u, err := osuser.Current(); err == nil {
-			user = u.Username
-		}
-	}
+	user = devCacheUserName(user)
 	for _, f := range devCacheFamilies {
 		tool := f.cfg(cfg)
 		if !tool.Enabled {
@@ -374,6 +400,17 @@ func devCacheConfiguredRoots(cfg config.DarwinDevCachesConfig, home, user string
 		}
 	}
 	return roots, fam
+}
+
+// devCacheUserName returns user, or the current user's name when user is
+// empty: the Darwin agent runs under env -i, so USER can be unset.
+func devCacheUserName(user string) string {
+	if user == "" {
+		if u, err := osuser.Current(); err == nil {
+			return u.Username
+		}
+	}
+	return user
 }
 
 // devCacheActivityOptions is the inventory a trim takes: one lsof listing

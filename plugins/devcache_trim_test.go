@@ -76,10 +76,10 @@ func devCacheActivity(held map[string]string, incomplete string) *bbActivity {
 
 func TestDevCacheTrimOldestUnheldFirstDownToBudget(t *testing.T) {
 	f := newDevCacheFixture(t)
-	f.unit("old", 64<<10, 10*time.Hour)
-	f.unit("mid", 64<<10, 20*time.Hour)
-	f.unit("new", 64<<10, 30*time.Hour)
-	// The three units hold about 192 KiB; a 100 KiB budget needs two to go.
+	f.unit("archive-v0/old", 64<<10, 10*time.Hour)
+	f.unit("archive-v0/mid", 64<<10, 20*time.Hour)
+	f.unit("archive-v0/new", 64<<10, 30*time.Hour)
+	// The three units hold about 200 KiB; a 100 KiB budget needs two to go.
 	ts := devCacheTrimTargets(context.Background(), f.root, "uv-cache", "uv cache", f.pol(100<<10), devCacheActivity(nil, ""))
 	got := devCacheChosen(ts)
 	if strings.Join(got, ",") != "old,mid" {
@@ -99,15 +99,62 @@ func TestDevCacheTrimHeldTopLevelDirOffersItsUnheldChildren(t *testing.T) {
 	f := newDevCacheFixture(t)
 	live := f.unit("archive-v0/live", 64<<10, 5*time.Hour)
 	f.unit("archive-v0/idle", 64<<10, 6*time.Hour)
-	f.unit("wheels-v5", 64<<10, 7*time.Hour)
+	f.unit("wheels-v5/pypi", 64<<10, 7*time.Hour)
 	held := map[string]string{filepath.Join(live, "payload"): "pid 42 maps payload"}
 	ts := devCacheTrimTargets(context.Background(), f.root, "uv-cache", "uv cache", f.pol(1), devCacheActivity(held, ""))
 	got := devCacheChosen(ts)
-	if strings.Join(got, ",") != "idle,wheels-v5" {
-		t.Fatalf("chosen = %v, want idle,wheels-v5 (live and the archive-v0 root kept)", got)
+	if strings.Join(got, ",") != "idle,pypi" {
+		t.Fatalf("chosen = %v, want idle,pypi (live and the archive-v0 root kept)", got)
 	}
 	if !ts[0].Active || !strings.Contains(ts[0].Reason, "archive-v0") {
 		t.Fatalf("summary should name the held bucket: %+v", ts[0])
+	}
+}
+
+// TestDevCacheTrimUnheldBucketIsTrimmedEntryByEntry is uv's layout on
+// petting-zoo-mini: an archive-v0 bucket that no process holds, most of it
+// old and one archive written within the hour. The old archives go oldest
+// first only down to max_gb, the fresh one stays, and the bucket is never
+// one unit (review M1 on tinyland-cleanup#184).
+func TestDevCacheTrimUnheldBucketIsTrimmedEntryByEntry(t *testing.T) {
+	f := newDevCacheFixture(t)
+	var order []string
+	for i := 1; i <= 9; i++ {
+		name := "old" + string(rune('0'+i))
+		f.unit(filepath.Join("archive-v0", name), 16<<10, time.Duration(i)*time.Hour)
+		order = append(order, name)
+	}
+	f.unit("archive-v0/fresh", 16<<10, 99*time.Hour+30*time.Minute)
+	const budget = 100 << 10
+	ts := devCacheTrimTargets(context.Background(), f.root, "uv-cache", "uv cache", f.pol(budget), devCacheActivity(nil, ""))
+	got := devCacheChosen(ts)
+	if len(got) == 0 || len(got) >= 9 {
+		t.Fatalf("chosen = %v, want a partial trim of the old archives", got)
+	}
+	if strings.Join(got, ",") != strings.Join(order[:len(got)], ",") {
+		t.Fatalf("chosen = %v, want the oldest first %v", got, order[:len(got)])
+	}
+	for _, tt := range ts[1:] {
+		if filepath.Base(tt.Path) == "archive-v0" || filepath.Base(tt.Path) == "fresh" {
+			t.Fatalf("target %s: the bucket and the fresh archive must stay", tt.Path)
+		}
+	}
+	if ts[0].Bytes > budget {
+		t.Fatalf("kept %d bytes, want at or under the %d byte budget", ts[0].Bytes, budget)
+	}
+
+	// The same bucket with every archive old: still trimmed one archive at a
+	// time, never chosen whole.
+	f = newDevCacheFixture(t)
+	for i := 1; i <= 10; i++ {
+		f.unit(filepath.Join("archive-v0", "old"+string(rune('a'+i))), 16<<10, time.Duration(i)*time.Hour)
+	}
+	ts = devCacheTrimTargets(context.Background(), f.root, "uv-cache", "uv cache", f.pol(budget), devCacheActivity(nil, ""))
+	if got := devCacheChosen(ts); len(got) == 0 || len(got) >= 10 {
+		t.Fatalf("all-old bucket: chosen = %v, want a partial trim", got)
+	}
+	if ts[0].Bytes > budget || ts[0].Bytes == 0 {
+		t.Fatalf("all-old bucket: kept %d bytes, want above zero and at or under %d", ts[0].Bytes, budget)
 	}
 }
 
@@ -130,7 +177,7 @@ func TestDevCacheTrimHeldLockFileKeepsTheRoot(t *testing.T) {
 
 func TestDevCacheTrimIncompleteInventoryKeepsEverything(t *testing.T) {
 	f := newDevCacheFixture(t)
-	f.unit("a", 64<<10, 5*time.Hour)
+	f.unit("archive-v0/a", 64<<10, 5*time.Hour)
 	ts := devCacheTrimTargets(context.Background(), f.root, "uv-cache", "uv cache", f.pol(1), devCacheActivity(nil, "lsof listing timed out"))
 	if len(ts) != 1 || !strings.Contains(ts[0].Reason, "activity inventory incomplete") {
 		t.Fatalf("targets = %+v, want only the kept summary", ts)
@@ -139,8 +186,8 @@ func TestDevCacheTrimIncompleteInventoryKeepsEverything(t *testing.T) {
 
 func TestDevCacheTrimNeverTakesAFreshUnitOrActsBelowModerate(t *testing.T) {
 	f := newDevCacheFixture(t)
-	f.unit("old", 64<<10, 10*time.Hour)
-	f.unit("fresh", 64<<10, 99*time.Hour+30*time.Minute)
+	f.unit("archive-v0/old", 64<<10, 10*time.Hour)
+	f.unit("archive-v0/fresh", 64<<10, 99*time.Hour+30*time.Minute)
 	ts := devCacheTrimTargets(context.Background(), f.root, "uv-cache", "uv cache", f.pol(1), devCacheActivity(nil, ""))
 	if got := devCacheChosen(ts); strings.Join(got, ",") != "old" {
 		t.Fatalf("chosen = %v, want old only (fresh is inside devCacheTrimMinAge)", got)
@@ -155,8 +202,8 @@ func TestDevCacheTrimNeverTakesAFreshUnitOrActsBelowModerate(t *testing.T) {
 
 func TestDevCacheTrimStaleEntriesGoUnderBudgetAndReviewWithoutEnforce(t *testing.T) {
 	f := newDevCacheFixture(t)
-	f.unit("ancient", 4<<10, 1*time.Hour)
-	f.unit("recent", 4<<10, 90*time.Hour)
+	f.unit("archive-v0/ancient", 4<<10, 1*time.Hour)
+	f.unit("archive-v0/recent", 4<<10, 90*time.Hour)
 	pol := f.pol(0)
 	pol.staleAfter = 2 * 24 * time.Hour
 	pol.enforce = false
@@ -172,8 +219,8 @@ func TestDevCacheTrimStaleEntriesGoUnderBudgetAndReviewWithoutEnforce(t *testing
 
 func TestDevCacheTrimApplyRechecksEveryEntry(t *testing.T) {
 	f := newDevCacheFixture(t)
-	a := f.unit("a", 4<<10, 1*time.Hour)
-	b := f.unit("b", 4<<10, 2*time.Hour)
+	a := f.unit("archive-v0/a", 4<<10, 1*time.Hour)
+	b := f.unit("archive-v0/b", 4<<10, 2*time.Hour)
 	ts := devCacheTrimTargets(context.Background(), f.root, "uv-cache", "uv cache", f.pol(1), devCacheActivity(nil, ""))
 	if len(devCacheChosen(ts)) != 2 {
 		t.Fatalf("setup: chosen = %v", devCacheChosen(ts))
@@ -196,6 +243,15 @@ func TestDevCacheTrimApplyRechecksEveryEntry(t *testing.T) {
 	if _, items, _ := devCacheTrimApply(context.Background(), ts, incomplete, remove, time.Now, retDiscard()); items != 0 || len(removed) != 0 {
 		t.Fatalf("an incomplete inventory at removal time must remove nothing, removed %v", removed)
 	}
+	// uv started between plan and removal: its .lock at the root is open.
+	lock := filepath.Join(f.root, ".lock")
+	if err := os.WriteFile(lock, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	locked := func() *bbActivity { return devCacheActivity(map[string]string{lock: "pid 11 holds .lock"}, "") }
+	if _, items, _ := devCacheTrimApply(context.Background(), ts, locked, remove, time.Now, retDiscard()); items != 0 || len(removed) != 0 {
+		t.Fatalf("a held lock file at removal time must remove nothing, removed %v", removed)
+	}
 }
 
 func TestConfiguredDevCacheTargetsInertWithoutPaths(t *testing.T) {
@@ -207,7 +263,7 @@ func TestConfiguredDevCacheTargetsInertWithoutPaths(t *testing.T) {
 		t.Fatalf("no paths key: targets %v, inventory taken %t; want none and no inventory", ts, called)
 	}
 	f := newDevCacheFixture(t)
-	f.unit("a", 4<<10, 1*time.Hour)
+	f.unit("archive-v0/a", 4<<10, 1*time.Hour)
 	cfg.UV.Paths = []string{f.root, filepath.Join(t.TempDir(), "missing")}
 	cfg.UV.MaxGB = 0
 	cfg.UV.StaleAfterDays = 1
