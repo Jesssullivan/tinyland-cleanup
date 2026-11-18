@@ -1,6 +1,37 @@
 # Validation status
 
-Updated: 2026-11-17
+Updated: 2026-11-18
+
+## v0.5.2 (TIN-5770)
+
+- **Scope:** #183 (6e23bafb) and #184 (d7aaf4d0), the two changes on main
+  since v0.5.1. #183 changes tests only. #184 adds
+  `darwin_dev_caches.<family>.paths`, `retention.tmp_agents.pressure` and
+  the edge-only logging and state record of `retention.free_space_floor`.
+- **Validated on Linux** (sting, x86_64, go 1.23.8) by the authors and the
+  merge-gating reviews, with named tests only. For #183, review GO at
+  81778aae: all 50 top-level tests in the podman by-use and Bazel
+  repository contents test files passed (86 RUN, 86 PASS, 0 SKIP).
+  `go test -list` gave 551 plugin tests on main and 553 on the head, so
+  nothing skips on Linux. For #184, review GO at 34dd76ec:
+  `go test -run '^(TestDevCache|TestConfiguredDevCache|TestDarwinDevCache|TestRetention)' ./plugins`
+  (46 PASS) and `TestRecordFloorsWritesReportAndStateOnEdges` in the root
+  package passed. Five mutation runs against reverted fixes each failed as
+  expected. gofmt was clean, and a Darwin arm64 `go vet` and test-binary
+  compile ran on Linux.
+- **Validated on Darwin** by Nix builds on one host, petting-zoo-mini, on
+  2026-11-18. Each built the flake package and ran its whole test suite in
+  the Nix sandbox: all five Go packages `ok`. The first build was at
+  6e23bafb. The second was at b8044b65, the #184 head, whose tree is the
+  tree of main at d7aaf4d0. Nothing was activated.
+- **The release commit** changes only the version strings, this file and
+  the changelog. It was checked by grepping the version strings and a
+  `go build` of the module on sting.
+- **Not validated:** CI, the Bazel build and test graph and the release
+  workflow. No runner serves this repository. No full `go test ./...` on
+  Linux at d7aaf4d0 is on record. No host has run `paths`, the pressure
+  pass or the new floor record, in dry run or apply mode. No host has run
+  0.5.2.
 
 ## v0.5.1 (TIN-8526)
 
