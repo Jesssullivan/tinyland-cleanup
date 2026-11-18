@@ -69,7 +69,8 @@ func bbScanActivity(ctx context.Context, opts bbActivityOptions) *bbActivity {
 		if err == nil {
 			cmdline = strings.Join(argv, " ")
 		}
-		a.procs = append(a.procs, bbProc{pid: pid, cmdline: cmdline})
+		start := time.Unix(int64(kp.Proc.P_starttime.Sec), int64(kp.Proc.P_starttime.Usec)*1000)
+		a.procs = append(a.procs, bbProc{pid: pid, cmdline: cmdline, start: start})
 		if len(opts.EnvVars) > 0 && err == nil {
 			if env, eerr := darwinProcessEnv(pid); eerr == nil {
 				bbIndexEnviron(a, pid, env, opts)

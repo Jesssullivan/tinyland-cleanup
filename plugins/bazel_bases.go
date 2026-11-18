@@ -137,6 +137,9 @@ type bbActivityOptions struct {
 	// so a lane sets this only after reading whether its roots could contain
 	// one. Linux only: Darwin reads no /proc.
 	SkipSSHDSessions bool
+	// StartTimes records each process's start time (Linux reads
+	// /proc/<pid>/stat for it; Darwin has it from the process list anyway).
+	StartTimes bool
 }
 
 // bbHeldLock is Bazel's output-base lock while the reaper holds it.
@@ -164,6 +167,8 @@ type bbActivity struct {
 type bbProc struct {
 	pid     int
 	cmdline string
+	// start is when the process started; zero when unknown.
+	start time.Time
 }
 
 func newBBActivity() *bbActivity {

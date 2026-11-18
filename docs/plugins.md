@@ -195,7 +195,8 @@ throttled by `retention.interval` (default 1h); `--dry-run` always plans.
 |---|---|---|
 | `tmp_agents` | Top-level directories of `roots` matching `name_globs` (default `nix-shell.*`) whose newest mtime or ctime inside is older than `max_age` (24h) | report only (`delete: false`) |
 | `cargo_targets` | Cargo target or build-dir trees (`CACHEDIR.TAG` or `.rustc_info.json`) under `roots` (default `/srv/cache/{user}/cargo/build`, `max_depth` 3) whose newest change is older than `max_age` (7d); the whole rule waits while any `cargo` or `rustc` process runs | report only (`delete: false`) |
-| `free_space_floor` | Nothing: an `ALERT free-space floor` line for every volume under `floor_gib` (10). Checks `paths` (`/`, and `/System/Volumes/Data` on Darwin), every `monitored_mounts` path and every retention root | alert |
+| `tmp_agents.pressure` | Off by default. While the volume holding a `tmp_agents` root is at or over `used_percent`, or under the free-space floor, unheld top-level entries whose newest change is older than its own `max_age` (6h, floor 1h), oldest first, until the volume is under `stop_percent` and over the floor. See [Pressure pass](#pressure-pass) | report only (`delete: false`) |
+| `free_space_floor` | Nothing by itself. A volume under `floor_gib` (10) is logged once when the breach starts and once when it ends, and its state goes to the cycle report (`free_space_floors`) and the state file (`floors`). Checks `paths` (`/`, and `/System/Volumes/Data` on Darwin), every `monitored_mounts` path and every retention root. With `tmp_agents.pressure` on, a breach on a root's volume runs the pressure pass at once | alert |
 | `darwin_leftovers` | Nothing: sizes of Fusion webdeploy builds under `fusion_webdeploy_root` that are not the target of its `Autodesk Fusion.app` symlink, and of each `report_paths` entry (the Claude desktop `vm_bundles`) | report only, no delete rule |
 
 A tree is kept when any of these hold, and every check runs again
@@ -225,6 +226,50 @@ Sizes are allocated blocks, so a sparse file counts what it occupies; the
 apparent size is in `logical_bytes`. Plan metadata carries per-rule
 `eligible_count`, `eligible_bytes`, `eligible_logical_bytes`, `live_count`,
 `kept_count` and the floor reading of every volume.
+
+#### Pressure pass
+
+`retention.tmp_agents.pressure` (A-084 for sting, A-095 for petting-zoo-mini,
+TIN-5770) acts on fill, not on age alone. On November 18, 2026 PZM's `/nix`
+reached 19 MiB free while its temp root held 28 test trees of about 20 GiB,
+all younger than the 24 hour `tmp_agents` age.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | false | Turns the pass on. |
+| `used_percent` | 90 | The pass removes only while statfs on the root reads at least this used share. |
+| `stop_percent` | 0 (`used_percent`) | statfs is read again after each removal; the pass stops once the volume is under this and over the floor. |
+| `interval` | 15m (floor 1m) | Least time between passes on one root. statfs is read every cycle, and a floor breach runs a pass at once. |
+| `max_age` | 6h (floor 1h) | An entry is eligible when nothing inside changed (mtime or ctime) within this. |
+| `all_names` | false | Every top-level entry is a candidate, not only `name_globs`. Refused on `/` and the home directory; a root under `dev_artifacts.protect_paths` is skipped. |
+| `include_files` | false | Top-level regular files are candidates too. Links, sockets, FIFOs and devices never are. |
+| `exclude_globs` | empty | Top-level names that are never candidates. |
+| `keep_if_contains` | empty | An entry holding a file with a matching name, anywhere inside the walk bound, is kept. `.tinyland-keep` always keeps. |
+| `socket_listener_holds` | false | A listening unix socket bound inside an entry holds it (Linux reads `/proc/net/unix`; on Darwin the `lsof` listing already names bound socket paths). |
+| `delete` | false | Removes eligible entries. False reports only. |
+
+Every `tmp_agents` guard above applies, and these keep an entry too:
+
+- `NIX_BUILD_TOP` in a live process's exec-time environment pointing inside,
+  beside `TMPDIR`, `TMP`, `TEMP` and `TEMPDIR`;
+- a Nix GC root in `/nix/var/nix/gcroots/auto` that points inside it, read
+  once per pass. An unreadable roots directory keeps every entry;
+- a `nix-shell.*` directory that may be the temp tree of a live interactive
+  `nix develop` shell. That shell runs as `bash --rcfile <root>/nix-shell.XXXXXX`
+  and exports its `TMPDIR` only inside itself, so no inventory can read the
+  value. The pass keeps every `nix-shell.*` entry made after the earliest
+  such shell under the root started (one minute of slack), and every one when
+  a shell's start time is unknown.
+
+The walk stops at the first entry newer than `max_age`, so a young tree costs
+a partial walk, and `max_dirs_per_cycle` counts walked entries only. Each
+removal is checked again with an inventory at most 30 seconds old.
+
+What the pass cannot see: an idle shell or tool whose temp directory was set
+after it started (other than the `nix develop` case above) and that holds no
+file open there; a process of another user; a tree a person keeps without a
+`.tinyland-keep` marker. `max_age` is that margin: under pressure, an entry
+untouched for `max_age` is taken to be done.
 
 `dev_artifacts.nix_temp_roots` reaps stale Nix temp roots at aggressive or
 critical level, judged by the root's own mtime, cwd/fd holders, the newest

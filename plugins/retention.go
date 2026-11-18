@@ -86,9 +86,20 @@ type RetentionPlugin struct {
 	user      string
 	tmpdir    string
 	goos      string
+	// gcrootsDir replaces /nix/var/nix/gcroots/auto and socketTable
+	// replaces /proc/net/unix in tests.
+	gcrootsDir  string
+	socketTable string
+	// device replaces retentionDevice (a root's device id) in tests.
+	device func(path string) (uint64, error)
 
 	mu      sync.Mutex
 	lastRun time.Time
+
+	// fmu guards the floor tracking and the pressure pass times.
+	fmu          sync.Mutex
+	floors       map[string]*retentionFloorTrack
+	pressureLast map[string]time.Time
 }
 
 // NewRetentionPlugin creates the retention plugin with the host environment.
@@ -182,6 +193,13 @@ type retentionPass struct {
 	warnings   []string
 	alerts     []string
 	metadata   map[string]string
+	// floors are the free-space floor readings: path, free bytes, floor.
+	floors []retentionFloorReading
+}
+
+type retentionFloorReading struct {
+	path        string
+	free, floor uint64
 }
 
 func (p *RetentionPlugin) activityOptions(cfg *config.Config, roots []string) bbActivityOptions {
@@ -663,6 +681,7 @@ func (p *RetentionPlugin) evaluateFloors(cfg *config.Config, roots []string, pas
 		}
 		free := u.BytesTotal - u.BytesUsed
 		below := free < floor
+		pass.floors = append(pass.floors, retentionFloorReading{path: path, free: free, floor: floor})
 		pass.metadata["free_space_floor."+path] = fmt.Sprintf("free_bytes=%d total_bytes=%d below_floor=%t", free, u.BytesTotal, below)
 		if below {
 			pass.alerts = append(pass.alerts, fmt.Sprintf("ALERT free-space floor: %s has %.1f GiB free, below the %.0f GiB floor", path, float64(free)/(1<<30), fc.FloorGiB))
@@ -788,6 +807,21 @@ func (p *RetentionPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, c
 	plan.Targets = append(plan.Targets, pass.reports...)
 	plan.Warnings = append(append([]string{}, pass.alerts...), pass.warnings...)
 	plan.WouldRun = rc.TmpAgents.Delete || rc.CargoTargets.Delete
+	if rc.TmpAgents.Enabled && rc.TmpAgents.Pressure.Enabled {
+		pr := p.pressureCycle(ctx, cfg, false, logger)
+		for _, t := range pr.targets {
+			plan.Targets = append(plan.Targets, t)
+			if t.Action == "delete" {
+				plan.EstimatedBytesFreed += t.Bytes
+			}
+		}
+		plan.Warnings = append(plan.Warnings, pr.warnings...)
+		for k, v := range pr.metadata {
+			pass.metadata[k] = v
+		}
+		plan.WouldRun = plan.WouldRun || rc.TmpAgents.Pressure.Delete
+		pass.metadata["tmp_agents.pressure.delete"] = strconv.FormatBool(rc.TmpAgents.Pressure.Delete)
+	}
 	if !plan.WouldRun {
 		plan.SkipReason = "retention deleting rules are report-only (no delete flag set)"
 	}
@@ -814,13 +848,31 @@ func (p *RetentionPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, c
 // without the flag log what they would remove and remove nothing.
 func (p *RetentionPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config.Config, logger *slog.Logger) CleanupResult {
 	result := CleanupResult{Plugin: p.Name(), Level: level}
+	var floorNoted map[string]bool
+	// The pressure pass reads statfs on its roots every cycle and acts on
+	// its own interval, or at once on a free-space floor breach (TIN-5770).
+	if rc := cfg.Retention.TmpAgents; rc.Enabled && rc.Pressure.Enabled {
+		pr := p.pressureCycle(ctx, cfg, true, logger)
+		floorNoted = pr.floorNoted
+		for _, w := range pr.warnings {
+			logger.Warn("retention", "warning", w)
+		}
+		result.BytesFreed += pr.freed
+		result.EstimatedBytesFreed += pr.freed
+		result.ItemsCleaned += pr.items
+	}
 	if !p.due(cfg) {
 		logger.Debug("retention pass not due", "interval", cfg.Retention.Interval)
 		return result
 	}
 	pass := p.evaluate(ctx, cfg)
-	for _, a := range pass.alerts {
-		logger.Warn("retention free-space floor", "alert", a)
+	// A floor breach is logged when it starts and when it ends, not every
+	// pass; FloorStatuses carries the state to the report and state file.
+	for _, f := range pass.floors {
+		if floorNoted[f.path] {
+			continue // the pressure pass recorded this read this cycle
+		}
+		p.noteFloor(f.path, f.free, f.floor, logger)
 	}
 	for _, w := range pass.warnings {
 		logger.Warn("retention", "warning", w)

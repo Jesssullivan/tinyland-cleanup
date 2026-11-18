@@ -586,6 +586,12 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 				d.runLevelIndependentPlugin(ctx, &report, p, plugins.LevelNone)
 			}
 		}
+		if d.recordFloors(&report, state, stateErr) {
+			if err := saveCleanupState(report.StateFile, state); err != nil {
+				report.StateError = err.Error()
+				d.logger.Warn("failed to save cleanup state", "path", report.StateFile, "error", err)
+			}
+		}
 		return report, nil
 	}
 
@@ -889,6 +895,10 @@ func (d *daemon) runCycle(ctx context.Context, forcedLevel monitor.CleanupLevel)
 		stateDirty = true
 	}
 
+	if d.recordFloors(&report, state, stateErr) {
+		stateDirty = true
+	}
+
 	if stateDirty {
 		if err := saveCleanupState(report.StateFile, state); err != nil {
 			report.StateError = err.Error()
@@ -1008,10 +1018,13 @@ type cycleReport struct {
 	// StalledMounts lists the monitored mounts that have stayed at the
 	// critical level for at least policy.stalled_alert_cycles consecutive
 	// cycles while every plugin together reclaimed nothing (TIN-5770).
-	StalledMounts []stalledMount      `json:"stalled_mounts,omitempty"`
-	Mounts        []mountReport       `json:"mounts"`
-	PluginFilter  []string            `json:"plugin_filter,omitempty"`
-	Plugins       []pluginCycleReport `json:"plugins"`
+	StalledMounts []stalledMount `json:"stalled_mounts,omitempty"`
+	// FreeSpaceFloors is every tracked volume's free-space floor state this
+	// cycle (retention.free_space_floor, TIN-5770).
+	FreeSpaceFloors []plugins.FloorStatus `json:"free_space_floors,omitempty"`
+	Mounts          []mountReport         `json:"mounts"`
+	PluginFilter    []string              `json:"plugin_filter,omitempty"`
+	Plugins         []pluginCycleReport   `json:"plugins"`
 }
 
 // anyPluginRan reports whether any plugin, ladder or level-independent, ran.

@@ -462,6 +462,22 @@ retention:
     # no linked work trees is a test fixture and goes with its stale tree
     # (TIN-7495 ruling 2026-10-29). Empty keeps every .git.
     fixture_repo_parents: ["pytest-of-*"]
+    # Fill-gated pass (A-084, A-095, TIN-5770). Off by default. statfs on
+    # each root is read every cycle; at or over used_percent, or under
+    # free_space_floor, unheld entries go oldest first until the volume is
+    # under stop_percent and over the floor.
+    pressure:
+      enabled: false
+      used_percent: 90
+      stop_percent: 0     # 0 means used_percent
+      interval: 15m       # least time between passes on a root (floor 1m); a floor breach runs at once
+      max_age: 6h         # floor 1h
+      all_names: false    # every top-level entry, not only name_globs
+      include_files: false
+      exclude_globs: []
+      keep_if_contains: []  # .tinyland-keep always keeps
+      socket_listener_holds: false
+      delete: false
   cargo_targets:
     enabled: true
     roots: ["/srv/cache/{user}/cargo/build"]
@@ -470,6 +486,9 @@ retention:
     delete: false
     busy_processes: [cargo, rustc]
     max_entries_per_target: 2000000
+  # A breach is logged when it starts and when it ends, and is written to the
+  # cycle report and the state file. With tmp_agents.pressure on, a breach on
+  # a tmp_agents root runs the pressure pass at once.
   free_space_floor:
     enabled: true
     floor_gib: 10
@@ -615,6 +634,15 @@ darwin_dev_caches:
   uv:
     enabled: true
     stale_after_days: 14
+    # paths names a relocated cache root (UV_CACHE_DIR or XDG_CACHE_HOME), for
+    # example /nix/var/tinyland/user/nix-client-cache/uv. A listed root is
+    # trimmed entry by entry at moderate pressure or above: unheld top-level
+    # entries go oldest first, stale ones first, then down to max_gb. A live
+    # process with an open file, cwd or executable under an entry keeps it,
+    # and the root is never removed whole. pip, npm, bun and opencode take
+    # the same key. Empty keeps the compiled paths and their rule.
+    # paths: []
+    # max_gb: 15
   bun:
     enabled: true
     stale_after_days: 14
