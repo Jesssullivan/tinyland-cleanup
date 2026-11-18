@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -104,6 +105,23 @@ func newRepoContentsFixture(t *testing.T) repoContentsFixture {
 	return f
 }
 
+// repoContentsNeedsLinuxLocks skips the rest of a test that needs
+// bazelGCLockTry to take a free gc_lock. It takes flock(2) and then a POSIX
+// record lock on the same file. Linux keeps the two kinds apart. Darwin's
+// kernel keeps both on one list per vnode with different owners (the open
+// file for flock, the process for the record lock; xnu bsd/kern/kern_lockf.c
+// lf_getblock, bsd/kern/kern_descrip.c sys_flock), so the record lock always
+// conflicts with the flock taken just before it and the gc_lock reads as held.
+// Off Linux the plan of an existing gc_lock keeps every copy and apply
+// removes nothing. Nothing on Linux checks this reading; the Darwin package
+// build is its first run.
+func repoContentsNeedsLinuxLocks(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skipf("the gc_lock pair (flock then a POSIX record lock) is taken only on Linux; on %s the two conflict and the lock reads as held", runtime.GOOS)
+	}
+}
+
 func repoContentsTestConfig(root string, keep int) *config.Config {
 	cfg := config.DefaultConfig()
 	cfg.Bazel.Roots = []string{root}
@@ -168,6 +186,7 @@ func TestBazelRepoContentsPlanKeepsReferencedNewestRecentAndOpenCopies(t *testin
 		}
 	}
 
+	repoContentsNeedsLinuxLocks(t)
 	var result CleanupResult
 	p.applyBazelRepoContents(context.Background(), cfg, targets, state.repoCaches, state.outputBases, slog.New(slog.NewTextHandler(io.Discard, nil)), &result)
 	for _, label := range []string{"ref", "new1", "new2", "recent", "held"} {
@@ -533,6 +552,7 @@ func TestBazelRepoContentsSkipsWhileGCLockIsHeldExclusively(t *testing.T) {
 	if len(targets) != 1 || targets[0].Action != "keep" || !strings.HasPrefix(targets[0].Reason, "bazel active (gc_lock)") {
 		t.Fatalf("targets = %#v, want kept with bazel active (gc_lock)", targets)
 	}
+	repoContentsNeedsLinuxLocks(t)
 	// A lock taken after planning stops apply too.
 	_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	targets, _, state = planRepoContentsFixture(t, p, f, cfg, LevelCritical)
@@ -586,6 +606,7 @@ func gcLockFree(t *testing.T, contentsDir string) bool {
 }
 
 func TestBazelRepoContentsHoldsGCLockOnlyForRenames(t *testing.T) {
+	repoContentsNeedsLinuxLocks(t)
 	f := newRepoContentsFixture(t)
 	cfg := repoContentsTestConfig(f.root, 1)
 	var renamedLocked, removedFree, renames, removes int
@@ -629,6 +650,7 @@ func TestBazelRepoContentsHoldsGCLockOnlyForRenames(t *testing.T) {
 }
 
 func TestBazelRepoContentsRecoversTrashAfterCrash(t *testing.T) {
+	repoContentsNeedsLinuxLocks(t)
 	f := newRepoContentsFixture(t)
 	cfg := repoContentsTestConfig(f.root, 1)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -681,6 +703,7 @@ func TestBazelRepoContentsRecoversTrashAfterCrash(t *testing.T) {
 }
 
 func TestBazelRepoContentsBoundsEachLockHoldToABatch(t *testing.T) {
+	repoContentsNeedsLinuxLocks(t)
 	f := newRepoContentsFixture(t)
 	old := time.Now().Add(-30 * 24 * time.Hour)
 	for i := 0; i < 12; i++ {
