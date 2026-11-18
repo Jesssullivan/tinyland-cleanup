@@ -926,6 +926,7 @@ func (p *CachePlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *
 	home, _ := os.UserHomeDir()
 	activeProcesses := darwinActiveProcessNames(ctx)
 	targets := p.darwinDeveloperCacheTargets(home, cfg.DarwinDevCaches, activeProcesses, level)
+	targets = append(targets, darwinConfiguredCacheTargets(ctx, home, cfg.DarwinDevCaches, level)...)
 	sort.Slice(targets, func(i, j int) bool {
 		if targets[i].Bytes == targets[j].Bytes {
 			return targets[i].Path < targets[j].Path
@@ -1279,8 +1280,8 @@ func (p *CachePlugin) darwinDeveloperCacheTargets(home string, cfg config.Darwin
 func (p *CachePlugin) darwinDirectoryCacheTargets(home string, cfg config.DarwinDevCacheToolConfig, level CleanupLevel, enforce bool, targetType string, displayName string, paths []string) []CleanupTarget {
 	targets := make([]CleanupTarget, 0, len(paths))
 	for _, path := range paths {
-		if !pathExistsAndIsDir(path) {
-			continue
+		if !pathExistsAndIsDir(path) || darwinPathIsConfigured(home, cfg.Paths, path) {
+			continue // a configured root is trimmed by darwinConfiguredCacheTargets
 		}
 		stale := dirModTimeStale(path, cfg.StaleAfterDays)
 		eligible := level >= LevelCritical || (level >= LevelModerate && stale)
@@ -1300,6 +1301,26 @@ func (p *CachePlugin) darwinDirectoryCacheTargets(home string, cfg config.Darwin
 		targets = append(targets, target)
 	}
 	return targets
+}
+
+// darwinPathIsConfigured reports whether a compiled cache path is also named
+// in the family's paths key.
+func darwinPathIsConfigured(home string, configured []string, path string) bool {
+	for _, raw := range configured {
+		if filepath.Clean(config.ExpandUserPath(raw, home, os.Getenv("USER"))) == filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// darwinConfiguredCacheTargets plans the roots named in paths keys with one
+// lsof-backed activity inventory, taken only when such a root exists.
+func darwinConfiguredCacheTargets(ctx context.Context, home string, cfg config.DarwinDevCachesConfig, level CleanupLevel) []CleanupTarget {
+	lsof, _ := exec.LookPath("lsof")
+	return configuredDevCacheTargets(ctx, cfg, home, os.Getenv("USER"), level, time.Now(), func(roots []string) *bbActivity {
+		return bbScanActivity(ctx, devCacheActivityOptions(lsof, roots))
+	})
 }
 
 func darwinHomeRelativePath(home string, path string) string {
@@ -1382,6 +1403,21 @@ func (p *CachePlugin) cleanupDarwinDeveloperCacheTargets(ctx context.Context, le
 		Level:  level,
 	}
 	targets := p.darwinDeveloperCacheTargets(home, cfg, darwinActiveProcessNames(ctx), level)
+	// Configured roots (darwin_dev_caches.<family>.paths) are trimmed entry
+	// by entry, each re-checked against a fresh inventory (TIN-5770).
+	if trim := darwinConfiguredCacheTargets(ctx, home, cfg, level); len(trim) > 0 {
+		lsof, _ := exec.LookPath("lsof")
+		roots, _ := devCacheConfiguredRoots(cfg, home, os.Getenv("USER"))
+		freed, items, err := devCacheTrimApply(ctx, trim, func() *bbActivity {
+			return bbScanActivity(ctx, devCacheActivityOptions(lsof, roots))
+		}, devCacheRemove, time.Now, logger)
+		result.BytesFreed += freed
+		result.EstimatedBytesFreed += freed
+		result.ItemsCleaned += items
+		if err != nil {
+			result.Error = err
+		}
+	}
 	for _, target := range targets {
 		if target.Action != "delete" || target.Protected || target.Path == "" {
 			continue

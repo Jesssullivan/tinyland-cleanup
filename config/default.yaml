@@ -615,6 +615,15 @@ darwin_dev_caches:
   uv:
     enabled: true
     stale_after_days: 14
+    # paths names a relocated cache root (UV_CACHE_DIR or XDG_CACHE_HOME), for
+    # example /nix/var/tinyland/user/nix-client-cache/uv. A listed root is
+    # trimmed entry by entry at moderate pressure or above: unheld top-level
+    # entries go oldest first, stale ones first, then down to max_gb. A live
+    # process with an open file, cwd or executable under an entry keeps it,
+    # and the root is never removed whole. pip, npm, bun and opencode take
+    # the same key. Empty keeps the compiled paths and their rule.
+    # paths: []
+    # max_gb: 15
   bun:
     enabled: true
     stale_after_days: 14

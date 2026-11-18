@@ -1375,6 +1375,54 @@ type DarwinDevCacheToolConfig struct {
 	KeepLatestPerFamily bool `yaml:"keep_latest_per_family,omitempty"`
 	// KeepActiveVersions preserves versions with active-use evidence.
 	KeepActiveVersions bool `yaml:"keep_active_versions,omitempty"`
+	// Paths are extra cache roots for a directory family (pip, npm, uv, bun,
+	// opencode), for a host that relocated the cache, for example with
+	// UV_CACHE_DIR or XDG_CACHE_HOME (TIN-5770). "~" and "{user}" are
+	// expanded; each must be absolute and not "/". A listed root is trimmed
+	// entry by entry: at moderate pressure or above, unheld top-level entries
+	// go oldest first, stale entries first and then down to max_gb. A live
+	// process with an open file, cwd or executable under an entry keeps it,
+	// and the root is never removed in one piece. Empty (the default) keeps
+	// the compiled paths and their whole-root rule unchanged.
+	Paths []string `yaml:"paths,omitempty"`
+}
+
+// DarwinDevCachePathFamilies are the directory cache families whose paths key
+// is read. The versioned and editor families keep their compiled layout.
+var DarwinDevCachePathFamilies = []string{"pip", "npm", "uv", "bun", "opencode"}
+
+// Validate checks the paths keys: only the directory families take one, and
+// every entry is absolute (after "~") and not "/".
+func (c DarwinDevCachesConfig) Validate() error {
+	families := map[string]DarwinDevCacheToolConfig{
+		"jetbrains": c.JetBrains, "playwright": c.Playwright, "bazelisk": c.Bazelisk,
+		"vscode": c.VSCode, "cursor": c.Cursor,
+		"pip": c.Pip, "npm": c.NPM, "uv": c.UV, "bun": c.Bun, "opencode": c.OpenCode,
+	}
+	allowed := map[string]bool{}
+	for _, f := range DarwinDevCachePathFamilies {
+		allowed[f] = true
+	}
+	for name, tool := range families {
+		if len(tool.Paths) == 0 {
+			continue
+		}
+		if !allowed[name] {
+			return fmt.Errorf("darwin_dev_caches.%s.paths: only %s take a paths key", name, strings.Join(DarwinDevCachePathFamilies, ", "))
+		}
+		for _, p := range tool.Paths {
+			if p == "" || (p[0] != '~' && (!filepath.IsAbs(p) || filepath.Clean(p) == "/")) {
+				return fmt.Errorf("darwin_dev_caches.%s.paths: %q must be an absolute directory other than /", name, p)
+			}
+			if p == "~" || p == "~/" {
+				return fmt.Errorf("darwin_dev_caches.%s.paths: %q is the home directory", name, p)
+			}
+		}
+		if tool.MaxGB < 0 || tool.StaleAfterDays < 0 {
+			return fmt.Errorf("darwin_dev_caches.%s: max_gb and stale_after_days must not be negative", name)
+		}
+	}
+	return nil
 }
 
 // APFSConfig holds APFS snapshot cleanup settings (Darwin).
@@ -1804,6 +1852,11 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if config.Enable.Retention {
 		if err := config.Retention.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if config.Enable.Cache {
+		if err := config.DarwinDevCaches.Validate(); err != nil {
 			return nil, err
 		}
 	}
