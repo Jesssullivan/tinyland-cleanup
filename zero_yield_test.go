@@ -354,23 +354,31 @@ func soakRuns(t *testing.T, stats *monitor.DiskStats, poll, horizon time.Duratio
 // TestPropertyZeroYieldSoak generalises the soak over the poll interval: the
 // run count stays within the schedule's bound under pinned pressure, and once
 // suppressed the plugin is never retried sooner than the base interval.
+//
+// The input domain is every poll from 5 to 30 minutes, so the test walks all
+// of it instead of drawing four random values with testing/quick. A random
+// draw made a failure depend on which polls were picked (the Nix build of
+// 0.5.2 reported "#3: failed on input 0x38", a 9 minute poll, on two hosts
+// and passed on a rerun), and gave a failure no reproduction. Each poll is
+// its own subtest, so a failure names it.
 func TestPropertyZeroYieldSoak(t *testing.T) {
 	policy := defaultPolicyForTest()
-	property := func(pollMinutes uint8) bool {
-		poll := time.Duration(pollMinutes%26+5) * time.Minute
-		runs := soakRuns(t, bytePressureStats(25, 95), poll, 24*time.Hour)
-		if len(runs) > soakRunBound(policy, policy.pressureCap(), 24*time.Hour) || len(runs) < policy.limit {
-			return false
-		}
-		for i := policy.limit; i < len(runs); i++ {
-			if runs[i].Sub(runs[i-1]) < policy.base {
-				return false
+	for pollMinutes := 5; pollMinutes <= 30; pollMinutes++ {
+		poll := time.Duration(pollMinutes) * time.Minute
+		t.Run(poll.String(), func(t *testing.T) {
+			runs := soakRuns(t, bytePressureStats(25, 95), poll, 24*time.Hour)
+			if bound := soakRunBound(policy, policy.pressureCap(), 24*time.Hour); len(runs) > bound {
+				t.Fatalf("ran %d times in 24h at a %s poll, want at most %d: %v", len(runs), poll, bound, runs)
 			}
-		}
-		return true
-	}
-	if err := quick.Check(property, &quick.Config{MaxCount: 4}); err != nil {
-		t.Fatal(err)
+			if len(runs) < policy.limit {
+				t.Fatalf("ran %d times at a %s poll, want at least the limit %d: %v", len(runs), poll, policy.limit, runs)
+			}
+			for i := policy.limit; i < len(runs); i++ {
+				if gap := runs[i].Sub(runs[i-1]); gap < policy.base {
+					t.Fatalf("run %d came %s after the last at a %s poll, under the %s base: %v", i, gap, poll, policy.base, runs)
+				}
+			}
+		})
 	}
 }
 
