@@ -173,6 +173,13 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		}
 	}
 
+	pinTargets, pinMetadata, pinWarnings := p.planPinExpiry(cfg)
+	plan.Targets = append(plan.Targets, pinTargets...)
+	for key, value := range pinMetadata {
+		plan.Metadata[key] = value
+	}
+	plan.Warnings = append(plan.Warnings, pinWarnings...)
+
 	staleTargets, staleMetadata, staleWarnings := p.planStaleGCRoots(cfg)
 	plan.Targets = append(plan.Targets, staleTargets...)
 	for key, value := range staleMetadata {
@@ -284,6 +291,8 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		logger.Debug("Nix GC not due", "reason", why, "last_gc_attempt", st.LastGCAttempt)
 		return result
 	}
+	// Expired lane pins go before the collection they were holding off.
+	p.expirePins(cfg, logger)
 	// The hook-path pins, the serialization markers and the GC lock are
 	// safety invariants: no deferral bound bypasses them. Each deferral is
 	// still counted in the GC state, and once the run of deferrals passes
@@ -382,6 +391,8 @@ func (p *NixPlugin) busyGate(ctx context.Context, level CleanupLevel, cfg config
 		return true
 	}
 	if released, bound := nixBusyDeferralBoundAt(cfg, *st, now, level); released {
+		st.LastBesideActiveWork = now
+		st.LastBesideActiveWorkBy = bound
 		logger.Error("running Nix GC despite active Nix work: the deferral bound is reached",
 			"bound", bound,
 			"deferred_passes", st.DeferredPasses,
@@ -544,7 +555,7 @@ func (p *NixPlugin) collectGarbage(ctx context.Context, level CleanupLevel, args
 	// otherwise delete a whole host's backlog at once inside nix-daemon,
 	// outside this unit's Nice and idle IO class; the next pass continues
 	// after min_gc_interval.
-	args = append(append([]string{}, args...), nixMaxFreedArgs(cfg, logger)...)
+	args = append(append([]string{}, args...), nixMaxFreedArgsAt(cfg, level, logger)...)
 	logger.Debug("running nix-collect-garbage", "args", strings.Join(args, " "))
 	measurePath := nixHostMeasurePath(cfg)
 	before, beforeOK := p.measureFreeDiskSpace(measurePath, logger)
