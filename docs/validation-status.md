@@ -1,6 +1,32 @@
 # Validation status
 
-Updated: 2026-11-18
+Updated: 2026-11-19
+
+## v0.5.3 (TIN-5770)
+
+- **Scope:** #186 (10a34bda), the one change on main since v0.5.2. It adds
+  `nix.pin_expiry_roots` with its age, depth, per-pass and receipt keys,
+  adds `nix.critical_max_freed_per_pass`, records
+  `last_beside_active_work` in the GC state file, and makes
+  `TestPropertyZeroYieldSoak` walk all 26 polls.
+- **Validated on Linux** (sting, x86_64, go 1.26.10) by the author with
+  named tests: `go test ./config ./monitor ./rootjobs .` passed, and
+  `./plugins` passed except `TestHomeLanesStaleWorkRecheckAsksGitAgain`,
+  which depends on free space on /srv/fast-local and is unrelated to #186.
+  New tests cover expiry off without roots, old owned store-pointing links,
+  keep files, the hook-pin and profiles directories, the receipt and the
+  dry-run plan, the age and per-pass limits, glob roots, the critical cap
+  and the beside-active-work record. All 26 polls of the soak test passed
+  natively, also under `env -i HOME=/homeless-shelter`.
+- **The release commit** changes only the version strings, this file and
+  the changelog. A grep found 0.5.3 in VERSION, main.go, MODULE.bazel and
+  the BUILD.bazel x_defs, and no 0.5.2 version string there. On sting,
+  `go test . ./config` at the release commit passed (go 1.26.10).
+- **Not validated:** CI, the Bazel build and test graph and the release
+  workflow. No runner serves this repository. No Darwin build of 0.5.3 is
+  on record. The cause of the 0.5.2 soak failure is unknown: it did not
+  reproduce, and the sweep only makes the test deterministic. No host has
+  run pin expiry in apply mode, and no host has run 0.5.3.
 
 ## v0.5.2 (TIN-5770)
 

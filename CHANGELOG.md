@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-19
+
+### Upgrade notes
+
+- **Every new key in this release is inert by default (#186, TIN-5770).**
+  With `nix.pin_expiry_roots` empty and `nix.critical_max_freed_per_pass`
+  empty, no pass removes anything it did not remove in 0.5.2. The only
+  default change is the state file, which gains the beside-active-work
+  record (below).
+- **`TestPropertyZeroYieldSoak` is deterministic (#186).** It drew four
+  random polls, and the 0.5.2 Nix build failed it on two hosts on one draw.
+  It now walks all 26 polls, 5 to 30 minutes, as subtests. Tests changed,
+  product code did not.
+
 ### Added
 
 - **Lane pin expiry (TIN-5770).** Set `nix.pin_expiry_roots` to lane
