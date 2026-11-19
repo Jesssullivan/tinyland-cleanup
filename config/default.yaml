@@ -257,6 +257,15 @@ nix:
   # deferrals, behind the same pins and lock. 0 is off: critical passes then
   # wait for the two bounds above.
   critical_max_busy_deferrals: 0
+  # Replaces max_freed_per_pass for a critical pass; empty uses that value.
+  critical_max_freed_per_pass: ""
+  # Pin expiry: lane directories whose named GC-root symlinks older than
+  # pin_expiry_after are removed before a due GC pass. Empty roots is off.
+  pin_expiry_roots: []
+  pin_expiry_after: 14d
+  pin_expiry_max_depth: 6
+  pin_expiry_max_per_pass: 500
+  pin_expiry_receipt_file: ""
   max_gc_duration: 20m
   # When dry-run GC reports no reclaimable space, show up to this many visible
   # GC roots so operators can identify what is pinning the store. Set 0 to

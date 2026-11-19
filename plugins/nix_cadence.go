@@ -32,6 +32,11 @@ type nixGCState struct {
 	DeferredPasses  int       `json:"deferred_passes"`
 	FirstDeferredAt time.Time `json:"first_deferred_at,omitempty"`
 	LastDeferral    string    `json:"last_deferral,omitempty"`
+	// LastBesideActiveWork and LastBesideActiveWorkBy record the latest pass
+	// that ran while active Nix work was detected, and the bound that
+	// released it.
+	LastBesideActiveWork   time.Time `json:"last_beside_active_work,omitempty"`
+	LastBesideActiveWorkBy string    `json:"last_beside_active_work_by,omitempty"`
 }
 
 // recordDeferral counts one deferred due pass.
@@ -181,7 +186,17 @@ func nixParseMaxFreed(raw string) (int64, error) {
 
 // nixMaxFreedArgs returns the --max-freed bound for one GC pass.
 func nixMaxFreedArgs(cfg config.NixConfig, logger *slog.Logger) []string {
-	n, err := nixParseMaxFreed(cfg.MaxFreedPerPass)
+	return nixMaxFreedArgsAt(cfg, LevelNone, logger)
+}
+
+// nixMaxFreedArgsAt is nixMaxFreedArgs for a pass at level: critical passes
+// use critical_max_freed_per_pass when it is set.
+func nixMaxFreedArgsAt(cfg config.NixConfig, level CleanupLevel, logger *slog.Logger) []string {
+	raw := cfg.MaxFreedPerPass
+	if level >= LevelCritical && strings.TrimSpace(cfg.CriticalMaxFreedPerPass) != "" {
+		raw = cfg.CriticalMaxFreedPerPass
+	}
+	n, err := nixParseMaxFreed(raw)
 	if err != nil {
 		logger.Warn("using the default per-pass GC bound", "error", err, "bytes", nixDefaultMaxFreedPerPass)
 		n = nixDefaultMaxFreedPerPass

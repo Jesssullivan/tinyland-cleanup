@@ -1123,6 +1123,23 @@ type NixConfig struct {
 	// 0 (the default) leaves critical passes under max_busy_deferrals and
 	// max_busy_deferral_duration only.
 	CriticalMaxBusyDeferrals int `yaml:"critical_max_busy_deferrals"`
+	// CriticalMaxFreedPerPass replaces max_freed_per_pass for a pass at
+	// critical level (same syntax). Empty uses max_freed_per_pass.
+	CriticalMaxFreedPerPass string `yaml:"critical_max_freed_per_pass"`
+	// PinExpiryRoots are the lane directories whose named GC-root symlinks
+	// (nix build -o links, gcroots entries) expire. Entries are directories
+	// or globs, with ~ expanded. Empty turns expiry off.
+	PinExpiryRoots []string `yaml:"pin_expiry_roots"`
+	// PinExpiryAfter is how old a link's own mtime must be before it expires
+	// (default 14d).
+	PinExpiryAfter string `yaml:"pin_expiry_after"`
+	// PinExpiryMaxDepth bounds the walk below each root (default 6).
+	PinExpiryMaxDepth int `yaml:"pin_expiry_max_depth"`
+	// PinExpiryMaxPerPass bounds removals in one pass (default 500).
+	PinExpiryMaxPerPass int `yaml:"pin_expiry_max_per_pass"`
+	// PinExpiryReceiptFile receives one JSON line per removed link (default
+	// ~/.local/state/tinyland-cleanup/pin-expiry-receipts.jsonl).
+	PinExpiryReceiptFile string `yaml:"pin_expiry_receipt_file"`
 	// MaxGCDuration bounds nix-collect-garbage and related Nix commands.
 	MaxGCDuration string `yaml:"max_gc_duration"`
 	// RootAttributionLimit limits visible GC root targets in low-reclaim dry-runs.

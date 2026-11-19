@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Lane pin expiry (TIN-5770).** Set `nix.pin_expiry_roots` to lane
+  directories (globs and `~` allowed) and a symlink there whose own mtime is
+  older than `nix.pin_expiry_after` (default 14d) is removed before a due GC
+  pass, so the pass can collect the closure the pin held. Only the link goes.
+  A link is skipped when it is not a symlink, belongs to another user, does
+  not point into the Nix store, is a profile generation link, sits under a
+  `profiles` directory or the hook-pin directory, or is covered by a
+  `.keep` file (beside it as `<link>.keep`, or in its directory or any
+  directory above it inside the root). Each removal is one JSON line, with
+  link and target, in `nix.pin_expiry_receipt_file`. `--dry-run` lists the
+  links as `nix_pin_expiry` targets. `pin_expiry_max_depth` (6) and
+  `pin_expiry_max_per_pass` (500) bound a pass. With no roots set it does
+  nothing.
+- `nix.critical_max_freed_per_pass` replaces `max_freed_per_pass` for a
+  critical pass. The GC state file records `last_beside_active_work` and
+  `last_beside_active_work_by` when a pass ran while Nix work was active.
+
 ## [0.5.2] - 2026-11-18
 
 ### Upgrade notes

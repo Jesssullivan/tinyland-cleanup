@@ -102,6 +102,17 @@ nix:
   max_busy_deferrals: 72
   max_busy_deferral_duration: 6h
   critical_max_busy_deferrals: 0
+  # Replaces max_freed_per_pass for a critical pass; empty uses that value.
+  critical_max_freed_per_pass: ""
+  # Lane pin expiry: symlinks under these directories whose own mtime is older
+  # than pin_expiry_after are removed before a due pass. Empty is off. A
+  # ".keep" file (or "<link>.keep") protects a link; profiles and the hook-pin
+  # directory are never touched. Removals go to pin_expiry_receipt_file.
+  pin_expiry_roots: []
+  pin_expiry_after: 14d
+  pin_expiry_max_depth: 6
+  pin_expiry_max_per_pass: 500
+  pin_expiry_receipt_file: ""
   max_gc_duration: 20m
   root_attribution_limit: 20
   reap_stale_gc_roots: false
