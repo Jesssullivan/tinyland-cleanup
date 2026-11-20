@@ -41,6 +41,11 @@ func newPinFixture(t *testing.T) *pinFixture {
 	f.cfg.Nix.PinExpiryReceiptFile = f.receipt
 	f.state = filepath.Join(dir, "pin-state.json")
 	f.cfg.Nix.PinExpiryStateFile = f.state
+	// Observation began long ago, so the first-window spare does not apply
+	// unless a test removes the state file.
+	if err := saveNixPinUseState(f.state, nixPinUseState{ObservedSince: f.now.Add(-60 * 24 * time.Hour), Links: map[string]nixPinUseEntry{}}); err != nil {
+		t.Fatal(err)
+	}
 	// A complete, empty inventory: nothing is in use unless a test says so.
 	f.activity = newBBActivity()
 	f.p.pinActivity = func(context.Context, bbActivityOptions) *bbActivity {

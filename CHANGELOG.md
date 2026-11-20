@@ -21,6 +21,21 @@ All notable changes to this project will be documented in this file.
   stands. The first time a link is spared for a reason, one receipt line
   records it with `"action": "spared"` and the reason; removal lines now
   carry `"action": "removed"`. An unreadable state file stops removals.
+- **First window after upgrade.** When the state file is absent, the pass
+  writes `observed_since` and spares every expired link until
+  `nix.pin_expiry_after` has passed since then, with an `observing` receipt
+  line. Upgrading from 0.5.3 removes nothing for 14 days.
+- **Stamps every poll on Linux.** A `/proc`-only inventory stamps links in
+  use on every poll, not only on GC passes. lsof runs only on the removal
+  pass. Darwin stamps on GC passes only, because its only inventory is a
+  full lsof listing.
+- **Re-check before removal.** Each link is read again just before it is
+  removed and kept if its target or mtime changed since the walk.
+- **lsof listings (all lanes).** A listing killed by a signal, or with no
+  final newline, is a partial inventory even when it printed output. This
+  also applies to bazel_bases and the Bazel repository contents dedupe. On
+  Darwin, pin expiry also counts a live process of this user that the
+  listing does not name as a partial inventory.
 
 ## [0.5.3] - 2026-11-19
 

@@ -95,3 +95,31 @@ func TestPinExpiryFakeLsofSparesPin(t *testing.T) {
 		t.Fatalf("removed on a failed lsof (n=%d)", n)
 	}
 }
+
+func TestBBLsofIndexKilledOrTruncatedListingIsIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]string{
+		"killed":    "#!/bin/sh\nprintf 'p1\\nn/nix/store/abc-x\\n'\nkill -9 $$\n",
+		"truncated": "#!/bin/sh\nprintf 'p1\\nn/nix/store/abc-x'\n",
+	}
+	for name, script := range cases {
+		lsof := filepath.Join(dir, name)
+		if err := os.WriteFile(lsof, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		a := newBBActivity()
+		bbLsofIndex(context.Background(), a, bbActivityOptions{Lsof: lsof, UseLsof: true})
+		if a.complete() == "" {
+			t.Fatalf("%s listing counted as complete", name)
+		}
+	}
+	whole := filepath.Join(dir, "whole")
+	if err := os.WriteFile(whole, []byte("#!/bin/sh\nprintf 'p7\\nn/nix/store/abc-x\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := newBBActivity()
+	bbLsofIndex(context.Background(), a, bbActivityOptions{Lsof: whole, UseLsof: true})
+	if a.complete() != "" || !a.lsofPids[7] {
+		t.Fatalf("whole listing: %q pids=%v", a.complete(), a.lsofPids)
+	}
+}
