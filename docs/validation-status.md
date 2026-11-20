@@ -4,26 +4,36 @@ Updated: 2026-11-20
 
 ## v0.5.4 (TIN-5770)
 
-- **Scope:** #188, the one change on main since v0.5.3. Lane pin expiry
-  spares a link whose target is in active use (a process holds it or names
-  it), or was seen in use within `nix.pin_expiry_after`, and spares every
-  expired link when the process inventory is partial. It adds
-  `nix.pin_expiry_state_file`, `nix.pin_expiry_lsof` and the two
-  `nix.pin_expiry_uninspectable_ok_*` lists, and a `spared` receipt line.
-- **Validated on Linux** (sting, x86_64, Go 1.26) by the author: the pin
-  expiry tests passed (21, 12 new), with a fake inventory, a fake `/proc`
-  tree and a fake lsof listing. `go test ./...` passed except
-  `TestHomeLanesStaleWorkRecheckAsksGitAgain`, which depends on free space
-  on /srv/fast-local and fails the same way on v0.5.3. `go vet` passed on
-  Linux and, with cgo off, for darwin/arm64.
+- **Scope:** #188, the one change on main since v0.5.3, with its review
+  fixes (3affa370). Lane pin expiry spares a link whose target is in
+  active use (a process holds it or names it), or was seen in use within
+  `nix.pin_expiry_after`. It spares every expired link when the process
+  inventory is partial, and for one window after the state file starts
+  (`observed_since`). Each link is read again before removal and kept if
+  its target or mtime changed. Linux stamps from `/proc` every poll; lsof
+  runs on the removal pass only. New keys: `nix.pin_expiry_state_file`,
+  `nix.pin_expiry_lsof` and the two `nix.pin_expiry_uninspectable_ok_*`
+  lists.
+- **Shared lsof change:** a listing killed by a signal, or with no final
+  newline, now counts as a partial inventory in every lane, bazel_bases
+  and the Bazel repository contents dedupe included. On Darwin, pin expiry
+  also counts a live same-user process missing from the listing.
+- **Validated on Linux** (sting, x86_64, Go 1.26) by the author, at the
+  #188 head 3affa370: the pin expiry and lsof tests passed (27, with a
+  fake inventory, a fake `/proc` tree and fake lsof scripts), and the
+  bazel_bases tests passed with the shared lsof change. `go vet` passed on
+  Linux and, with cgo off, for darwin/arm64, where the plugins tests also
+  compile. At the merge commit `go test . ./config` passed.
+  `TestHomeLanesStaleWorkRecheckAsksGitAgain` depends on free space on
+  /srv/fast-local and fails the same way on v0.5.3.
 - **Store atime:** `/nix` is xfs `noatime` on sting and declared APFS
   `noatime` on PZM, so the release relies on the inventory and the
   per-link stamp, not on atime.
 - **The release commit** changes only the version strings, this file and
-  the changelog.
+  the changelog; a merge commit brings in the #188 review fixes.
 - **Not validated:** CI, the Bazel build and test graph, the release
-  workflow, a Darwin test run, and any host run of pin expiry in apply
-  mode.
+  workflow, a Darwin test run, the Darwin same-user lsof check against a
+  real listing, and any host run of pin expiry in apply mode.
 
 ## v0.5.3 (TIN-5770)
 
