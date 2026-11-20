@@ -270,7 +270,9 @@ nix:
   # its command line is spared, and so is one seen in use within
   # pin_expiry_after (stamped in pin_expiry_state_file). An incomplete
   # process inventory spares every link for that pass. lsof: empty uses
-  # bazel_bases.lsof, then on Darwin the lsof on PATH.
+  # bazel_bases.lsof, then on Darwin the lsof on PATH. Without a state file
+  # nothing expires for one window (observed_since). Linux stamps every poll
+  # from /proc; lsof runs on the removal pass only.
   pin_expiry_state_file: ""
   pin_expiry_lsof: ""
   pin_expiry_uninspectable_ok_comms: []

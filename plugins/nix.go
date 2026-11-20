@@ -38,6 +38,10 @@ type NixPlugin struct {
 	// pinActivity replaces the pin expiry process inventory in tests; nil
 	// uses bbScanActivity (/proc on Linux, lsof on Darwin).
 	pinActivity func(ctx context.Context, opts bbActivityOptions) *bbActivity
+	// pinPollStampOn overrides whether the per-poll pin stamp runs (default:
+	// Linux only); pinPreRemove runs just before a link's removal re-check.
+	pinPollStampOn *bool
+	pinPreRemove   func(link string)
 	// memState is the in-memory record of the last pass and the current run
 	// of deferrals, read when nix.gc_state_file is empty.
 	memState nixGCState
@@ -274,6 +278,10 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 	if pinErr != nil {
 		logger.Warn("hook-path pins could not be established", "error", pinErr)
 	}
+
+	// Lane pin use is stamped every poll (Linux, /proc only), not only when
+	// a GC is due, so a lane that runs between two passes leaves a stamp.
+	p.stampPinsInUse(ctx, cfg, logger)
 
 	statePath := nixGCStatePath(cfg.Nix)
 	st := loadNixGCState(statePath)

@@ -137,6 +137,11 @@ type bbActivityOptions struct {
 	// so a lane sets this only after reading whether its roots could contain
 	// one. Linux only: Darwin reads no /proc.
 	SkipSSHDSessions bool
+	// RequireLsofSameUser (Darwin) makes the inventory incomplete when a
+	// live, non-zombie process of this user whose comm is not in OKComms is
+	// missing from the lsof listing: lsof could not read its files. Pin
+	// expiry sets it; bazel_bases does not.
+	RequireLsofSameUser bool
 	// StartTimes records each process's start time (Linux reads
 	// /proc/<pid>/stat for it; Darwin has it from the process list anyway).
 	StartTimes bool
@@ -162,6 +167,8 @@ type bbActivity struct {
 	// skipped are the pids of unreadable processes SkipSSHDSessions let pass.
 	skipped   []int
 	lsofError string
+	// lsofPids are the processes the lsof listing named (its p records).
+	lsofPids map[int]bool
 }
 
 type bbProc struct {
@@ -246,6 +253,28 @@ func bbIndexEnviron(a *bbActivity, pid int, env []string, opts bbActivityOptions
 			}
 		}
 	}
+}
+
+// bbOwnProc is a process of this user as the process list saw it.
+type bbOwnProc struct {
+	pid    int
+	comm   string
+	zombie bool
+}
+
+// bbLsofMissingOwn lists the live, non-zombie processes of this user that
+// the lsof listing did not name, unless their comm is in okComms. alive
+// re-checks a process after the listing, so one that exited in between
+// does not count.
+func bbLsofMissingOwn(listed map[int]bool, own []bbOwnProc, okComms map[string]bool, alive func(pid int) bool) []string {
+	var out []string
+	for _, p := range own {
+		if listed[p.pid] || p.zombie || okComms[p.comm] || !alive(p.pid) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("pid %d (%s) is not in the lsof listing: its files are unreadable", p.pid, p.comm))
+	}
+	return out
 }
 
 func (a *bbActivity) proc(pid int) (bbProc, bool) {

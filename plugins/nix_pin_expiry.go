@@ -25,7 +25,11 @@
 // is spared as well, so a pin used in the last 14 days survives a pass that
 // runs between two uses. Store atime is not used: /nix is mounted noatime on
 // sting and on PZM, so it does not record use. The first time a link is
-// spared for a reason, one receipt line records it.
+// spared for a reason, one receipt line records it. Until pin_expiry_after
+// has passed since the state file began (observed_since), every expired link
+// is spared. On Linux a /proc-only stamp runs every poll; lsof runs only on
+// the removal pass. Each link is read again just before removal and kept if
+// its target or mtime changed since the walk.
 package plugins
 
 import (
@@ -65,6 +69,7 @@ const (
 	nixPinSpareInUse      = "in_use"
 	nixPinSpareSeenInUse  = "seen_in_use"
 	nixPinSpareIncomplete = "inventory_incomplete"
+	nixPinSpareObserving  = "observing"
 )
 
 var nixProfileGenerationLink = regexp.MustCompile(`-\d+-link$`)
@@ -102,7 +107,11 @@ type nixPinExpiryReceipt struct {
 // nixPinUseState is the pin expiry state file: per link, when its target
 // was last seen in use and which spare reason was last receipted.
 type nixPinUseState struct {
-	Links map[string]nixPinUseEntry `json:"links"`
+	// ObservedSince is when stamping began. Until pin_expiry_after has
+	// passed since then, the stamps cannot show that a link went unused for
+	// the whole window, so every expired link is spared.
+	ObservedSince time.Time                 `json:"observed_since,omitempty"`
+	Links         map[string]nixPinUseEntry `json:"links"`
 }
 
 type nixPinUseEntry struct {
@@ -208,6 +217,8 @@ func nixPinActivityOptions(cfg *config.Config, store string, roots []string) bbA
 		// An SSH session process runs no store path of a lane pin; its
 		// parent chain proves what it is.
 		SkipSSHDSessions: true,
+		// Darwin: a process of this user that lsof cannot read is a hole.
+		RequireLsofSameUser: true,
 	}
 	opts.Within = append(opts.Within, uniquePaths(store, resolvedOrSelf(store))...)
 	for _, r := range roots {
@@ -358,6 +369,11 @@ func (p *NixPlugin) pinActivityScan(ctx context.Context, opts bbActivityOptions)
 // spares. It writes nothing; st is updated in memory.
 func (p *NixPlugin) decidePinExpiry(ctx context.Context, cfg *config.Config, now time.Time, st nixPinUseState) nixPinDecision {
 	d := nixPinDecision{State: st}
+	if d.State.ObservedSince.IsZero() {
+		// No state file yet (or one from before observed_since): observing
+		// starts now, and nothing expires for one window.
+		d.State.ObservedSince = now.UTC()
+	}
 	links := p.nixPinExpiryWalk(cfg.Nix, now)
 	d.Links = len(links)
 	// Forget links that are gone.
@@ -377,23 +393,8 @@ func (p *NixPlugin) decidePinExpiry(ctx context.Context, cfg *config.Config, now
 	activity := p.pinActivityScan(ctx, nixPinActivityOptions(cfg, p.storePath(), nixPinExpiryRootDirs(cfg.Nix)))
 	d.Incomplete = activity.complete()
 	for _, l := range links {
-		entry, ok := d.State.Links[l.Link]
-		if ok && entry.Target != l.Target {
-			// The link was replaced: its old stamps belong to another path.
-			entry, ok = nixPinUseEntry{}, false
-		}
-		entry.Target = l.Target
-		var users []string
-		for _, path := range uniquePaths(l.Target, l.Link) {
-			users = append(users, activity.blockers(path)...)
-		}
-		if len(users) > 0 {
-			entry.LastSeenInUse = now.UTC()
-			entry.LastSeenBy = users[0]
-		}
-		if len(users) > 0 || ok || entry.SpareReceipted != "" {
-			d.State.Links[l.Link] = entry
-		}
+		users := stampPinLink(&d.State, l, activity, now)
+		entry := d.State.Links[l.Link]
 		if !l.Expired {
 			continue
 		}
@@ -404,6 +405,9 @@ func (p *NixPlugin) decidePinExpiry(ctx context.Context, cfg *config.Config, now
 		case d.Incomplete != "":
 			d.Spared = append(d.Spared, nixSparedPin{nixExpiredPin: l.nixExpiredPin, Kind: nixPinSpareIncomplete,
 				Reason: d.Incomplete})
+		case now.Sub(d.State.ObservedSince) < age:
+			d.Spared = append(d.Spared, nixSparedPin{nixExpiredPin: l.nixExpiredPin, Kind: nixPinSpareObserving,
+				Reason: fmt.Sprintf("use has been observed only since %s, less than %s: the state file cannot yet show the link unused for the whole window", d.State.ObservedSince.UTC().Format(time.RFC3339), age)})
 		case !entry.LastSeenInUse.IsZero() && now.Sub(entry.LastSeenInUse) < age:
 			d.Spared = append(d.Spared, nixSparedPin{nixExpiredPin: l.nixExpiredPin, Kind: nixPinSpareSeenInUse,
 				Reason: fmt.Sprintf("target last seen in use %s (%s), within %s", entry.LastSeenInUse.UTC().Format(time.RFC3339), entry.LastSeenBy, age)})
@@ -412,6 +416,103 @@ func (p *NixPlugin) decidePinExpiry(ctx context.Context, cfg *config.Config, now
 		}
 	}
 	return d
+}
+
+// stampPinLink records in st whether a process in activity uses link l now,
+// and returns the uses found. A replaced link drops its old stamps.
+func stampPinLink(st *nixPinUseState, l nixPinLink, activity *bbActivity, now time.Time) []string {
+	entry, ok := st.Links[l.Link]
+	if ok && entry.Target != l.Target {
+		delete(st.Links, l.Link)
+		entry, ok = nixPinUseEntry{}, false
+	}
+	entry.Target = l.Target
+	var users []string
+	for _, path := range uniquePaths(l.Target, l.Link) {
+		users = append(users, activity.blockers(path)...)
+	}
+	if len(users) > 0 {
+		entry.LastSeenInUse = now.UTC()
+		entry.LastSeenBy = users[0]
+	}
+	if len(users) > 0 || ok || entry.SpareReceipted != "" {
+		st.Links[l.Link] = entry
+	}
+	return users
+}
+
+// stampPinsInUse is the cheap per-poll stamp: a /proc-only inventory (no
+// lsof) on Linux, run every poll, so a lane that runs between two GC passes
+// still leaves a stamp. It removes nothing. On Darwin the only inventory is
+// a full lsof listing, so Darwin stamps on GC passes only. A partial
+// inventory still stamps what it saw; it cannot clear a stamp.
+func (p *NixPlugin) stampPinsInUse(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
+	if !nixPinExpiryEnabled(cfg.Nix) || !p.pinPollStamp() {
+		return
+	}
+	now := p.clock()
+	statePath := nixPinExpiryStatePath(cfg.Nix)
+	st, err := loadNixPinUseState(statePath)
+	if err != nil {
+		logger.Warn("pin use stamp skipped: state file is unreadable", "path", statePath, "error", err)
+		return
+	}
+	fresh := st.ObservedSince.IsZero()
+	if fresh {
+		st.ObservedSince = now.UTC()
+	}
+	links := p.nixPinExpiryWalk(cfg.Nix, now)
+	stamped := 0
+	if len(links) > 0 {
+		opts := nixPinActivityOptions(cfg, p.storePath(), nixPinExpiryRootDirs(cfg.Nix))
+		opts.UseLsof = false
+		activity := p.pinActivityScan(ctx, opts)
+		for _, l := range links {
+			if len(stampPinLink(&st, l, activity, now)) > 0 {
+				stamped++
+			}
+		}
+	}
+	if stamped == 0 && !fresh {
+		return
+	}
+	if err := saveNixPinUseState(statePath, st); err != nil {
+		logger.Warn("could not record pin use stamps", "path", statePath, "error", err)
+	}
+}
+
+func (p *NixPlugin) pinPollStamp() bool {
+	if p.pinPollStampOn != nil {
+		return *p.pinPollStampOn
+	}
+	return runtime.GOOS == "linux"
+}
+
+// pinUnchanged re-reads a link just before removal and reports why it may
+// not be removed: it is gone, no longer a symlink, has a new mtime, or
+// points somewhere else than the walk saw.
+func (p *NixPlugin) pinUnchanged(e nixExpiredPin) string {
+	info, err := os.Lstat(e.Link)
+	if err != nil {
+		return "link unreadable: " + err.Error()
+	}
+	if info.Mode()&fs.ModeSymlink == 0 {
+		return "no longer a symlink"
+	}
+	if !info.ModTime().Equal(e.MTime) {
+		return fmt.Sprintf("mtime changed from %s to %s", e.MTime.UTC().Format(time.RFC3339Nano), info.ModTime().UTC().Format(time.RFC3339Nano))
+	}
+	target, err := os.Readlink(e.Link)
+	if err != nil {
+		return "link unreadable: " + err.Error()
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(e.Link), target)
+	}
+	if target != e.Target {
+		return "target changed to " + target
+	}
+	return ""
 }
 
 // planPinExpiry lists the links a pass would remove, and the expired links
@@ -478,8 +579,9 @@ func (p *NixPlugin) expirePins(ctx context.Context, cfg *config.Config, logger *
 		logger.Warn("pin expiry skipped: state file is unreadable", "path", statePath, "error", err)
 		return 0
 	}
+	fresh := st.ObservedSince.IsZero()
 	d := p.decidePinExpiry(ctx, cfg, now, st)
-	if d.Links == 0 && len(st.Links) == 0 {
+	if d.Links == 0 && len(st.Links) == 0 && !fresh {
 		return 0
 	}
 	receiptPath := nixPinExpiryReceiptPath(cfg.Nix)
@@ -545,6 +647,13 @@ func (p *NixPlugin) expirePins(ctx context.Context, cfg *config.Config, logger *
 	}
 	removed := 0
 	for _, e := range d.Expired {
+		if p.pinPreRemove != nil {
+			p.pinPreRemove(e.Link)
+		}
+		if why := p.pinUnchanged(e); why != "" {
+			logger.Warn("pin expiry kept a link that changed since the walk", "link", e.Link, "reason", why)
+			continue
+		}
 		if !write("removed", e, "") {
 			break
 		}
