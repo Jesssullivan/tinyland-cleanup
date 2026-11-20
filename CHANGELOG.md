@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-20
+
 ### Changed
 
 - **Lane pin expiry spares pins in active use (TIN-5770, "Spare pins in
