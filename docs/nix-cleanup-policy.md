@@ -113,6 +113,15 @@ nix:
   pin_expiry_max_depth: 6
   pin_expiry_max_per_pass: 500
   pin_expiry_receipt_file: ""
+  # A link whose target a process holds (exe, cwd, fd, mapping) or names on
+  # its command line is spared, and so is one seen in use within
+  # pin_expiry_after (stamped in pin_expiry_state_file). An incomplete
+  # process inventory spares every link for that pass. lsof: empty uses
+  # bazel_bases.lsof, then on Darwin the lsof on PATH.
+  pin_expiry_state_file: ""
+  pin_expiry_lsof: ""
+  pin_expiry_uninspectable_ok_comms: []
+  pin_expiry_uninspectable_ok_units: []
   max_gc_duration: 20m
   root_attribution_limit: 20
   reap_stale_gc_roots: false

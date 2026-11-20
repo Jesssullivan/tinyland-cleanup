@@ -1140,6 +1140,24 @@ type NixConfig struct {
 	// PinExpiryReceiptFile receives one JSON line per removed link (default
 	// ~/.local/state/tinyland-cleanup/pin-expiry-receipts.jsonl).
 	PinExpiryReceiptFile string `yaml:"pin_expiry_receipt_file"`
+	// PinExpiryStateFile records, per link, when its target was last seen in
+	// use, so a link used within pin_expiry_after is spared (default
+	// ~/.local/state/tinyland-cleanup/pin-expiry-state.json). An unreadable
+	// state file stops removals.
+	PinExpiryStateFile string `yaml:"pin_expiry_state_file"`
+	// PinExpiryLsof is the lsof binary for the in-use check. Empty uses
+	// bazel_bases.lsof, then on Darwin the lsof on PATH. Required on Darwin,
+	// where it is the open-file inventory; a second witness on Linux.
+	PinExpiryLsof string `yaml:"pin_expiry_lsof"`
+	// PinExpiryUninspectableOKComms are process names of this user whose fd
+	// tables may be unreadable without making the in-use inventory
+	// incomplete. Each entry asserts that the process holds no lane pin's
+	// store path. Empty by default.
+	PinExpiryUninspectableOKComms []string `yaml:"pin_expiry_uninspectable_ok_comms"`
+	// PinExpiryUninspectableOKUnits are systemd user units (the last segment
+	// of /proc/<pid>/cgroup) with the same assertion. Linux only. Empty by
+	// default.
+	PinExpiryUninspectableOKUnits []string `yaml:"pin_expiry_uninspectable_ok_units"`
 	// MaxGCDuration bounds nix-collect-garbage and related Nix commands.
 	MaxGCDuration string `yaml:"max_gc_duration"`
 	// RootAttributionLimit limits visible GC root targets in low-reclaim dry-runs.

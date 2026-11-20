@@ -35,6 +35,9 @@ type NixPlugin struct {
 	liveCwds          func() ([]string, error)
 	// activeWork replaces process inspection in tests; nil uses ps.
 	activeWork func(ctx context.Context) ([]string, nixProcessInspection, error)
+	// pinActivity replaces the pin expiry process inventory in tests; nil
+	// uses bbScanActivity (/proc on Linux, lsof on Darwin).
+	pinActivity func(ctx context.Context, opts bbActivityOptions) *bbActivity
 	// memState is the in-memory record of the last pass and the current run
 	// of deferrals, read when nix.gc_state_file is empty.
 	memState nixGCState
@@ -173,7 +176,7 @@ func (p *NixPlugin) PlanCleanup(ctx context.Context, level CleanupLevel, cfg *co
 		}
 	}
 
-	pinTargets, pinMetadata, pinWarnings := p.planPinExpiry(cfg)
+	pinTargets, pinMetadata, pinWarnings := p.planPinExpiry(ctx, cfg)
 	plan.Targets = append(plan.Targets, pinTargets...)
 	for key, value := range pinMetadata {
 		plan.Metadata[key] = value
@@ -292,7 +295,7 @@ func (p *NixPlugin) Cleanup(ctx context.Context, level CleanupLevel, cfg *config
 		return result
 	}
 	// Expired lane pins go before the collection they were holding off.
-	p.expirePins(cfg, logger)
+	p.expirePins(ctx, cfg, logger)
 	// The hook-path pins, the serialization markers and the GC lock are
 	// safety invariants: no deferral bound bypasses them. Each deferral is
 	// still counted in the GC state, and once the run of deferrals passes

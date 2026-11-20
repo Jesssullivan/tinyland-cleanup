@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Lane pin expiry spares pins in active use (TIN-5770, "Spare pins in
+  active use").** 0.5.3 removed
+  `/srv/fast-local/jess/gcroots/kitpip-0.1.0-x86_64-linux` on sting, a
+  22-day-old link a running lane still used. Before a pass removes an
+  expired link it now takes one process inventory (the bazel_bases one:
+  `/proc` on Linux, `lsof` on Darwin). A link is spared when a process
+  holds its target or a path under it as exe, cwd, root, open fd or
+  mapping, or names the link or the target on its command line. A failed
+  or partial inventory spares every expired link for that pass. Each link
+  seen in use is stamped in `nix.pin_expiry_state_file`, and a link seen in
+  use within `nix.pin_expiry_after` is spared too. Store atime is not used,
+  because `/nix` is mounted `noatime` on sting and PZM. The `.keep` rule
+  stands. The first time a link is spared for a reason, one receipt line
+  records it with `"action": "spared"` and the reason; removal lines now
+  carry `"action": "removed"`. An unreadable state file stops removals.
+
 ## [0.5.3] - 2026-11-19
 
 ### Upgrade notes
