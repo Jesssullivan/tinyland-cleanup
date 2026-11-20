@@ -59,10 +59,15 @@ func bbScanActivity(ctx context.Context, opts bbActivityOptions) *bbActivity {
 		return a
 	}
 	self := os.Getpid()
+	uid := uint32(os.Getuid())
+	var own []bbOwnProc
 	for _, kp := range procs {
 		pid := int(kp.Proc.P_pid)
 		if pid <= 0 || pid == self {
 			continue
+		}
+		if kp.Eproc.Ucred.Uid == uid {
+			own = append(own, bbOwnProc{pid: pid, comm: darwinComm(kp.Proc.P_comm[:]), zombie: kp.Proc.P_stat == darwinSZOMB})
 		}
 		argv, err := nixProcessArgv(pid)
 		cmdline := ""
@@ -87,7 +92,27 @@ func bbScanActivity(ctx context.Context, opts bbActivityOptions) *bbActivity {
 		opts.UseLsof = true
 	}
 	bbLsofIndex(ctx, a, opts)
+	if opts.RequireLsofSameUser && a.lsofError == "" {
+		a.incomplete = append(a.incomplete, bbLsofMissingOwn(a.lsofPids, own, procCommSet(opts.OKComms), darwinPidAlive)...)
+	}
 	return a
+}
+
+// darwinSZOMB is the BSD process state of a zombie (sys/proc.h SZOMB).
+const darwinSZOMB = 5
+
+func darwinComm(raw []byte) string {
+	for i, c := range raw {
+		if c == 0 {
+			return string(raw[:i])
+		}
+	}
+	return string(raw)
+}
+
+func darwinPidAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // bbLockHolder probes Bazel's lock without holding it: F_GETLK reports a

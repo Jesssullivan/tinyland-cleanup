@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -103,11 +105,30 @@ func bbLsofIndex(ctx context.Context, a *bbActivity, opts bbActivityOptions) {
 		a.lsofError = "lsof listing timed out"
 		return
 	}
+	// A listing cut short by a signal, or one whose last record has no
+	// final newline, is a partial inventory even with output (TIN-5770).
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			a.lsofError = "lsof listing killed by signal " + ws.Signal().String()
+			return
+		}
+	}
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		a.lsofError = "lsof listing truncated: no final newline"
+		return
+	}
+	if a.lsofPids == nil {
+		a.lsofPids = map[int]bool{}
+	}
 	self := fmt.Sprintf("p%d", os.Getpid())
 	skip := false
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(line, "p") {
 			skip = line == self
+			if pid, perr := strconv.Atoi(line[1:]); perr == nil {
+				a.lsofPids[pid] = true
+			}
 			continue
 		}
 		if skip || !strings.HasPrefix(line, "n/") {

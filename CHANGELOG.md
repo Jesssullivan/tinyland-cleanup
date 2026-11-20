@@ -4,6 +4,39 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Lane pin expiry spares pins in active use (TIN-5770, "Spare pins in
+  active use").** 0.5.3 removed
+  `/srv/fast-local/jess/gcroots/kitpip-0.1.0-x86_64-linux` on sting, a
+  22-day-old link a running lane still used. Before a pass removes an
+  expired link it now takes one process inventory (the bazel_bases one:
+  `/proc` on Linux, `lsof` on Darwin). A link is spared when a process
+  holds its target or a path under it as exe, cwd, root, open fd or
+  mapping, or names the link or the target on its command line. A failed
+  or partial inventory spares every expired link for that pass. Each link
+  seen in use is stamped in `nix.pin_expiry_state_file`, and a link seen in
+  use within `nix.pin_expiry_after` is spared too. Store atime is not used,
+  because `/nix` is mounted `noatime` on sting and PZM. The `.keep` rule
+  stands. The first time a link is spared for a reason, one receipt line
+  records it with `"action": "spared"` and the reason; removal lines now
+  carry `"action": "removed"`. An unreadable state file stops removals.
+- **First window after upgrade.** When the state file is absent, the pass
+  writes `observed_since` and spares every expired link until
+  `nix.pin_expiry_after` has passed since then, with an `observing` receipt
+  line. Upgrading from 0.5.3 removes nothing for 14 days.
+- **Stamps every poll on Linux.** A `/proc`-only inventory stamps links in
+  use on every poll, not only on GC passes. lsof runs only on the removal
+  pass. Darwin stamps on GC passes only, because its only inventory is a
+  full lsof listing.
+- **Re-check before removal.** Each link is read again just before it is
+  removed and kept if its target or mtime changed since the walk.
+- **lsof listings (all lanes).** A listing killed by a signal, or with no
+  final newline, is a partial inventory even when it printed output. This
+  also applies to bazel_bases and the Bazel repository contents dedupe. On
+  Darwin, pin expiry also counts a live process of this user that the
+  listing does not name as a partial inventory.
+
 ## [0.5.3] - 2026-11-19
 
 ### Upgrade notes

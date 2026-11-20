@@ -15,10 +15,12 @@ import (
 )
 
 type pinFixture struct {
-	root, store, receipt string
-	p                    *NixPlugin
-	cfg                  *config.Config
-	now                  time.Time
+	root, store, receipt, state string
+	p                           *NixPlugin
+	cfg                         *config.Config
+	now                         time.Time
+	activity                    *bbActivity
+	scans                       int
 }
 
 func newPinFixture(t *testing.T) *pinFixture {
@@ -37,6 +39,19 @@ func newPinFixture(t *testing.T) *pinFixture {
 	f.cfg = &config.Config{}
 	f.cfg.Nix.PinExpiryRoots = []string{f.root}
 	f.cfg.Nix.PinExpiryReceiptFile = f.receipt
+	f.state = filepath.Join(dir, "pin-state.json")
+	f.cfg.Nix.PinExpiryStateFile = f.state
+	// Observation began long ago, so the first-window spare does not apply
+	// unless a test removes the state file.
+	if err := saveNixPinUseState(f.state, nixPinUseState{ObservedSince: f.now.Add(-60 * 24 * time.Hour), Links: map[string]nixPinUseEntry{}}); err != nil {
+		t.Fatal(err)
+	}
+	// A complete, empty inventory: nothing is in use unless a test says so.
+	f.activity = newBBActivity()
+	f.p.pinActivity = func(context.Context, bbActivityOptions) *bbActivity {
+		f.scans++
+		return f.activity
+	}
 	return f
 }
 
@@ -78,10 +93,10 @@ func TestPinExpiryOffWithoutRoots(t *testing.T) {
 	f := newPinFixture(t)
 	old := f.pin(t, "old-result", 30)
 	f.cfg.Nix.PinExpiryRoots = nil
-	if n := f.p.expirePins(f.cfg, pinLogger()); n != 0 || !pinExists(old) {
+	if n := f.p.expirePins(context.Background(), f.cfg, pinLogger()); n != 0 || !pinExists(old) {
 		t.Fatalf("expiry ran without roots: removed=%d", n)
 	}
-	targets, md, _ := f.p.planPinExpiry(f.cfg)
+	targets, md, _ := f.p.planPinExpiry(context.Background(), f.cfg)
 	if len(targets) != 0 || md["pin_expiry"] != "false" {
 		t.Fatalf("plan not off: %v %v", targets, md)
 	}
@@ -104,7 +119,7 @@ func TestPinExpiryRemovesOnlyOldOwnedStoreLinks(t *testing.T) {
 	}
 	_ = os.Chtimes(regular, ts, ts)
 
-	if n := f.p.expirePins(f.cfg, pinLogger()); n != 1 {
+	if n := f.p.expirePins(context.Background(), f.cfg, pinLogger()); n != 1 {
 		t.Fatalf("removed %d, want 1", n)
 	}
 	if pinExists(old) {
@@ -133,7 +148,7 @@ func TestPinExpiryKeepFiles(t *testing.T) {
 	}
 	nested := f.pin(t, "kept/deeper/three", 30)
 	gone := f.pin(t, "a/four", 30)
-	if n := f.p.expirePins(f.cfg, pinLogger()); n != 1 {
+	if n := f.p.expirePins(context.Background(), f.cfg, pinLogger()); n != 1 {
 		t.Fatalf("removed %d, want 1", n)
 	}
 	for _, keep := range []string{beside, inDir, nested} {
@@ -152,7 +167,7 @@ func TestPinExpiryNeverTouchesHookPinsOrProfilesDirs(t *testing.T) {
 	f.cfg.Nix.HookPinDir = hook
 	hookLink := f.pin(t, "hook-pins/h1", 90)
 	profLink := f.pin(t, "profiles/p1", 90)
-	if n := f.p.expirePins(f.cfg, pinLogger()); n != 0 {
+	if n := f.p.expirePins(context.Background(), f.cfg, pinLogger()); n != 0 {
 		t.Fatalf("removed %d, want 0", n)
 	}
 	if !pinExists(hookLink) || !pinExists(profLink) {
@@ -163,14 +178,14 @@ func TestPinExpiryNeverTouchesHookPinsOrProfilesDirs(t *testing.T) {
 func TestPinExpiryReceiptAndDryRunPlan(t *testing.T) {
 	f := newPinFixture(t)
 	old := f.pin(t, "x/old", 15)
-	targets, md, _ := f.p.planPinExpiry(f.cfg)
+	targets, md, _ := f.p.planPinExpiry(context.Background(), f.cfg)
 	if len(targets) != 1 || targets[0].Path != old || md["pin_expiry_links"] != "1" {
 		t.Fatalf("plan = %v %v", targets, md)
 	}
 	if !pinExists(old) || pinExists(f.receipt) {
 		t.Fatal("planning must not remove or write a receipt")
 	}
-	if n := f.p.expirePins(f.cfg, pinLogger()); n != 1 {
+	if n := f.p.expirePins(context.Background(), f.cfg, pinLogger()); n != 1 {
 		t.Fatalf("removed %d", n)
 	}
 	raw, err := os.ReadFile(f.receipt)
@@ -190,7 +205,7 @@ func TestPinExpiryHonorsAgeAndPassLimit(t *testing.T) {
 	f.pin(t, "b", 10)
 	f.pin(t, "c", 10)
 	f.pin(t, "d", 3)
-	if n := f.p.expirePins(f.cfg, pinLogger()); n != 2 {
+	if n := f.p.expirePins(context.Background(), f.cfg, pinLogger()); n != 2 {
 		t.Fatalf("removed %d, want 2 (limit)", n)
 	}
 }
@@ -199,7 +214,7 @@ func TestPinExpiryGlobRoots(t *testing.T) {
 	f := newPinFixture(t)
 	f.cfg.Nix.PinExpiryRoots = []string{filepath.Join(filepath.Dir(f.root), "la*")}
 	old := f.pin(t, "g", 20)
-	if n := f.p.expirePins(f.cfg, pinLogger()); n != 1 || pinExists(old) {
+	if n := f.p.expirePins(context.Background(), f.cfg, pinLogger()); n != 1 || pinExists(old) {
 		t.Fatalf("glob root not expired: %d", n)
 	}
 }
